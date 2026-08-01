@@ -23,9 +23,17 @@ public struct APIKeyAuthenticator: Sendable {
 
     /// 校验 Authorization Bearer token 或 x-api-key。
     public func isValid(token: String?) -> Bool {
+        matchedKey(token) != nil
+    }
+
+    /// 校验并返回命中的网关 Key 原文（供 gateway key 级白名单过滤用）。
+    /// 未配置任何 key 时返回 nil（匿名开发模式）。
+    public func matchedKey(_ token: String?) -> String? {
         guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
-            return false
+            return nil
         }
-        return configuredKeys.contains(token) || envKeys.contains(token)
+        if configuredKeys.contains(token) { return token }
+        if envKeys.contains(token) { return token }
+        return nil
     }
 }

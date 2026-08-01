@@ -362,27 +362,35 @@ final class AppState: ObservableObject {
 
     // MARK: - 网关 API Key
 
-    /// 生成 `sk-tg-` + 32 位随机 hex（SecRandomCopyBytes）。
+    /// 生成 `sk-bv-` + 32 位随机 hex（SecRandomCopyBytes）。Phase 17：前缀从 `sk-tg-` 迁移到 `sk-bv-`。
+    /// 旧 `sk-tg-` key 仍可在配置中鉴权（向后兼容），仅新生成的 key 使用新前缀。
     func generateAPIKey() -> String {
         var bytes = [UInt8](repeating: 0, count: 16)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         guard status == errSecSuccess else { return "" }
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        return "sk-tg-\(hex)"
+        return "sk-bv-\(hex)"
     }
 
     /// 新增一个网关 Key 并持久化。
     @discardableResult
     func addGatewayKey() -> String {
         let key = generateAPIKey()
-        config.apiKeys.append(key)
+        config.apiKeys.append(GatewayKeyConfig(key: key))
         try? saveConfig()
         return key
     }
 
     /// 删除一个网关 Key 并持久化。
     func removeGatewayKey(_ key: String) {
-        config.apiKeys.removeAll { $0 == key }
+        config.apiKeys.removeAll { $0.key == key }
+        try? saveConfig()
+    }
+
+    /// 设置某网关 Key 的模型白名单（Phase 12）。`nil` = 全部启用；空数组 = 禁用全部模型。
+    func setGatewayKeyEnabledModels(_ key: String, enabledModels: [String]?) {
+        guard let idx = config.apiKeys.firstIndex(where: { $0.key == key }) else { return }
+        config.apiKeys[idx].enabledModels = enabledModels
         try? saveConfig()
     }
 
@@ -460,14 +468,14 @@ extension AppState {
 
         // 网关 Key 生成
         let key = state.generateAPIKey()
-        check("API Key 前缀正确", key.hasPrefix("sk-tg-"))
+        check("API Key 前缀正确", key.hasPrefix("sk-bv-"))
         check("API Key 长度正确", key.count == 6 + 32)
 
         // 配置持久化
-        state.config.apiKeys = [key]
+        state.config.apiKeys = [GatewayKeyConfig(key: key)]
         try? state.saveConfig()
         let reloaded = (try? ConfigStore.load(path: configPath)) ?? RouteConfig()
-        check("配置持久化成功", reloaded.apiKeys == [key])
+        check("配置持久化成功", reloaded.gatewayKeyStrings == [key])
 
         // 服务器启停（用探测到的空闲端口）
         do {

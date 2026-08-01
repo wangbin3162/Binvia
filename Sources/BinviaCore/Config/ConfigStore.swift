@@ -27,7 +27,23 @@ public enum ConfigStore {
         let data = try Data(contentsOf: URL(fileURLWithPath: resolved))
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(RouteConfig.self, from: data)
+        var config = try decoder.decode(RouteConfig.self, from: data)
+        // v1 → v2 自动迁移：旧 `apiKeys: [String]` 已在 RouteConfig 解码时转为对象数组；
+        // 这里补升版本号、备份原文件并写回。
+        if config.version < 2 {
+            try backupLegacyConfig(at: resolved)
+            config.version = 2
+            try save(config, to: resolved)
+        }
+        return config
+    }
+
+    /// 迁移前把旧版配置文件备份为 `config.json.v1.bak`（不覆盖既有备份）。
+    private static func backupLegacyConfig(at path: String) throws {
+        let fm = FileManager.default
+        let backup = path + ".v1.bak"
+        guard !fm.fileExists(atPath: backup) else { return }
+        try fm.copyItem(atPath: path, toPath: backup)
     }
 
     public static func save(_ config: RouteConfig, to path: String? = nil) throws {

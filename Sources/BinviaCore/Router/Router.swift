@@ -6,6 +6,14 @@ import Foundation
 /// - `provider/model`：如 `deepseek/deepseek-v4-pro`
 /// - `alias/model`：如 `ds/deepseek-v4-pro`
 /// - `model`：裸模型名，在所有已注册 Provider 的静态目录中查找归属
+///
+/// 二期消歧升级（Phase 12，OmniRoute 风格三段式 + 兜底）：
+/// 1. **显式前缀**：`provider/model`、`alias/model` → 直接命中，最高优先。
+/// 2. **单候选直选**：裸模型名全局唯一供应商拥有 → 直接命中。
+/// 3. **前缀启发式**：按模型名前缀推断归属（`claude-*` → Claude 系、`gemini-*` → Gemini 系、
+///    `gpt-*` → OpenAI 系、`glm-*` → GLM 系、`deepseek-*` → DeepSeek 等），仅在多个供应商
+///    拥有同名模型时生效。
+/// 4. **前缀优先 + 字母序兜底**：模型 id 以供应商 id/别名开头者优先，仍歧义取字母序第一个。
 public struct Router: Sendable {
     public let registry: ProviderRegistry
 
@@ -28,6 +36,7 @@ public struct Router: Sendable {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
+        // 阶段 1：显式前缀
         if trimmed.contains("/") {
             let parts = trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2 else { return nil }
@@ -38,19 +47,56 @@ public struct Router: Sendable {
             return Resolution(providerID: canonical, modelID: modelPart)
         }
 
-        // 裸模型名：在静态目录中查找归属。多个供应商有同名模型时消歧：
-        // 1) 模型 id 以供应商 id 或别名开头（如 deepseek-v4-pro → deepseek）优先；
-        // 2) 仍歧义时取字母序第一个（确定性），文档提示用 provider/model 显式指定。
-        let matches = registry.allDescriptors().filter {
-            $0.models.contains(where: { $0.id == trimmed })
+        let owners = registry.providers(forModel: trimmed)
+        guard !owners.isEmpty else { return nil }
+
+        // 阶段 2：单候选直选
+        if owners.count == 1 {
+            return Resolution(providerID: owners[0], modelID: trimmed)
         }
-        if let explicit = matches.first(where: { descriptor in
-            trimmed.hasPrefix(descriptor.id) || (descriptor.alias.map { trimmed.hasPrefix($0) } ?? false)
+
+        // 阶段 3：前缀启发式（仅在多供应商拥有同名模型时消歧）
+        if let heuristic = prefixHeuristicMatch(trimmed, owners: owners) {
+            return Resolution(providerID: heuristic, modelID: trimmed)
+        }
+
+        // 阶段 4：前缀优先 + 字母序兜底（旧逻辑，保证确定性）
+        if let explicit = owners.first(where: { ownerID in
+            let descriptor = registry.descriptor(for: ownerID)
+            let alias = descriptor?.alias
+            return trimmed.hasPrefix(ownerID) || (alias.map { trimmed.hasPrefix($0) } ?? false)
         }) {
-            return Resolution(providerID: explicit.id, modelID: trimmed)
+            return Resolution(providerID: explicit, modelID: trimmed)
         }
-        if let first = matches.first {
-            return Resolution(providerID: first.id, modelID: trimmed)
+        if let first = owners.first {
+            return Resolution(providerID: first, modelID: trimmed)
+        }
+        return nil
+    }
+
+    /// 前缀启发式：模型家族前缀 → 供应商映射。仅当对应供应商确实拥有该模型时生效。
+    /// 映射规则（Phase 2 对齐）：`claude-*`/`gemini-*` → Antigravity（Claude/Gemini 系）、
+    /// `gpt-*`/`o3-*`/`o4-*` → OpenAI、`glm-*` → CodeBuddyCN/GLM 系、`deepseek-*` → DeepSeek、
+    /// `kimi-*` → Kimi、`qwen*` → QwenCloud、`minimax*` → MiniMax、`mimo-*` → XiaomiMiMo。
+    private func prefixHeuristicMatch(_ modelID: String, owners: [String]) -> String? {
+        let rules: [(prefix: String, providerID: String)] = [
+            ("claude", "antigravity"),   // Anthropic 系
+            ("gemini", "antigravity"),   // Gemini 系
+            ("gpt", "openai"),           // OpenAI 系
+            ("o3", "openai"),
+            ("o4", "openai"),
+            ("o1", "openai"),
+            ("glm", "codebuddy-cn"),     // GLM 系（CodeBuddyCN / z.ai）
+            ("deepseek", "deepseek"),
+            ("kimi", "kimi"),
+            ("qwen", "qwen-cloud"),
+            ("minimax", "minimax"),
+            ("mimo", "xiaomi-mimo"),
+        ]
+        for rule in rules where modelID.hasPrefix(rule.prefix) {
+            if owners.contains(rule.providerID) {
+                return rule.providerID
+            }
         }
         return nil
     }

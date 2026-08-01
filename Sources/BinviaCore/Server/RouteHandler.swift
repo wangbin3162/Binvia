@@ -10,7 +10,7 @@ public struct RouteHandler: Sendable {
 
     public init(config: RouteConfig, registry: ProviderRegistry = .shared) {
         self.config = config
-        self.authenticator = APIKeyAuthenticator(configuredKeys: config.apiKeys)
+        self.authenticator = APIKeyAuthenticator(configuredKeys: config.gatewayKeyStrings)
         self.router = Router(registry: registry)
         self.registry = registry
         self.logger = .shared
@@ -34,10 +34,37 @@ public struct RouteHandler: Sendable {
     // MARK: - 认证
 
     private func authorized(_ request: HTTPRequest) -> Bool {
+        authenticatedKey(request) != nil
+    }
+
+    /// 返回命中的网关 Key 原文（未配置 key 时允许匿名，返回 nil 但视为已授权）。
+    /// 调用方需用 `requiresAuthentication` 区分「匿名授权」与「认证失败」。
+    private func authenticatedKey(_ request: HTTPRequest) -> String? {
         if !authenticator.requiresAuthentication {
-            return true // 未配置 key 时允许匿名（开发模式，同 OmniRoute REQUIRE_API_KEY=false）
+            return nil // 未配置 key 时允许匿名（开发模式，同 OmniRoute REQUIRE_API_KEY=false）
         }
-        return authenticator.isValid(token: request.authorizationToken)
+        return authenticator.matchedKey(request.authorizationToken)
+    }
+
+    /// 网关 key 级 enabledModels 白名单过滤：命中白名单且模型不在其中 → 403。
+    private func enforceEnabledModels(_ key: String?, providerID: String, modelID: String) -> HTTPResponse? {
+        guard let key, let gateway = config.gatewayKeyConfig(for: key),
+              let enabled = gateway.enabledModels else {
+            return nil
+        }
+        let normalized = normalizedModelID(providerID: providerID, modelID: modelID)
+        if enabled.contains(normalized) { return nil }
+        return HTTPResponse.text(
+            403,
+            "{\"error\":\"Model \(normalized) is not enabled for this gateway key\"}",
+            contentType: "application/json"
+        )
+    }
+
+    /// 归一化模型 ID：`"<alias>/<modelID>"`（无别名用 provider id），与 enabledModels 白名单格式一致。
+    private func normalizedModelID(providerID: String, modelID: String) -> String {
+        let alias = registry.descriptor(for: providerID)?.alias ?? providerID
+        return "\(alias)/\(modelID)"
     }
 
     private func unauthorized() -> HTTPResponse {
@@ -76,9 +103,22 @@ public struct RouteHandler: Sendable {
             items.append(ModelItem(id: id, object: "model", ownedBy: providerID))
         }
 
+        // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 时，只返回白名单内模型
+        let allowedModels: Set<String>? = {
+            guard let key = authenticatedKey(request), let gateway = config.gatewayKeyConfig(for: key),
+                  let enabled = gateway.enabledModels else { return nil }
+            return Set(enabled)
+        }()
+        let isModelAllowed = { (aliasOrID: String, modelID: String) in
+            guard let allowedModels else { return true }
+            return allowedModels.contains("\(aliasOrID)/\(modelID)")
+        }
+
         for descriptor in registry.allDescriptors() {
             // 仅处理已注册且启用的 provider
             guard config.providers[descriptor.id]?.enabled ?? true else { continue }
+
+            let alias = descriptor.alias ?? descriptor.id
 
             // 尝试动态获取（失败静默回退静态目录）
             var dynamicModels: [Model]?
@@ -91,10 +131,10 @@ public struct RouteHandler: Sendable {
             }
 
             // 静态目录与动态结果合并，按 (provider, model id) 去重
-            for model in descriptor.models {
+            for model in descriptor.models where isModelAllowed(alias, model.id) {
                 appendModel(model.id, descriptor.id)
             }
-            for model in dynamicModels ?? [] {
+            for model in dynamicModels ?? [] where isModelAllowed(alias, model.id) {
                 appendModel(model.id, descriptor.id)
             }
         }
@@ -122,6 +162,18 @@ public struct RouteHandler: Sendable {
         }
         guard let provider = registry.provider(for: resolution.providerID) else {
             return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+        }
+
+        // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 且模型不在其中 → 403
+        if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
+            logger.log(RequestLogEntry(
+                timestamp: Date(),
+                method: request.method, path: request.path,
+                providerID: resolution.providerID, model: resolution.modelID,
+                statusCode: 403,
+                durationMS: 0,
+                error: "model not enabled for gateway key"))
+            return forbidden
         }
 
         var forwarded = chatRequest

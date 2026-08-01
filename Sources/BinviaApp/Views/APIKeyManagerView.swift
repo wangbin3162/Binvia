@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import BinviaCore
 
 /// 网关 API Key 管理：展示、复制、删除，以及生成新 Key。
 struct APIKeyManagerView: View {
@@ -33,8 +34,8 @@ struct APIKeyManagerView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(appState.config.apiKeys, id: \.self) { key in
-                            keyRow(key)
+                        ForEach(appState.config.apiKeys, id: \.key) { gateway in
+                            keyRow(gateway)
                         }
                     }
                     .padding(.vertical, 2)
@@ -53,11 +54,12 @@ struct APIKeyManagerView: View {
 
     /// 单个 Key 行：遮蔽显示 + 复制 + 删除。
     @MainActor
-    private func keyRow(_ key: String) -> some View {
-        HStack(spacing: 6) {
+    private func keyRow(_ gateway: GatewayKeyConfig) -> some View {
+        let key = gateway.key
+        return HStack(spacing: 6) {
             Image(systemName: "key")
                 .foregroundStyle(.secondary)
-            Text("sk-tg-••••\(key.suffix(4))")
+            Text("\(String(key.prefix(5)))••••\(key.suffix(4))")
                 .font(.system(.body, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.tail)

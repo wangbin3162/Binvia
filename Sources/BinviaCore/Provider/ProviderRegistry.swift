@@ -9,6 +9,9 @@ public final class ProviderRegistry: @unchecked Sendable {
     private var descriptorsByID: [String: ProviderDescriptor] = [:]
     private var providersByID: [String: any Provider] = [:]
     private var aliasMap: [String: String] = [:]
+    /// 模型名 → 拥有该模型的 provider id 列表（Phase 12 反向索引，Router 消歧用）。
+    /// 由 `register` 在静态目录注册时构建；动态模型不参与（路由只认静态目录兜底）。
+    private var modelToProviders: [String: [String]] = [:]
 
     public init() {}
 
@@ -19,6 +22,14 @@ public final class ProviderRegistry: @unchecked Sendable {
         providersByID[descriptor.id] = descriptor.makeProvider()
         if let alias = descriptor.alias {
             aliasMap[alias] = descriptor.id
+        }
+        // 反向索引：模型 → 拥有者集合（去重，保持插入序）
+        for model in descriptor.models {
+            var owners = modelToProviders[model.id] ?? []
+            if !owners.contains(descriptor.id) {
+                owners.append(descriptor.id)
+            }
+            modelToProviders[model.id] = owners
         }
     }
 
@@ -52,5 +63,12 @@ public final class ProviderRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         if descriptorsByID[idOrAlias] != nil { return idOrAlias }
         return aliasMap[idOrAlias]
+    }
+
+    /// 拥有指定静态模型名的全部 provider id（字母序，确定性）。空 = 无 provider 声明该模型。
+    public func providers(forModel modelID: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return (modelToProviders[modelID] ?? []).sorted()
     }
 }

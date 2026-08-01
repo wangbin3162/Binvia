@@ -223,6 +223,12 @@ func apiKeyAuthenticatorTests() {
     )
     expectEqual(viaHeader.authorizationToken, "secret-1", "x-api-key 头解析")
     expectTrue(single.isValid(token: viaHeader.authorizationToken), "x-api-key token 有效")
+
+    // Phase 17：旧 sk-tg- key 向后兼容（鉴权只认配置内容，不校验前缀）
+    let legacy = APIKeyAuthenticator(configuredKeys: ["sk-tg-legacy-key", "sk-bv-new-key"])
+    expectTrue(legacy.isValid(token: "sk-tg-legacy-key"), "旧 sk-tg- key 仍可鉴权")
+    expectTrue(legacy.isValid(token: "sk-bv-new-key"), "新 sk-bv- key 可鉴权")
+    expectFalse(legacy.isValid(token: "sk-other-key"), "未知前缀 key 拒绝")
 }
 
 // MARK: - RouteConfig
@@ -230,7 +236,7 @@ func apiKeyAuthenticatorTests() {
 func routeConfigTests() throws {
     // 默认值
     let defaults = RouteConfig()
-    expectEqual(defaults.version, 1, "默认 version")
+    expectEqual(defaults.version, 2, "默认 version")
     expectEqual(defaults.host, "127.0.0.1", "默认 host")
     expectEqual(defaults.port, 8231, "默认 port")
     expectEqual(defaults.apiKeys, [], "默认 apiKeys 为空")
@@ -276,12 +282,183 @@ func routeConfigTests() throws {
     expectEqual(pcDecoded, pc, "ProviderConfig round trip")
 
     let rc = RouteConfig(
-        version: 1, host: "0.0.0.0", port: 9999, apiKeys: ["router-key"],
+        version: 1, host: "0.0.0.0", port: 9999,
+        apiKeys: [GatewayKeyConfig(key: "router-key", enabledModels: ["ds/deepseek-v4-pro"])],
         providers: ["deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: ["a"])]
     )
     let rcData = try JSONEncoder().encode(rc)
     let rcDecoded = try JSONDecoder().decode(RouteConfig.self, from: rcData)
     expectEqual(rcDecoded, rc, "RouteConfig round trip")
+}
+
+// MARK: - ProviderRegistry 反向索引 + Router 消歧升级（Phase 12）
+
+func registryReverseIndexTests() {
+    ProviderCatalog.registerAll()
+    let registry = ProviderRegistry.shared
+
+    // deepseek-v4-pro 同时存在于 deepseek 与 codebuddy-cn 静态目录
+    let owners = registry.providers(forModel: "deepseek-v4-pro")
+    expectEqual(Set(owners), Set(["codebuddy-cn", "deepseek"]), "反向索引: deepseek-v4-pro 归属两家")
+
+    // 单 provider 模型
+    expectEqual(registry.providers(forModel: "glm-5.2"), ["codebuddy-cn"], "反向索引: glm-5.2 单归属")
+    expectEqual(registry.providers(forModel: "gemini-3.6-flash-high"), ["antigravity"], "反向索引: gemini 单归属")
+    expectEqual(registry.providers(forModel: "nope-model"), [], "反向索引: 未知模型空归属")
+}
+
+func routerDisambiguationTests() {
+    ProviderCatalog.registerAll()
+    let router = Router(registry: .shared)
+
+    // 阶段 2：单候选直选（唯一供应商拥有）
+    if let r = router.resolve("glm-5.1") {
+        expectEqual(r.providerID, "codebuddy-cn", "单候选 glm-5.1 → codebuddy-cn")
+    } else {
+        failed += 1
+        print("FAIL: glm-5.1 应解析成功")
+    }
+
+    // 阶段 3：前缀启发式——deepseek-v4-pro 被两家拥有，deepseek-* → deepseek
+    if let r = router.resolve("deepseek-v4-pro") {
+        expectEqual(r.providerID, "deepseek", "前缀启发式 deepseek-v4-pro → deepseek")
+    } else {
+        failed += 1
+        print("FAIL: deepseek-v4-pro 应解析成功")
+    }
+
+    // 阶段 3：前缀启发式——glm 系模型同时出现时 → codebuddy-cn（glm 规则）
+    if let r = router.resolve("glm-5.2") {
+        expectEqual(r.providerID, "codebuddy-cn", "前缀启发式 glm-5.2 → codebuddy-cn")
+    } else {
+        failed += 1
+        print("FAIL: glm-5.2 应解析成功")
+    }
+
+    // 显式前缀仍最高优先
+    if let r = router.resolve("codebuddy-cn/deepseek-v4-pro") {
+        expectEqual(r.providerID, "codebuddy-cn", "显式前缀 codebuddy-cn/deepseek-v4-pro → codebuddy-cn")
+        expectEqual(r.modelID, "deepseek-v4-pro", "显式前缀 model 透传")
+    } else {
+        failed += 1
+        print("FAIL: codebuddy-cn/deepseek-v4-pro 应解析成功")
+    }
+}
+
+// MARK: - 配置 v1→v2 迁移（Phase 12）
+
+func configMigrationTests() throws {
+    let path = "/tmp/binvia-migration-\(UUID().uuidString).json"
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    // v1 配置：apiKeys 是字符串数组
+    let v1 = #"""
+    {"version":1,"host":"127.0.0.1","port":8231,"apiKeys":["legacy-key-1","legacy-key-2"],"providers":{}}
+    """#
+    try Data(v1.utf8).write(to: URL(fileURLWithPath: path))
+
+    let migrated = try ConfigStore.load(path: path)
+    expectEqual(migrated.version, 2, "迁移后 version=2")
+    expectEqual(migrated.gatewayKeyStrings, ["legacy-key-1", "legacy-key-2"], "旧字符串数组转为 GatewayKeyConfig")
+    expectEqual(migrated.apiKeys[0].enabledModels, nil, "迁移后 enabledModels 为 nil（全部启用）")
+
+    // 备份文件已生成
+    expectTrue(FileManager.default.fileExists(atPath: path + ".v1.bak"), "迁移前已备份 v1 配置文件")
+
+    // 二次加载不重复迁移（backup 不覆盖）
+    let again = try ConfigStore.load(path: path)
+    expectEqual(again.version, 2, "二次加载仍为 v2")
+    expectEqual(again.gatewayKeyStrings, ["legacy-key-1", "legacy-key-2"], "二次加载 key 不变")
+
+    // v2 格式直接解码（无需迁移）
+    let v2 = #"""
+    {"version":2,"apiKeys":[{"key":"sk-bv-abc","enabled_models":["ds/deepseek-v4-pro"]}]}
+    """#
+    let v2Decoder = JSONDecoder()
+    v2Decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let decoded = try v2Decoder.decode(RouteConfig.self, from: Data(v2.utf8))
+    expectEqual(decoded.version, 2, "v2 直接解码 version")
+    expectEqual(decoded.apiKeys.first?.key, "sk-bv-abc", "v2 解码 key")
+    expectEqual(decoded.apiKeys.first?.enabledModels, ["ds/deepseek-v4-pro"], "v2 解码 enabledModels")
+}
+
+// MARK: - 网关 key 级 enabledModels 过滤（Phase 12）
+
+func gatewayKeyWhitelistTests() async throws {
+    ProviderCatalog.registerAll()
+    unsetenv("DEEPSEEK_API_KEY")
+    unsetenv("DEEPSEEK_BASE_URL")
+    await ModelCache.shared.invalidate("deepseek")
+
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [
+            GatewayKeyConfig(key: "whitelisted-key", enabledModels: ["ds/deepseek-v4-pro"]),
+            GatewayKeyConfig(key: "open-key"),
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {
+        var headers: [String: String] = [:]
+        if let authorization { headers["authorization"] = authorization }
+        return HTTPRequest(method: method, path: path, queryItems: [:], headers: headers, body: body)
+    }
+    func chatBody(model: String) -> Data {
+        Data(#"{"model": "\#(model)", "messages": [{"role": "user", "content": "hi"}]}"#.utf8)
+    }
+
+    // 白名单命中 → 进入上游（无凭据/不可达上游 → 502，而非 403）
+    let allowed = try await handler.handle(req(
+        "POST", "/v1/chat/completions",
+        authorization: "Bearer whitelisted-key", body: chatBody(model: "ds/deepseek-v4-pro")
+    ))
+    expectEqual(allowed.status, 502, "白名单内模型应进入上游（无凭据 → 502 而非 403）")
+
+    // 白名单未命中 → 403
+    let forbidden = try await handler.handle(req(
+        "POST", "/v1/chat/completions",
+        authorization: "Bearer whitelisted-key", body: chatBody(model: "ds/deepseek-v4-flash")
+    ))
+    expectEqual(forbidden.status, 403, "白名单外模型返回 403")
+
+    // 无白名单的 key → 不拦截
+    let open = try await handler.handle(req(
+        "POST", "/v1/chat/completions",
+        authorization: "Bearer open-key", body: chatBody(model: "ds/deepseek-v4-flash")
+    ))
+    expectEqual(open.status, 502, "无白名单 key 不拦截（无凭据 → 502）")
+
+    // /v1/models 白名单过滤：白名单 key 只看到 whitelisted 模型
+    let modelsResp = try await handler.handle(req("GET", "/v1/models", authorization: "Bearer whitelisted-key"))
+    if let data = modelsResp.bodyData(),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        let models = json["data"] as? [[String: Any]] ?? []
+        let ids = Set(models.compactMap { $0["id"] as? String })
+        expectTrue(ids.contains("deepseek-v4-pro"), "白名单 key 的 /v1/models 包含 deepseek-v4-pro")
+        expectFalse(ids.contains("deepseek-v4-flash"), "白名单 key 的 /v1/models 不含 deepseek-v4-flash")
+    } else {
+        failed += 1
+        print("FAIL: /v1/models 白名单过滤响应解析失败")
+    }
+
+    // 无白名单 key 的 /v1/models 不受影响
+    let openModelsResp = try await handler.handle(req("GET", "/v1/models", authorization: "Bearer open-key"))
+    if let data = openModelsResp.bodyData(),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        let models = json["data"] as? [[String: Any]] ?? []
+        expectTrue(models.contains { ($0["id"] as? String) == "deepseek-v4-flash" }, "无白名单 key 的 /v1/models 含 deepseek-v4-flash")
+    } else {
+        failed += 1
+        print("FAIL: 无白名单 key 的 /v1/models 响应解析失败")
+    }
+}
+
+extension HTTPResponse {
+    /// 便捷取 data body（测试用）。
+    func bodyData() -> Data? {
+        if case .data(let d) = body { return d }
+        return nil
+    }
 }
 
 // MARK: - ModelCache
@@ -439,7 +616,7 @@ func routeHandlerTests() async throws {
     unsetenv("DEEPSEEK_BASE_URL")
     unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
     await ModelCache.shared.invalidate("deepseek")
-    let config = RouteConfig(host: "127.0.0.1", port: 0, apiKeys: ["test-key"])
+    let config = RouteConfig(host: "127.0.0.1", port: 0, apiKeys: [GatewayKeyConfig(key: "test-key")])
     let handler = RouteHandler(config: config)
 
     func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {
@@ -748,6 +925,10 @@ unsetenv("ANTIGRAVITY_BASE_URL")
 unsetenv("ANTIGRAVITY_PROJECT_ID")
 
 await run("Router 路由解析与消歧", routerTests)
+await run("ProviderRegistry 反向索引", registryReverseIndexTests)
+await run("Router 消歧升级", routerDisambiguationTests)
+await run("配置 v1→v2 迁移", configMigrationTests)
+await run("网关 key 白名单过滤", gatewayKeyWhitelistTests)
 await run("SSE 解析与聚合", sseTests)
 await run("APIKey 认证", apiKeyAuthenticatorTests)
 await run("RouteConfig 配置", routeConfigTests)
