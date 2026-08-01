@@ -16,6 +16,7 @@ struct MenuPanelView: View {
         }
         .onAppear {
             appState.startMetricsRefresh()
+            appState.startUsageRefresh()
         }
     }
 

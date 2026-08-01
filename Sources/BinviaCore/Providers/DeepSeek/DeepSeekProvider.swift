@@ -14,6 +14,7 @@ public enum DeepSeekProviderDescriptor {
             Model(id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", supportsReasoning: true),
         ],
         supportsStreaming: true,
+        usageFetcherFactory: { DeepSeekUsageFetcher() },
         makeProvider: { DeepSeekProvider() }
     )
 }

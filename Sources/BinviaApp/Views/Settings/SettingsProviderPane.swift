@@ -57,6 +57,7 @@ struct SettingsProviderPane: View {
                 connectionSection(descriptor)
                 testResultSection
                 infoSection(descriptor)
+                usageSection
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
@@ -453,6 +454,130 @@ struct SettingsProviderPane: View {
         case .deviceFlow: "OAuth 设备码"
         case .localProbe: "本地探测"
         }
+    }
+
+    // MARK: - 用量 Section（Phase 16）
+
+    /// 用量卡片：余额 / 配额窗口 / 模型配额。无快照时不展示（「有则展示无则隐藏」）。
+    @ViewBuilder
+    private var usageSection: some View {
+        if let snapshot = appState.usageSnapshots[providerID] {
+            Section {
+                // 刷新按钮
+                HStack {
+                    Spacer()
+                    Button("刷新用量") { refreshUsage() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .pointingHandCursor()
+                }
+
+                // 失败提示
+                if let error = snapshot.error, !error.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(3)
+                        Spacer()
+                        Button("刷新") { refreshUsage() }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .pointingHandCursor()
+                    }
+                }
+
+                // 余额卡
+                if let balance = snapshot.balance {
+                    LabeledContent("余额") {
+                        Text(balanceText(balance, currency: snapshot.currency))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                // 配额窗口
+                if !snapshot.quotaWindows.isEmpty {
+                    ForEach(Array(snapshot.quotaWindows.indices), id: \.self) { index in
+                        quotaWindowRow(snapshot.quotaWindows[index])
+                    }
+                }
+
+                // 模型配额
+                if !snapshot.modelQuotas.isEmpty {
+                    ForEach(Array(snapshot.modelQuotas.indices), id: \.self) { index in
+                        modelQuotaRow(snapshot.modelQuotas[index])
+                    }
+                }
+            } header: {
+                Text("用量")
+            }
+        }
+    }
+
+    /// 单个配额窗口行：label + ProgressView + 百分比 + 重置时间。
+    private func quotaWindowRow(_ window: QuotaWindow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(window.label)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text("\(String(format: "%.0f", window.remainingPercentage))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let resetAt = window.resetAt {
+                    Text("重置 \(resetAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ProgressView(value: window.remainingFraction)
+                .tint(progressColor(for: window.remainingFraction))
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// 单个模型配额行：modelID + ProgressView + 百分比。
+    private func modelQuotaRow(_ quota: ModelQuota) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(quota.modelID)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text("\(String(format: "%.0f", quota.remainingPercentage))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let resetAt = quota.resetAt {
+                    Text("重置 \(resetAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ProgressView(value: quota.remainingFraction)
+                .tint(progressColor(for: quota.remainingFraction))
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// 剩余比例 → 进度条颜色（健康绿 / 告警橙 / 危险红）。
+    private func progressColor(for fraction: Double) -> Color {
+        if fraction >= 0.5 { return .green }
+        if fraction >= 0.2 { return .orange }
+        return .red
+    }
+
+    private func refreshUsage() {
+        Task { await appState.refreshUsageNow(for: providerID) }
+    }
+
+    /// 余额展示文本（先拼成 String 再交给 Text，避免 LocalizedStringKey 对 Decimal 插值告警）。
+    private func balanceText(_ balance: Decimal, currency: String?) -> String {
+        "\(balance) \(currency ?? "")"
     }
 
     // MARK: - Actions
