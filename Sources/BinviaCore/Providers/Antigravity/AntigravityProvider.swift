@@ -22,6 +22,7 @@ public enum AntigravityProviderDescriptor {
             Model(id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", contextLength: 131_072, supportsReasoning: true),
         ],
         supportsStreaming: true,
+        usageFetcherFactory: { AntigravityUsageFetcher() },
         makeProvider: { AntigravityProvider() }
     )
 }

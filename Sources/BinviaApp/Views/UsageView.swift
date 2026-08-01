@@ -20,8 +20,14 @@ struct UsageView: View {
             }
         }
         .padding(.vertical, 8)
-        .onAppear { appState.startMetricsRefresh() }
-        .onDisappear { appState.stopMetricsRefresh() }
+        .onAppear {
+            appState.startMetricsRefresh()
+            appState.startUsageRefresh()
+        }
+        .onDisappear {
+            appState.stopMetricsRefresh()
+            appState.stopUsageRefresh()
+        }
     }
 
     private var totalRequests: Int {

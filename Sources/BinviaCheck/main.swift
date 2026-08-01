@@ -1013,6 +1013,193 @@ func dynamicModelsURLSuite() async throws {
     URLProtocolMock.reset()
 }
 
+// MARK: - Phase 16: 用量查询器（URLProtocol 全局 mock）
+
+/// 全局注册/清理 URLProtocolMock。
+///
+/// 用量查询器走 `ProviderHTTPClient.shared`（即 `URLSession.shared`），无法注入独立
+/// session，因此必须全局注册 `URLProtocolMock` 拦截。已知此仓库混用本地 HTTPServer +
+/// URLSession 会偶发崩溃（"Not enough bits to represent the passed value"），
+/// 故用量测试只使用 URLProtocol，不启动本地 HTTPServer。
+func withGlobalURLProtocolMock(_ body: () async throws -> Void) async throws {
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+    try await body()
+}
+
+/// 读取 URLRequest 的 body。URLSession 交给 URLProtocol 的请求可能把 body 放在
+/// `httpBodyStream` 而非 `httpBody`（已知行为），测试需要两者都读。
+func requestBodyString(_ request: URLRequest) -> String? {
+    if let body = request.httpBody {
+        return String(data: body, encoding: .utf8)
+    }
+    guard let stream = request.httpBodyStream else { return nil }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    let bufferSize = 4096
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    defer { buffer.deallocate() }
+    while stream.hasBytesAvailable {
+        let count = stream.read(buffer, maxLength: bufferSize)
+        if count <= 0 { break }
+        data.append(buffer, count: count)
+    }
+    return String(data: data, encoding: .utf8)
+}
+
+func deepSeekUsageFetcherTests() async throws {
+    unsetenv("DEEPSEEK_API_KEY")
+    unsetenv("DEEPSEEK_BASE_URL")
+    defer {
+        unsetenv("DEEPSEEK_API_KEY")
+        unsetenv("DEEPSEEK_BASE_URL")
+    }
+
+    // 1) 正常解析：total_balance 为字符串、granted_balance 为数字，均容错为 Decimal
+    try await withGlobalURLProtocolMock {
+        setenv("DEEPSEEK_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.url?.absoluteString, "https://mock.test/v1/user/balance", "DeepSeek 余额请求 URL")
+            expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key", "DeepSeek 鉴权头")
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = #"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"120.50","granted_balance":20.5,"topped_up_balance":"100.00"}]}"#
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectEqual(snapshot.providerID, "deepseek", "DeepSeek 快照 providerID")
+        expectEqual(snapshot.balance, Decimal(string: "120.50"), "DeepSeek 余额解析（字符串 → Decimal）")
+        expectEqual(snapshot.currency, "CNY", "DeepSeek 币种")
+        expectTrue(snapshot.rawJSON?.contains("balance_infos") == true, "DeepSeek rawJSON 保留原始 body")
+        expectNil(snapshot.error, "DeepSeek 成功快照无 error")
+
+        // 2) 非 2xx 抛 upstreamError
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data("unauthorized".utf8))
+        }
+        await expectThrows({
+            _ = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "bad-key"))
+        }, "DeepSeek 401 抛 upstreamError")
+    }
+
+    // 3) 无凭据抛 missingCredentials（不触发网络）
+    await expectThrows({
+        _ = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "DeepSeek 无凭据抛 missingCredentials")
+}
+
+func antigravityUsageFetcherTests() async throws {
+    unsetenv("ANTIGRAVITY_BASE_URL")
+    unsetenv("ANTIGRAVITY_ACCESS_TOKEN")
+    unsetenv("ANTIGRAVITY_PROJECT_ID")
+    unsetenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+    unsetenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+    defer {
+        unsetenv("ANTIGRAVITY_BASE_URL")
+        unsetenv("ANTIGRAVITY_ACCESS_TOKEN")
+        unsetenv("ANTIGRAVITY_PROJECT_ID")
+        unsetenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+        unsetenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+    }
+
+    // 1) 正常解析：retrieveUserQuota → modelQuotas；retrieveUserQuotaSummary → weekly windows
+    try await withGlobalURLProtocolMock {
+        setenv("ANTIGRAVITY_BASE_URL", "https://mock.test", 1)
+        setenv("ANTIGRAVITY_PROJECT_ID", "proj-1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let path = request.url?.path ?? ""
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            if path == "/v1internal:retrieveUserQuota" {
+                expectEqual(
+                    requestBodyString(request),
+                    #"{"project":"proj-1"}"#,
+                    "retrieveUserQuota 请求体"
+                )
+                expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer mock-token", "retrieveUserQuota 鉴权头")
+                expectEqual(request.value(forHTTPHeaderField: "User-Agent"), "antigravity/ide/2.1.1 darwin/arm64", "retrieveUserQuota User-Agent")
+                // 第二个 bucket 缺 remainingFraction → 应被跳过
+                return (response, Data(#"{"buckets":[{"modelId":"gemini-3.6-flash-high","remainingFraction":0.6,"resetTime":"2026-08-01T00:00:00Z"},{"modelId":"claude-sonnet-4-6"}]}"#.utf8))
+            }
+            if path == "/v1internal:retrieveUserQuotaSummary" {
+                return (response, Data(#"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"weekly","displayName":"Weekly","remainingFraction":0.4,"resetTime":"2026-08-07T00:00:00Z"}]}]}"#.utf8))
+            }
+            return (response, Data("not found".utf8))
+        }
+
+        let snapshot = try await AntigravityUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "mock-token"))
+        expectEqual(snapshot.providerID, "antigravity", "Antigravity 快照 providerID")
+        expectEqual(snapshot.balance, nil, "Antigravity 无余额字段")
+        expectNil(snapshot.error, "Antigravity 成功快照无 error")
+
+        // modelQuotas
+        expectEqual(snapshot.modelQuotas.count, 1, "retrieveUserQuota 只解析带 remainingFraction 的 bucket")
+        if let quota = snapshot.modelQuotas.first {
+            expectEqual(quota.modelID, "gemini-3.6-flash-high", "ModelQuota modelID")
+            expectEqual(quota.remainingFraction, 0.6, "ModelQuota remainingFraction")
+            expectFalse(quota.unlimited, "有 resetTime 时非 unlimited")
+            expectEqual(quota.remainingPercentage, 60, "ModelQuota remainingPercentage")
+        }
+
+        // quotaWindows
+        expectEqual(snapshot.quotaWindows.count, 1, "retrieveUserQuotaSummary 解析出 weekly 窗口")
+        if let window = snapshot.quotaWindows.first {
+            expectEqual(window.label, "Gemini Models Weekly", "QuotaWindow label")
+            expectEqual(window.remainingFraction, 0.4, "QuotaWindow remainingFraction")
+            expectEqual(window.total, 1000, "QuotaWindow 归一化 total=1000")
+            expectEqual(window.used, 600, "QuotaWindow 归一化 used=600")
+            expectEqual(window.remainingPercentage, 40, "QuotaWindow remainingPercentage")
+        }
+    }
+
+    // 2) 无 token 抛 missingCredentials
+    await expectThrows({
+        _ = try await AntigravityUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "Antigravity 无 token 抛 missingCredentials")
+
+    // 3) RPC 2 失败不影响快照（best-effort）：quotaWindows 为空，模型配额仍返回
+    try await withGlobalURLProtocolMock {
+        setenv("ANTIGRAVITY_BASE_URL", "https://mock.test", 1)
+        setenv("ANTIGRAVITY_PROJECT_ID", "proj-1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let path = request.url?.path ?? ""
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            if path == "/v1internal:retrieveUserQuota" {
+                return (response, Data(#"{"buckets":[{"modelId":"gemini-3.6-flash-high","remainingFraction":1,"resetTime":null}]}"#.utf8))
+            }
+            if path == "/v1internal:retrieveUserQuotaSummary" {
+                let errorResponse = HTTPURLResponse(
+                    url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil
+                )!
+                return (errorResponse, Data("boom".utf8))
+            }
+            return (response, Data("not found".utf8))
+        }
+        let snapshot = try await AntigravityUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "mock-token"))
+        expectEqual(snapshot.quotaWindows, [], "RPC 2 失败时 quotaWindows 为空")
+        expectEqual(snapshot.modelQuotas.count, 1, "RPC 2 失败不影响 modelQuotas")
+        expectTrue(snapshot.modelQuotas[0].unlimited, "resetTime null + fraction>=1 视为 unlimited")
+    }
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -1045,6 +1232,8 @@ await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)
 await run("Antigravity 集成（本地 mock 上游）", antigravityIntegrationTests)
 await run("testAllModels 串行批量测试", testAllModelsSuite)
 await run("modelsURL 动态模型兜底", dynamicModelsURLSuite)
+await run("DeepSeek 用量查询（URLProtocol mock）", deepSeekUsageFetcherTests)
+await run("Antigravity 用量查询（URLProtocol mock）", antigravityUsageFetcherTests)
 
 print("")
 print("========================================")

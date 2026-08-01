@@ -29,6 +29,10 @@ public struct AntigravityConfig: Sendable, Equatable {
     public var loadCodeAssistURL: URL
     public var onboardUserURL: URL
     public var fetchAvailableModelsURL: URL
+    /// 用量查询 RPC（Phase 16）：per-model 配额。
+    public var retrieveUserQuotaURL: URL { URL(string: "\(runtimeBaseURL)/v1internal:retrieveUserQuota")! }
+    /// 用量汇总 RPC（Phase 16）：模型族 × 窗口（5h / weekly）配额。
+    public var retrieveUserQuotaSummaryURL: URL { URL(string: "\(runtimeBaseURL)/v1internal:retrieveUserQuotaSummary")! }
 
     public init(
         clientID: String,

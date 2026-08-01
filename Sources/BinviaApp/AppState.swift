@@ -40,6 +40,9 @@ final class AppState: ObservableObject {
 
     @Published var usageSummary = UsageSummary(byProvider: [:])
 
+    /// 各 provider 的用量快照（Phase 16：余额 / 配额窗口 / 模型配额）。由 5min 轮询或手动刷新填充。
+    @Published var usageSnapshots: [String: ProviderUsageSnapshot] = [:]
+
     /// 各 provider 的连通性测试结果。
     @Published var testStates: [String: ProviderTestState] = [:]
     /// 各 provider 的 OAuth 登录状态。
@@ -50,6 +53,7 @@ final class AppState: ObservableObject {
 
     private var server: HTTPServer?
     private var refreshTimer: Timer?
+    private var usageRefreshTimer: Timer?
     private var codeContinuation: CheckedContinuation<String, Error>?
 
     // MARK: - 初始化
@@ -409,6 +413,62 @@ final class AppState: ObservableObject {
     func stopMetricsRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+    }
+
+    // MARK: - 用量刷新（Phase 16）
+
+    /// 启动用量轮询：立即刷新一次，随后每 5 分钟刷新全部带 `usageFetcherFactory` 的 provider。
+    func startUsageRefresh() {
+        guard usageRefreshTimer == nil else { return }
+        Task { await refreshAllUsage() }
+        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: UsageCache.ttl, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshAllUsage()
+            }
+        }
+    }
+
+    func stopUsageRefresh() {
+        usageRefreshTimer?.invalidate()
+        usageRefreshTimer = nil
+    }
+
+    /// 全量刷新所有挂载了用量查询器的 provider。
+    private func refreshAllUsage() async {
+        for descriptor in ProviderRegistry.shared.allDescriptors() {
+            guard descriptor.usageFetcherFactory() != nil else { continue }
+            await refreshUsage(for: descriptor.id)
+        }
+    }
+
+    /// 刷新单个 provider 的用量（GUI「刷新用量」按钮入口）。
+    /// 强制绕过缓存打上游；失败时写入带 `error` 的快照，绝不崩溃。
+    func refreshUsageNow(for providerID: String) async {
+        await refreshUsage(for: providerID, force: true)
+    }
+
+    private func refreshUsage(for providerID: String, force: Bool = false) async {
+        guard let descriptor = ProviderRegistry.shared.descriptor(for: providerID),
+              let fetcher = descriptor.usageFetcherFactory() else { return }
+        // 1. 缓存优先（仅轮询路径；手动刷新 force=true 跳过）
+        if !force, let cached = await UsageCache.shared.get(providerID) {
+            usageSnapshots[providerID] = cached
+            return
+        }
+        // 2. 打上游，成功写缓存
+        do {
+            let credential = config.credential(for: providerID)
+            let snapshot = try await fetcher.fetchUsage(credential: credential)
+            await UsageCache.shared.set(snapshot)
+            usageSnapshots[providerID] = snapshot
+        } catch {
+            // 3. 失败快照：展示错误，避免轮询 Timer 崩溃
+            usageSnapshots[providerID] = ProviderUsageSnapshot(
+                providerID: providerID,
+                fetchedAt: Date(),
+                error: error.localizedDescription
+            )
+        }
     }
 
     // MARK: - 菜单栏图标
