@@ -908,6 +908,111 @@ func antigravityIntegrationTests() async throws {
     expectTrue(failResult.message.contains("Unknown name"), "400 消息应提取上游 error.message，实际: \(failResult.message)")
 }
 
+// MARK: - Phase 13: testAllModels 串行 + modelsURL 动态模型
+
+nonisolated(unsafe) var testAllOrder: [String] = []
+nonisolated(unsafe) var testAllListCount = 0
+nonisolated(unsafe) var dynamicModelsRequestCount = 0
+
+/// 记录 listModels / testModel 调用顺序的测试 Provider。
+private final class TestAllProvider: Provider {
+    let id: String
+    let models: [Model]
+    init(id: String, models: [Model]) {
+        self.id = id
+        self.models = models
+    }
+    func listModels(credential: ProviderCredential?) async throws -> [Model] {
+        testAllListCount += 1
+        return models
+    }
+    func chat(request: ChatRequest, rawBody: Data?, credential: ProviderCredential?) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func testModel(_ modelID: String, credential: ProviderCredential?) async throws -> ConnectionTestResult {
+        testAllOrder.append(modelID)
+        return ConnectionTestResult(success: true, message: "ok-\(modelID)", latencyMS: 1)
+    }
+}
+
+/// 使用默认 `listModels`（ModelCache → modelsURL → 静态兜底）的测试 Provider。
+private final class DynamicModelsTestProvider: Provider {
+    let id: String
+    init(id: String = "test-dynamic") { self.id = id }
+    func chat(request: ChatRequest, rawBody: Data?, credential: ProviderCredential?) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+}
+
+func testAllModelsSuite() async {
+    testAllOrder = []
+    testAllListCount = 0
+    let provider = TestAllProvider(
+        id: "test-all",
+        models: [Model(id: "m1"), Model(id: "m2"), Model(id: "m3")]
+    )
+    let outcomes = await provider.testAllModels(credential: nil)
+    expectEqual(outcomes.map(\.modelID), ["m1", "m2", "m3"], "testAllModels 按 listModels 顺序返回")
+    expectEqual(testAllOrder, ["m1", "m2", "m3"], "testModel 被串行调用且顺序一致")
+    expectTrue(outcomes.allSatisfy(\.success), "全部模型测试成功")
+    expectEqual(testAllListCount, 1, "testAllModels 只调一次 listModels")
+
+    // 单个模型失败不中断后续
+    testAllOrder = []
+    let failing = TestAllProvider(id: "test-all-fail", models: [Model(id: "a"), Model(id: "b")])
+    let failOutcomes = await failing.testAllModels(credential: nil)
+    expectEqual(failOutcomes.count, 2, "失败模型不中断后续测试")
+}
+
+func dynamicModelsURLSuite() async throws {
+    // 用 URLProtocol 全局拦截（ProviderHTTPClient.shared 走 URLSession.shared），
+    // 验证默认 listModels 的「ModelCache → modelsURL → 静态兜底」链路，避免真实 socket 网络抖动。
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer { URLProtocol.unregisterClass(URLProtocolMock.self) }
+
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { _ in
+        dynamicModelsRequestCount += 1
+        let response = HTTPURLResponse(
+            url: URL(string: "https://mock.test/v1/models")!,
+            statusCode: 200, httpVersion: nil, headerFields: nil
+        )!
+        return (response, Data(#"{"data":[{"id":"mock-dynamic-1","owned_by":"mock"},{"id":"mock-dynamic-2","owned_by":"mock"}]}"#.utf8))
+    }
+    URLProtocolMock.requestCount = 0
+    dynamicModelsRequestCount = 0
+
+    let descriptor = ProviderDescriptor(
+        metadata: ProviderMetadata(id: "test-dynamic", alias: "td", displayName: "Test Dynamic", authType: .apiKey),
+        baseURL: URL(string: "https://mock.test/v1"),
+        models: [Model(id: "static-model")],
+        modelsURL: URL(string: "https://mock.test/v1/models"),
+        makeProvider: { DynamicModelsTestProvider() }
+    )
+    ProviderRegistry.shared.register(descriptor)
+    await ModelCache.shared.invalidate("test-dynamic")
+
+    let provider = DynamicModelsTestProvider()
+
+    // 1. 无凭据 → 静态兜底（不打上游）
+    let noCred = try await provider.listModels(credential: nil)
+    expectEqual(noCred.map(\.id), ["static-model"], "modelsURL 无凭据时回退静态目录")
+    expectEqual(dynamicModelsRequestCount, 0, "无凭据时不请求上游")
+
+    // 2. 有凭据 → 命中上游
+    let withCred = try await provider.listModels(credential: ProviderCredential(apiKey: "mock-key"))
+    expectEqual(withCred.map(\.id), ["mock-dynamic-1", "mock-dynamic-2"], "modelsURL 有凭据时命中上游")
+    expectEqual(dynamicModelsRequestCount, 1, "有凭据时请求上游一次")
+
+    // 3. 缓存生效：二次调用不增加上游请求
+    let cached = try await provider.listModels(credential: ProviderCredential(apiKey: "mock-key"))
+    expectEqual(cached.map(\.id), ["mock-dynamic-1", "mock-dynamic-2"], "modelsURL 二次调用命中 ModelCache")
+    expectEqual(dynamicModelsRequestCount, 1, "ModelCache 生效：上游只请求一次")
+
+    await ModelCache.shared.invalidate("test-dynamic")
+    URLProtocolMock.reset()
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -938,6 +1043,8 @@ await run("ProviderHTTPClient 重试", httpRetryTests)
 await run("RouteHandler 路由分发", routeHandlerTests)
 await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)
 await run("Antigravity 集成（本地 mock 上游）", antigravityIntegrationTests)
+await run("testAllModels 串行批量测试", testAllModelsSuite)
+await run("modelsURL 动态模型兜底", dynamicModelsURLSuite)
 
 print("")
 print("========================================")

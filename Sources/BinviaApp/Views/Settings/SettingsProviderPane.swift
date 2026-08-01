@@ -29,6 +29,12 @@ struct SettingsProviderPane: View {
     /// 各模型的测试结果。
     @State private var modelTestResults: [String: ModelTestResult] = [:]
 
+    /// 「测试全部模型」批量测试状态（Phase 13 需求 1：串行 + 进度条）。
+    @State private var isTestingAll = false
+    @State private var testAllCurrent = 0
+    @State private var testAllTotal = 0
+    @State private var testAllOutcomes: [ModelTestOutcome] = []
+
     /// 单个模型的测试结果状态。
     enum ModelTestResult: Equatable {
         case idle
@@ -267,6 +273,9 @@ struct SettingsProviderPane: View {
             // 供应商级测试
             providerTestRow
 
+            // 测试全部模型（Phase 13 需求 1）
+            testAllRow
+
             // 模型级测试列表
             if loadingModels {
                 HStack(spacing: 6) {
@@ -284,6 +293,58 @@ struct SettingsProviderPane: View {
             }
         } header: {
             Text("连通性")
+        }
+    }
+
+    /// 测试全部模型入口：未运行时显示按钮；运行时显示进度条 + 实时结果列表。
+    @ViewBuilder
+    private var testAllRow: some View {
+        if isTestingAll {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    ProgressView(value: Double(testAllCurrent), total: Double(max(testAllTotal, 1)))
+                        .controlSize(.small)
+                    Text("测试全部模型：\(testAllCurrent)/\(testAllTotal)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(testAllOutcomes) { outcome in
+                    outcomeRow(outcome)
+                }
+                if testAllCurrent == testAllTotal, testAllTotal > 0 {
+                    HStack {
+                        Spacer()
+                        Button("重新测试全部") { startTestAll() }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .pointingHandCursor()
+                    }
+                }
+            }
+        } else {
+            HStack {
+                Spacer()
+                Button("测试全部模型") { startTestAll() }
+                    .buttonStyle(.bordered)
+                    .disabled(models.isEmpty)
+                    .pointingHandCursor()
+            }
+        }
+    }
+
+    /// 单个批量测试结果行。
+    private func outcomeRow(_ outcome: ModelTestOutcome) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: outcome.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(outcome.success ? .green : .red)
+                .font(.footnote)
+            Text(outcome.modelID)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(outcome.message)
+                .font(.caption2)
+                .foregroundStyle(outcome.success ? Color.secondary : Color.red)
+                .lineLimit(2)
         }
     }
 
@@ -499,6 +560,53 @@ struct SettingsProviderPane: View {
                 default: break
                 }
             }
+        }
+    }
+
+    // MARK: - 测试全部模型（Phase 13 需求 1）
+
+    /// 串行测试该供应商全部模型，逐条更新进度与结果。
+    @MainActor
+    private func startTestAll() {
+        guard let provider = ProviderRegistry.shared.provider(for: providerID) else { return }
+        isTestingAll = true
+        testAllOutcomes = []
+        testAllCurrent = 0
+        testAllTotal = 0
+        let credential = appState.config.credential(for: providerID)
+        Task {
+            let models = (try? await provider.listModels(credential: credential)) ?? []
+            testAllTotal = models.count
+            if models.isEmpty {
+                testAllOutcomes.append(ModelTestOutcome(
+                    modelID: "-",
+                    success: false,
+                    message: "未获取到模型列表"
+                ))
+                testAllCurrent = 0
+                isTestingAll = false
+                return
+            }
+            for (index, model) in models.enumerated() {
+                let outcome: ModelTestOutcome
+                if let result = try? await provider.testModel(model.id, credential: credential) {
+                    outcome = ModelTestOutcome(
+                        modelID: model.id,
+                        success: result.success,
+                        message: result.message,
+                        latencyMS: result.latencyMS
+                    )
+                } else {
+                    outcome = ModelTestOutcome(
+                        modelID: model.id,
+                        success: false,
+                        message: "测试抛出未预期错误"
+                    )
+                }
+                testAllOutcomes.append(outcome)
+                testAllCurrent = index + 1
+            }
+            isTestingAll = false
         }
     }
 }

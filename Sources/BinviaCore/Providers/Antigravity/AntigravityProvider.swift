@@ -63,6 +63,10 @@ public struct AntigravityProvider: Provider {
     // MARK: - listModels
 
     public func listModels(credential: ProviderCredential?) async throws -> [Model] {
+        // Phase 13：统一走 ModelCache（300s TTL），避免每次 /v1/models 都打上游
+        if let cached = await ModelCache.shared.get(id) {
+            return cached
+        }
         let config = AntigravityConfig.live()
         guard let token = try? resolveAccessToken(credential) else {
             return AntigravityProviderDescriptor.descriptor.models
@@ -73,7 +77,11 @@ public struct AntigravityProvider: Provider {
                 refreshToken: credential?.refreshToken,
                 config: config
             )
-            return models.isEmpty ? AntigravityProviderDescriptor.descriptor.models : models
+            let result = models.isEmpty ? AntigravityProviderDescriptor.descriptor.models : models
+            if !result.isEmpty {
+                await ModelCache.shared.set(id, models: result)
+            }
+            return result
         } catch {
             // best-effort：动态获取失败回退静态目录。
             return AntigravityProviderDescriptor.descriptor.models

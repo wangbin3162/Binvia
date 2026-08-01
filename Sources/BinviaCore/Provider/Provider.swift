@@ -21,6 +21,36 @@ public protocol Provider: Sendable {
 
     /// 模型级连通性测试：发送最小请求（max_tokens:1）探测指定模型可用性。
     func testModel(_ modelID: String, credential: ProviderCredential?) async throws -> ConnectionTestResult
+
+    /// 串行测试该供应商全部模型（listModels → 逐个 testModel → 汇总）。
+    /// 默认实现保证顺序与汇总；子类可覆盖以复用连接或做并发。
+    func testAllModels(credential: ProviderCredential?) async -> [ModelTestOutcome]
+}
+
+/// 单个模型的批量测试结果（Phase 13，`testAllModels` 的输出单元）。
+public struct ModelTestOutcome: Sendable, Equatable, Identifiable {
+    public let modelID: String
+    public let success: Bool
+    public let message: String
+    public let latencyMS: Double?
+
+    public var id: String { modelID }
+
+    public init(modelID: String, success: Bool, message: String, latencyMS: Double? = nil) {
+        self.modelID = modelID
+        self.success = success
+        self.message = message
+        self.latencyMS = latencyMS
+    }
+}
+
+/// OpenAI 兼容 `/v1/models` 响应的最小解码结构（供默认 `listModels` 与测试复用）。
+struct DynamicModelsResponse: Decodable {
+    struct Item: Decodable {
+        let id: String
+        let ownedBy: String?
+    }
+    let data: [Item]
 }
 
 public extension Provider {
@@ -67,6 +97,94 @@ public extension Provider {
                 message: "模型 \(modelID) 测试失败: \(error.localizedDescription)",
                 latencyMS: Date().timeIntervalSince(start) * 1000
             )
+        }
+    }
+
+    /// 默认实现（Phase 13，需求 7）：「`ModelCache` 优先 → 上游 `modelsURL` → 静态兜底」。
+    /// 仅支持 OpenAI 兼容的 `/v1/models` 响应（`{"data":[{"id":...}]}`）；已有自定义逻辑的
+    /// 供应商（DeepSeek / Antigravity / CodeBuddyCN）仍覆盖本实现。
+    func listModels(credential: ProviderCredential?) async throws -> [Model] {
+        let descriptor = ProviderRegistry.shared.descriptor(for: id)
+        let staticModels = descriptor?.models ?? []
+        guard let modelsURL = descriptor?.modelsURL else {
+            // 无动态端点：直接返回静态目录
+            return staticModels
+        }
+        return await Self.fetchDynamicModels(
+            id: id,
+            modelsURL: modelsURL,
+            staticModels: staticModels,
+            credential: credential
+        )
+    }
+
+    /// 串行测试全部模型。按 `listModels` 结果顺序逐个 `testModel`，返回汇总。
+    /// 单个模型失败不中断后续测试（需求 1 对齐：串行 + 进度条）。
+    func testAllModels(credential: ProviderCredential?) async -> [ModelTestOutcome] {
+        let models = (try? await listModels(credential: credential)) ?? []
+        var outcomes: [ModelTestOutcome] = []
+        for model in models {
+            do {
+                let result = try await testModel(model.id, credential: credential)
+                outcomes.append(ModelTestOutcome(
+                    modelID: model.id,
+                    success: result.success,
+                    message: result.message,
+                    latencyMS: result.latencyMS
+                ))
+            } catch {
+                outcomes.append(ModelTestOutcome(
+                    modelID: model.id,
+                    success: false,
+                    message: error.localizedDescription
+                ))
+            }
+        }
+        return outcomes
+    }
+
+    /// 动态模型获取的共享实现（供默认 `listModels` 与测试复用）。
+    /// - `ModelCache` 命中直接返回（300s TTL）；
+    /// - 无凭据或上游失败静默回退静态目录；
+    /// - 上游成功且非空时写缓存。
+    nonisolated static func fetchDynamicModels(
+        id: String,
+        modelsURL: URL,
+        staticModels: [Model],
+        credential: ProviderCredential?
+    ) async -> [Model] {
+        // 1. 缓存命中
+        if let cached = await ModelCache.shared.get(id) {
+            return cached
+        }
+        // 2. 无凭据时回退静态目录
+        let envName = "\(id.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"
+        let token: String
+        if let apiKey = credential?.apiKey, !apiKey.isEmpty {
+            token = apiKey
+        } else if let env = RouteConfig.envValue([envName]), !env.isEmpty {
+            token = env
+        } else {
+            return staticModels
+        }
+        // 3. 打上游
+        var request = URLRequest(url: modelsURL)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await ProviderHTTPClient.shared.data(for: request, retryPolicy: ProviderHTTPRetryPolicy())
+            guard (200 ..< 300).contains(response.statusCode) else {
+                return staticModels
+            }
+            let decoded = try JSONDecoder().decode(DynamicModelsResponse.self, from: data)
+            let models = decoded.data.map { Model(id: $0.id, name: $0.id) }
+            if !models.isEmpty {
+                await ModelCache.shared.set(id, models: models)
+                return models
+            }
+            return staticModels
+        } catch {
+            return staticModels
         }
     }
 }
