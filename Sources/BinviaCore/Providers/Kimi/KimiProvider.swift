@@ -18,6 +18,7 @@ public enum KimiProviderDescriptor {
         supportsStreaming: true,
         modelsURL: nil,
         forceStream: true,
+        usageFetcherFactory: { KimiUsageFetcher() },
         makeProvider: { KimiProvider() }
     )
 }

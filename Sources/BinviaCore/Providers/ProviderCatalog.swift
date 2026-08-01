@@ -10,5 +10,12 @@ public enum ProviderCatalog {
         ProviderRegistry.shared.register(OpenAIProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(OpenCodeProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(KimiProviderDescriptor.descriptor)
+        // Phase 18：OpenAI 兼容（opencode-go / xiaomi-mimo / qwen-cloud）
+        ProviderRegistry.shared.register(OpenCodeGoProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(XiaomiMimoProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(QwenCloudProviderDescriptor.descriptor)
+        // Phase 18：Anthropic 兼容（zai / minimax）
+        ProviderRegistry.shared.register(ZaiProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(MiniMaxProviderDescriptor.descriptor)
     }
 }

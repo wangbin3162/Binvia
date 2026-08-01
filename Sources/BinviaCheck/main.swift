@@ -301,8 +301,12 @@ func registryReverseIndexTests() {
     let owners = registry.providers(forModel: "deepseek-v4-pro")
     expectEqual(Set(owners), Set(["codebuddy-cn", "deepseek"]), "反向索引: deepseek-v4-pro 归属两家")
 
-    // 单 provider 模型
-    expectEqual(registry.providers(forModel: "glm-5.2"), ["codebuddy-cn"], "反向索引: glm-5.2 单归属")
+    // glm-5.2 同时存在于 codebuddy-cn / zai / opencode-go（Phase 18 新增）静态目录
+    expectEqual(
+        Set(registry.providers(forModel: "glm-5.2")),
+        Set(["codebuddy-cn", "zai", "opencode-go"]),
+        "反向索引: glm-5.2 归属 codebuddy-cn、zai、opencode-go"
+    )
     expectEqual(registry.providers(forModel: "gemini-3.6-flash-high"), ["antigravity"], "反向索引: gemini 单归属")
     expectEqual(registry.providers(forModel: "nope-model"), [], "反向索引: 未知模型空归属")
 }
@@ -311,9 +315,9 @@ func routerDisambiguationTests() {
     ProviderCatalog.registerAll()
     let router = Router(registry: .shared)
 
-    // 阶段 2：单候选直选（唯一供应商拥有）
+    // 阶段 3：前缀启发式——glm-5.1 被 codebuddy-cn 与 zai 拥有，glm 规则 → codebuddy-cn
     if let r = router.resolve("glm-5.1") {
-        expectEqual(r.providerID, "codebuddy-cn", "单候选 glm-5.1 → codebuddy-cn")
+        expectEqual(r.providerID, "codebuddy-cn", "前缀启发式 glm-5.1 → codebuddy-cn")
     } else {
         failed += 1
         print("FAIL: glm-5.1 应解析成功")
@@ -1494,6 +1498,470 @@ func antigravityUsageFetcherTests() async throws {
     }
 }
 
+// MARK: - Phase 18: Anthropic 信封翻译器（纯单测）
+
+/// Anthropic 兼容上游请求体记录器（锁保护），供 zai / minimax 测试断言。
+private final class AnthropicMockState: @unchecked Sendable {
+    static let shared = AnthropicMockState()
+    private let lock = NSLock()
+    private var bodies: [String] = []
+
+    var lastBody: String? {
+        lock.lock(); defer { lock.unlock() }
+        return bodies.last
+    }
+
+    var requestCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return bodies.count
+    }
+
+    func record(body: Data) {
+        lock.lock(); defer { lock.unlock() }
+        bodies.append(String(data: body, encoding: .utf8) ?? "")
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        bodies = []
+    }
+}
+
+/// 构造带 `event:` 行的 Anthropic SSE 事件。
+func anthropicEvent(_ type: String, _ payload: String) -> String {
+    "event: \(type)\ndata: \(payload)\n\n"
+}
+
+func anthropicTranslatorTests() {
+    // —— 请求方向 ——
+    let requestMessages: [ChatMessage] = [
+        ChatMessage(role: .system, content: "You are helpful"),
+        ChatMessage(role: .user, content: "Hello"),
+        ChatMessage(role: .assistant, content: "Hi there"),
+        ChatMessage(role: .tool, content: "tool result"),
+        ChatMessage(role: .user, content: "again"),
+    ]
+    let body = AnthropicEnvelopeTranslator.makeAnthropicRequest(
+        model: "glm-5.2", messages: requestMessages, system: "sys", maxTokens: nil, stream: true
+    )
+    expectEqual(body["model"] as? String, "glm-5.2", "Anthropic body model")
+    expectEqual(body["max_tokens"] as? Int, 4096, "Anthropic max_tokens 未传时默认 4096")
+    expectEqual(body["stream"] as? Bool, true, "Anthropic stream 透传")
+    expectEqual(body["system"] as? String, "sys", "Anthropic system 独立提取")
+    if let msgs = body["messages"] as? [[String: Any]] {
+        expectEqual(msgs.count, 4, "Anthropic messages 排除 system 且保留顺序")
+        expectEqual(msgs[0]["role"] as? String, "user", "user role 映射")
+        expectEqual(msgs[0]["content"] as? String, "Hello", "user content 保留")
+        expectEqual(msgs[1]["role"] as? String, "assistant", "assistant role 映射")
+        expectEqual(msgs[2]["role"] as? String, "user", "tool role 映射为 user")
+        expectEqual(msgs[3]["role"] as? String, "user", "尾部 user 保留")
+    } else {
+        failed += 1
+        print("FAIL: Anthropic messages 结构解析失败")
+    }
+
+    // 显式 max_tokens；无 system 时省略 system 字段
+    let body2 = AnthropicEnvelopeTranslator.makeAnthropicRequest(
+        model: "m", messages: [ChatMessage(role: .user, content: "hi")], system: nil, maxTokens: 128, stream: false
+    )
+    expectEqual(body2["max_tokens"] as? Int, 128, "Anthropic max_tokens 显式值")
+    expectEqual(body2["stream"] as? Bool, false, "Anthropic stream=false 透传")
+    expectNil(body2["system"], "无 system 消息时省略 system 字段")
+
+    // —— 响应方向 ——
+    var hasRole = false
+    var lastStop: String?
+
+    // message_start 忽略
+    let start = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "message_start", "message": ["id": "msg_1"]],
+        model: "glm-5.2", id: "msg_1", created: 1,
+        hasEmittedRole: &hasRole, lastStopReason: &lastStop
+    )
+    expectNil(start, "message_start 忽略")
+
+    // content_block_delta → 内容块（首个带 role）
+    let delta1 = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "content_block_delta", "delta": ["type": "text_delta", "text": "Hello"]],
+        model: "glm-5.2", id: "msg_1", created: 1,
+        hasEmittedRole: &hasRole, lastStopReason: &lastStop
+    )
+    expectTrue(delta1 != nil, "text_delta 产出 chunk")
+    if let delta1 {
+        expectEqual(delta1["object"] as? String, "chat.completion.chunk", "chunk object")
+        expectEqual(delta1["model"] as? String, "glm-5.2", "chunk model")
+        if let choices = delta1["choices"] as? [[String: Any]], let first = choices.first {
+            let d = first["delta"] as? [String: Any]
+            expectEqual(d?["role"] as? String, "assistant", "首个内容块发射 role")
+            expectEqual(d?["content"] as? String, "Hello", "内容块 content")
+        } else {
+            failed += 1
+            print("FAIL: chunk choices 结构")
+        }
+    }
+
+    // 第二个内容块不再发射 role
+    let delta2 = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "content_block_delta", "delta": ["type": "text_delta", "text": " world"]],
+        model: "glm-5.2", id: "msg_1", created: 1,
+        hasEmittedRole: &hasRole, lastStopReason: &lastStop
+    )
+    if let delta2, let choices = delta2["choices"] as? [[String: Any]], let first = choices.first {
+        let d = first["delta"] as? [String: Any]
+        expectNil(d?["role"], "第二个内容块不再发射 role")
+        expectEqual(d?["content"] as? String, " world", "第二个内容块 content")
+    } else {
+        failed += 1
+        print("FAIL: 第二个内容块结构")
+    }
+
+    // message_delta end_turn → finish_reason stop
+    let stop = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "message_delta", "delta": ["stop_reason": "end_turn"]],
+        model: "glm-5.2", id: "msg_1", created: 1,
+        hasEmittedRole: &hasRole, lastStopReason: &lastStop
+    )
+    if let stop, let choices = stop["choices"] as? [[String: Any]], let first = choices.first {
+        expectEqual(first["finish_reason"] as? String, "stop", "end_turn → stop")
+        expectEqual((first["delta"] as? [String: Any])?.isEmpty, true, "finish chunk delta 为空")
+    } else {
+        failed += 1
+        print("FAIL: message_delta chunk 结构")
+    }
+    expectEqual(lastStop, "stop", "lastStopReason 记录 stop")
+
+    // message_delta max_tokens → length
+    var hasRole2 = true
+    var lastStop2: String?
+    let length = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "message_delta", "delta": ["stop_reason": "max_tokens"]],
+        model: "m", id: "x", created: 1, hasEmittedRole: &hasRole2, lastStopReason: &lastStop2
+    )
+    if let length, let choices = length["choices"] as? [[String: Any]], let first = choices.first {
+        expectEqual(first["finish_reason"] as? String, "length", "max_tokens → length")
+    } else {
+        failed += 1
+        print("FAIL: max_tokens chunk 结构")
+    }
+    expectEqual(lastStop2, "length", "lastStopReason 记录 length")
+
+    // message_stop 忽略
+    var hasRole3 = false
+    var lastStop3: String?
+    let stopEvent = AnthropicEnvelopeTranslator.translateSSEPayload(
+        ["type": "message_stop"], model: "m", id: "x", created: 1,
+        hasEmittedRole: &hasRole3, lastStopReason: &lastStop3
+    )
+    expectNil(stopEvent, "message_stop 忽略")
+}
+
+// MARK: - Phase 18: zai / minimax 集成（URLProtocol mock，无本地 HTTPServer）
+
+/// zai / minimax 共享集成测试：stream=true 透传 OpenAI SSE，stream=false 聚合，
+/// 并断言上游请求体（恒 stream:true + max_tokens + 正确 roles）。
+func runAnthropicCompatSuite(
+    providerID: String,
+    makeProvider: () -> any Provider,
+    apiKeyEnv: String,
+    baseURLEnv: String,
+    chatModel: String
+) async throws {
+    AnthropicMockState.shared.reset()
+    unsetenv(apiKeyEnv)
+    unsetenv(baseURLEnv)
+    defer {
+        unsetenv(apiKeyEnv)
+        unsetenv(baseURLEnv)
+    }
+    setenv(apiKeyEnv, "mock-key", 1)
+    setenv(baseURLEnv, "https://mock.test/anthropic/v1/messages", 1)
+
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+
+    let sse =
+        anthropicEvent("message_start", #"{"type":"message_start","message":{"id":"msg_\#(providerID)_1","role":"assistant","content":[],"model":"\#(chatModel)","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}"#)
+        + anthropicEvent("content_block_start", #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#)
+        + anthropicEvent("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
+        + anthropicEvent("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#)
+        + anthropicEvent("message_delta", #"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#)
+        + anthropicEvent("message_stop", #"{"type":"message_stop"}"#)
+
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        expectEqual(
+            request.url?.absoluteString,
+            "https://mock.test/anthropic/v1/messages?beta=true",
+            "\(providerID) 请求 URL 带 ?beta=true"
+        )
+        expectEqual(request.value(forHTTPHeaderField: "x-api-key"), "mock-key", "\(providerID) x-api-key 头")
+        expectEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01", "\(providerID) anthropic-version 头")
+        AnthropicMockState.shared.record(body: Data((requestBodyString(request) ?? "").utf8))
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data(sse.utf8))
+    }
+
+    // 1) 客户端 stream=true：OpenAI 格式 SSE 透传（内容 + role + finish_reason + [DONE]）
+    let streamReq = ChatRequest(model: chatModel, messages: [ChatMessage(role: .user, content: "hi")], stream: true)
+    let stream = try await makeProvider().chat(request: streamReq, rawBody: nil, credential: nil)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""content":"Hello""#), "\(providerID) 流式翻译内容块 Hello，实际: \(text)")
+    expectTrue(text.contains(#""content":" world""#), "\(providerID) 流式翻译内容块 world")
+    expectTrue(text.contains(#""role":"assistant""#), "\(providerID) 首个内容块带 role")
+    expectTrue(text.contains(#""finish_reason":"stop""#), "\(providerID) 流式 finish_reason stop")
+    expectTrue(text.contains("[DONE]"), "\(providerID) 流式以 [DONE] 结束")
+
+    // 上游请求体断言：恒 stream:true + max_tokens + messages 正确 roles
+    expectEqual(AnthropicMockState.shared.requestCount, 1, "\(providerID) chat 请求上游一次")
+    let upstreamBody = AnthropicMockState.shared.lastBody ?? ""
+    expectTrue(upstreamBody.contains("\"stream\":true"), "\(providerID) 上游请求体恒 stream=true，实际: \(upstreamBody)")
+    expectTrue(upstreamBody.contains("\"max_tokens\":4096"), "\(providerID) 上游请求体默认 max_tokens=4096，实际: \(upstreamBody)")
+    expectTrue(upstreamBody.contains("\"model\":\"\(chatModel)\""), "\(providerID) 上游请求体 model")
+    expectTrue(upstreamBody.contains("\"role\":\"user\""), "\(providerID) 上游请求体 user role，实际: \(upstreamBody)")
+
+    // 2) 客户端 stream=false：聚合成单个 OpenAI JSON
+    AnthropicMockState.shared.reset()
+    let nonStreamReq = ChatRequest(model: chatModel, messages: [ChatMessage(role: .user, content: "hi")], stream: false)
+    let nonStream = try await makeProvider().chat(request: nonStreamReq, rawBody: nil, credential: nil)
+    var chunks: [Data] = []
+    for try await chunk in nonStream { chunks.append(chunk) }
+    expectEqual(chunks.count, 1, "\(providerID) 非流式客户端拿单个聚合 JSON 块")
+    if let json = try? JSONSerialization.jsonObject(with: chunks[0]) as? [String: Any],
+       let choices = json["choices"] as? [[String: Any]],
+       let first = choices.first,
+       let message = first["message"] as? [String: Any] {
+        expectEqual(message["content"] as? String, "Hello world", "\(providerID) 聚合内容")
+        expectEqual(first["finish_reason"] as? String, "stop", "\(providerID) 聚合 finish_reason")
+        expectEqual(json["model"] as? String, chatModel, "\(providerID) 聚合 model")
+    } else {
+        failed += 1
+        print("FAIL: \(providerID) 聚合 JSON 结构解析失败")
+    }
+    expectEqual(AnthropicMockState.shared.requestCount, 1, "\(providerID) 非流式也请求一次（恒 stream:true）")
+}
+
+func zaiIntegrationTests() async throws {
+    unsetenv("ZAI_API_KEY")
+    unsetenv("ZAI_BASE_URL")
+    defer {
+        unsetenv("ZAI_API_KEY")
+        unsetenv("ZAI_BASE_URL")
+    }
+
+    // 0) 无凭据时 chat 同步抛 missingCredentials
+    await expectThrows({
+        _ = try await ZaiProvider().chat(
+            request: ChatRequest(model: "glm-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true),
+            rawBody: nil, credential: nil
+        )
+    }, "zai 无凭据时 chat 抛 missingCredentials")
+
+    try await runAnthropicCompatSuite(
+        providerID: "zai",
+        makeProvider: { ZaiProvider() },
+        apiKeyEnv: "ZAI_API_KEY",
+        baseURLEnv: "ZAI_BASE_URL",
+        chatModel: "glm-5.2"
+    )
+}
+
+func minimaxIntegrationTests() async throws {
+    try await runAnthropicCompatSuite(
+        providerID: "minimax",
+        makeProvider: { MiniMaxProvider() },
+        apiKeyEnv: "MINIMAX_API_KEY",
+        baseURLEnv: "MINIMAX_BASE_URL",
+        chatModel: "MiniMax-M3"
+    )
+}
+
+// MARK: - Phase 18: OpenAI 兼容供应商集成（URLProtocol mock，无本地 HTTPServer）
+
+/// opencode-go / xiaomi-mimo / qwen-cloud 共享集成测试：
+/// listModels 命中 mock 上游，chat 透传 SSE（含内容与 [DONE]）。
+func runOpenAICompatSuite(
+    providerID: String,
+    makeProvider: () -> any Provider,
+    apiKeyEnv: String,
+    baseURLEnv: String,
+    chatModel: String
+) async throws {
+    unsetenv(apiKeyEnv)
+    unsetenv(baseURLEnv)
+    defer {
+        unsetenv(apiKeyEnv)
+        unsetenv(baseURLEnv)
+    }
+    setenv(apiKeyEnv, "mock-key", 1)
+    setenv(baseURLEnv, "https://mock.test/v1", 1)
+    await ModelCache.shared.invalidate(providerID)
+
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+
+    let sse =
+        sseChunk(#"{"id":"chatcmpl-mock","model":"\#(chatModel)","created":1,"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-mock","model":"\#(chatModel)","created":1,"choices":[{"delta":{"content":" there"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-mock","model":"\#(chatModel)","created":1,"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+        + sseChunk("[DONE]")
+
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        if request.httpMethod == "GET" {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[{"id":"mock-1","owned_by":"mock"}]}"#.utf8))
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data(sse.utf8))
+    }
+
+    // 1) listModels 命中 mock（默认实现：ModelCache → modelsURL → 静态兜底）
+    let models = try await makeProvider().listModels(credential: nil)
+    expectEqual(models.map(\.id), ["mock-1"], "\(providerID) listModels 命中 mock 上游")
+
+    // 2) chat stream=true 透传 SSE（含内容块与 [DONE]）
+    let request = ChatRequest(model: chatModel, messages: [ChatMessage(role: .user, content: "hi")], stream: true)
+    let stream = try await makeProvider().chat(request: request, rawBody: nil, credential: nil)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""content":"Hi""#), "\(providerID) SSE 透传包含 Hi，实际: \(text)")
+    expectTrue(text.contains("[DONE]"), "\(providerID) SSE 透传含 [DONE]")
+
+    await ModelCache.shared.invalidate(providerID)
+}
+
+func opencodeGoIntegrationTests() async throws {
+    try await runOpenAICompatSuite(
+        providerID: "opencode-go",
+        makeProvider: { OpenCodeGoProvider() },
+        apiKeyEnv: "OPENCODE_GO_API_KEY",
+        baseURLEnv: "OPENCODE_GO_BASE_URL",
+        chatModel: "glm-5.2"
+    )
+}
+
+func xiaomiMimoIntegrationTests() async throws {
+    try await runOpenAICompatSuite(
+        providerID: "xiaomi-mimo",
+        makeProvider: { XiaomiMimoProvider() },
+        apiKeyEnv: "XIAOMI_MIMO_API_KEY",
+        baseURLEnv: "XIAOMI_MIMO_BASE_URL",
+        chatModel: "MiMo-V2.5"
+    )
+}
+
+func qwenCloudIntegrationTests() async throws {
+    try await runOpenAICompatSuite(
+        providerID: "qwen-cloud",
+        makeProvider: { QwenCloudProvider() },
+        apiKeyEnv: "QWEN_CLOUD_API_KEY",
+        baseURLEnv: "QWEN_CLOUD_BASE_URL",
+        chatModel: "qwen3.7-max"
+    )
+}
+
+// MARK: - Phase 18: Kimi 用量查询（URLProtocol mock）
+
+func kimiUsageFetcherTests() async throws {
+    unsetenv("KIMI_API_KEY")
+    unsetenv("KIMI_BASE_URL")
+    unsetenv("MOONSHOT_API_KEY")
+    unsetenv("MOONSHOT_BASE_URL")
+    defer {
+        unsetenv("KIMI_API_KEY")
+        unsetenv("KIMI_BASE_URL")
+        unsetenv("MOONSHOT_API_KEY")
+        unsetenv("MOONSHOT_BASE_URL")
+    }
+
+    // 1) 正常解析：data[0].available_balance（字符串）→ Decimal
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.url?.absoluteString, "https://mock.test/v1/users/me/balance", "Kimi 余额请求 URL")
+            expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key", "Kimi 鉴权头")
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[{"available_balance":"88.50","voucher_balance":"0.00","currency":"CNY","is_available":true}]}"#.utf8))
+        }
+        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectEqual(snapshot.providerID, "kimi", "Kimi 快照 providerID")
+        expectEqual(snapshot.balance, Decimal(string: "88.50"), "Kimi 余额解析（字符串 → Decimal）")
+        expectEqual(snapshot.currency, "CNY", "Kimi 币种")
+        expectNil(snapshot.error, "Kimi 成功快照无 error")
+    }
+
+    // 2) 顶层 available_balance 回退
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data(#"{"available_balance":"12.34"}"#.utf8))
+        }
+        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectEqual(snapshot.balance, Decimal(string: "12.34"), "Kimi 顶层 available_balance 回退")
+    }
+
+    // 3) 字段缺失 → error 快照（不抛错）
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data(#"{"data":[]}"#.utf8))
+        }
+        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectNil(snapshot.balance, "字段缺失时 balance 为 nil")
+        expectTrue(snapshot.error != nil, "字段缺失时返回 error 快照")
+    }
+
+    // 4) 非 2xx 抛 upstreamError
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data("unauthorized".utf8))
+        }
+        await expectThrows({
+            _ = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "bad-key"))
+        }, "Kimi 401 抛 upstreamError")
+    }
+
+    // 5) 无凭据抛 missingCredentials（不触发网络）
+    await expectThrows({
+        _ = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "Kimi 无凭据抛 missingCredentials")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -1516,6 +1984,18 @@ unsetenv("OPENCODE_BASE_URL")
 unsetenv("KIMI_API_KEY")
 unsetenv("MOONSHOT_API_KEY")
 unsetenv("KIMI_BASE_URL")
+unsetenv("MOONSHOT_BASE_URL")
+unsetenv("ZAI_API_KEY")
+unsetenv("ZAI_BASE_URL")
+unsetenv("MINIMAX_API_KEY")
+unsetenv("MINIMAX_BASE_URL")
+unsetenv("OPENCODE_GO_API_KEY")
+unsetenv("OPENCODE_GO_BASE_URL")
+unsetenv("XIAOMI_MIMO_API_KEY")
+unsetenv("XIAOMI_MIMO_BASE_URL")
+unsetenv("QWEN_CLOUD_API_KEY")
+unsetenv("QWEN_CLOUD_BASE_URL")
+unsetenv("DASHSCOPE_API_KEY")
 
 await run("Router 路由解析与消歧", routerTests)
 await run("ProviderRegistry 反向索引", registryReverseIndexTests)
@@ -1538,6 +2018,13 @@ await run("testAllModels 串行批量测试", testAllModelsSuite)
 await run("modelsURL 动态模型兜底", dynamicModelsURLSuite)
 await run("DeepSeek 用量查询（URLProtocol mock）", deepSeekUsageFetcherTests)
 await run("Antigravity 用量查询（URLProtocol mock）", antigravityUsageFetcherTests)
+await run("Anthropic 信封翻译器", anthropicTranslatorTests)
+await run("zai 集成（Anthropic SSE→OpenAI，URLProtocol mock）", zaiIntegrationTests)
+await run("minimax 集成（Anthropic SSE→OpenAI，URLProtocol mock）", minimaxIntegrationTests)
+await run("opencode-go 集成（URLProtocol mock）", opencodeGoIntegrationTests)
+await run("xiaomi-mimo 集成（URLProtocol mock）", xiaomiMimoIntegrationTests)
+await run("qwen-cloud 集成（URLProtocol mock）", qwenCloudIntegrationTests)
+await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 
 print("")
 print("========================================")
