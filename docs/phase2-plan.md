@@ -204,88 +204,88 @@ GUI 轮询：在 `AppState` 新增 `usageSnapshots: [String: ProviderUsageSnapsh
 > 依赖：无（其他 Phase 都依赖此）
 > 预计：~2 天
 
-- [ ] 12.1 `ProviderDescriptor` 新增 `modelsURL`、`forceStream`、`usageFetcherFactory` 字段
-- [ ] 12.2 `ProviderRegistry` 构建 `MODEL_TO_PROVIDERS` 反向索引
-- [ ] 12.3 `Router` 消歧升级：显式前缀 → 单候选直选 → 前缀启发式 → 字母序兜底
-- [ ] 12.4 `RouteConfig.apiKeys` 字段类型从 `[String]` 扩展为 `[GatewayKeyConfig]`（含 `enabledModels: [String]?`），旧字符串数组自动迁移
-- [ ] 12.5 `ConfigStore` version 升至 2，迁移逻辑 + 单测
-- [ ] 12.6 `RouteHandler` 增加 gateway key 级 `enabledModels` 过滤（403 Forbidden）
-- [ ] 12.7 BinviaCheck 新增：反向索引消歧、前缀启发式、迁移逻辑、enabledModels 过滤
+- [x] 12.1 `ProviderDescriptor` 新增 `modelsURL`、`forceStream`、`usageFetcherFactory` 字段
+- [x] 12.2 `ProviderRegistry` 构建 `MODEL_TO_PROVIDERS` 反向索引
+- [x] 12.3 `Router` 消歧升级：显式前缀 → 单候选直选 → 前缀启发式 → 字母序兜底
+- [x] 12.4 `RouteConfig.apiKeys` 字段类型从 `[String]` 扩展为 `[GatewayKeyConfig]`（含 `enabledModels: [String]?`），旧字符串数组自动迁移
+- [x] 12.5 `ConfigStore` version 升至 2，迁移逻辑 + 单测
+- [x] 12.6 `RouteHandler` 增加 gateway key 级 `enabledModels` 过滤（403 Forbidden）
+- [x] 12.7 BinviaCheck 新增：反向索引消歧、前缀启发式、迁移逻辑、enabledModels 过滤
 
 ### Phase 13 — 供应商级测试 + 动态模型扩展
 
 > 依赖：Phase 12
 > 预计：~1 天
 
-- [ ] 13.1 `Provider.testAllModels()` 默认实现：调 `listModels` → 串行 `testModel` → 汇总结果
-- [ ] 13.2 `SettingsProviderPane` 头部新增「测试全部模型」按钮（与「测试连接」并列），进度条 + 结果列表
-- [ ] 13.3 `ProviderDescriptor.modelsURL` 接入：`listModels` 默认实现改为「`ModelCache` 优先 → 上游 `modelsURL` → 静态兜底」
-- [ ] 13.4 `ModelCache` 推广到所有供应商（CodeBuddyCN 仍静态，但走统一接口）
-- [ ] 13.5 BinviaCheck 新增：`testAllModels` 串行逻辑、`modelsURL` 兜底
+- [x] 13.1 `Provider.testAllModels()` 默认实现：调 `listModels` → 串行 `testModel` → 汇总结果
+- [x] 13.2 `SettingsProviderPane` 头部新增「测试全部模型」按钮（与「测试连接」并列），进度条 + 结果列表
+- [x] 13.3 `ProviderDescriptor.modelsURL` 接入：`listModels` 默认实现改为「`ModelCache` 优先 → 上游 `modelsURL` → 静态兜底」
+- [x] 13.4 `ModelCache` 推广到所有供应商（CodeBuddyCN 仍静态，但走统一接口）
+- [x] 13.5 BinviaCheck 新增：`testAllModels` 串行逻辑、`modelsURL` 兜底
 
 ### Phase 14 — OpenAI 接入（需求 8，第一批）
 
 > 依赖：Phase 12
 > 预计：~1 天
 
-- [ ] 14.1 `Sources/BinviaCore/Providers/OpenAI/` 新建：`OpenAIProviderDescriptor` + `OpenAIProvider`
-- [ ] 14.2 baseURL=`https://api.openai.com/v1`，authType=`.apiKey`，modelsURL=`/v1/models`
-- [ ] 14.3 `chat` 实现：标准 OpenAI 兼容请求（`stream` 透传，非流式直接 body），无需 envelope 翻译
-- [ ] 14.4 静态模型目录兜底（gpt-5.6 / 5.5 / 5.4 / 4.1 / 4o / o3 / o4-mini）
-- [ ] 14.5 `ProviderCatalog.registerAll()` 加一行
-- [ ] 14.6 GUI 设置面板：apiKey 段位支持 OpenAI 配置（与 DeepSeek 同模式）
-- [ ] 14.7 BinviaCheck 集成测试（mock `/v1/models` + mock `/v1/chat/completions`）
+- [x] 14.1 `Sources/BinviaCore/Providers/OpenAI/` 新建：`OpenAIProviderDescriptor` + `OpenAIProvider`
+- [x] 14.2 baseURL=`https://api.openai.com/v1`，authType=`.apiKey`，modelsURL=`/v1/models`
+- [x] 14.3 `chat` 实现：标准 OpenAI 兼容请求（`stream` 透传，非流式直接 body），无需 envelope 翻译
+- [x] 14.4 静态模型目录兜底（gpt-5.6 / 5.5 / 5.4 / 4.1 / 4o / o3 / o4-mini）
+- [x] 14.5 `ProviderCatalog.registerAll()` 加一行
+- [x] 14.6 GUI 设置面板：apiKey 段位支持 OpenAI 配置（与 DeepSeek 同模式）
+- [x] 14.7 BinviaCheck 集成测试（mock `/v1/models` + mock `/v1/chat/completions`）
 
 ### Phase 15 — opencode + kimi 接入（需求 9，第一批）
 
 > 依赖：Phase 14（验证 OpenAI 兼容供应商接入流程）
 > 预计：~1.5 天
 
-- [ ] 15.1 `Providers/OpenCode/`：baseURL=`https://opencode.ai/zen/v1`，alias=`oc`，`passthroughModels=true`（动态为主）
-- [ ] 15.2 `Providers/Kimi/`：baseURL=`https://api.moonshot.ai/v1`，alias=`kimi`，`forceStream=true`（参考 CodeBuddyCN 强制流式 + 聚合模式）
-- [ ] 15.3 `ProviderCatalog` 注册两家
-- [ ] 15.4 GUI 配置段位（apiKey 模式）
-- [ ] 15.5 BinviaCheck 集成测试
+- [x] 15.1 `Providers/OpenCode/`：baseURL=`https://opencode.ai/zen/v1`，alias=`oc`，`passthroughModels=true`（动态为主）
+- [x] 15.2 `Providers/Kimi/`：baseURL=`https://api.moonshot.ai/v1`，alias=`kimi`，`forceStream=true`（参考 CodeBuddyCN 强制流式 + 聚合模式）
+- [x] 15.3 `ProviderCatalog` 注册两家
+- [x] 15.4 GUI 配置段位（apiKey 模式）
+- [x] 15.5 BinviaCheck 集成测试
 
 ### Phase 16 — 用量查询框架 + 三个已有供应商
 
 > 依赖：Phase 12
 > 预计：~3 天
 
-- [ ] 16.1 `Networking/Usage/` 新建：`ProviderUsageFetcher` 协议、`ProviderUsageSnapshot` 模型、`UsageCache` actor（5min TTL）
-- [ ] 16.2 `DeepSeekUsageFetcher`：`GET /user/balance`，解析 `balance_infos[]`
-- [ ] 16.3 `AntigravityUsageFetcher`：复用 OAuth 凭据，调 `:retrieveUserQuota` + `:retrieveUserQuotaSummary` 双 RPC
-- [ ] 16.4 `CodeBuddyCNUsageFetcher`：**抓包分析 CodeBuddy 网页存储 schema**（高风险任务）
-  - [ ] 16.4a 调研：CodeBuddy 官网登录后的 cookie / localStorage / IndexedDB 中的 token 字段
-  - [ ] 16.4b 实现 `CodeBuddyCNTokenImporter`：从 Chrome localStorage 读取（参考 CodexBar `DeepSeekPlatformTokenImporter`）
-  - [ ] 16.4c 若 16.4a 无可用入口，回退方案 B（手动导入 cookie 到 config）
-- [ ] 16.5 `AppState` 新增 `usageSnapshots` + 5min 轮询
-- [ ] 16.6 `SettingsProviderPane` 新增「用量」Section：余额卡片 / 配额进度条 / 模型级配额列表
-- [ ] 16.7 BinviaCheck 单测（mock 上游用量接口）
+- [x] 16.1 `Networking/Usage/` 新建：`ProviderUsageFetcher` 协议、`ProviderUsageSnapshot` 模型、`UsageCache` actor（5min TTL）
+- [x] 16.2 `DeepSeekUsageFetcher`：`GET /user/balance`，解析 `balance_infos[]`
+- [x] 16.3 `AntigravityUsageFetcher`：复用 OAuth 凭据，调 `:retrieveUserQuota` + `:retrieveUserQuotaSummary` 双 RPC
+- [x] 16.4 `CodeBuddyCNUsageFetcher`：**抓包分析 CodeBuddy 网页存储 schema**（高风险任务）
+  - [ ] 16.4a 调研：CodeBuddy 官网登录后的 cookie / localStorage / IndexedDB 中的 token 字段（**暂缓**：离线无法逆向，见二期完成报告）
+  - [ ] 16.4b 实现 `CodeBuddyCNTokenImporter`：从 Chrome localStorage 读取（参考 CodexBar `DeepSeekPlatformTokenImporter`）（**暂缓**）
+  - [ ] 16.4c 若 16.4a 无可用入口，回退方案 B（手动导入 cookie 到 config）（**暂缓**）
+- [x] 16.5 `AppState` 新增 `usageSnapshots` + 5min 轮询
+- [x] 16.6 `SettingsProviderPane` 新增「用量」Section：余额卡片 / 配额进度条 / 模型级配额列表
+- [x] 16.7 BinviaCheck 单测（mock 上游用量接口）
 
 ### Phase 17 — 网关密钥前缀迁移（需求 6）
 
 > 依赖：无（可与其他 Phase 并行）
 > 预计：~0.5 天
 
-- [ ] 17.1 `AppState.generateAPIKey()` 前缀 `sk-tg-` → `sk-bv-`
-- [ ] 17.2 旧 `sk-tg-` key 仍可鉴权（向后兼容），仅新生成用 `sk-bv-`
-- [ ] 17.3 GUI 文案更新（如有「以 sk-tg- 开头」的说明）
-- [ ] 17.4 BinviaCheck 单测
+- [x] 17.1 `AppState.generateAPIKey()` 前缀 `sk-tg-` → `sk-bv-`
+- [x] 17.2 旧 `sk-tg-` key 仍可鉴权（向后兼容），仅新生成用 `sk-bv-`
+- [x] 17.3 GUI 文案更新（如有「以 sk-tg- 开头」的说明）
+- [x] 17.4 BinviaCheck 单测
 
 ### Phase 18 — 第二批供应商接入 + 用量扩展
 
 > 依赖：Phase 14、15、16
 > 预计：~3 天
 
-- [ ] 18.1 `Providers/OpenCodeGo/`：baseURL=`https://opencode.ai/zen/go/v1`，alias=`ocgo`
-- [ ] 18.2 `Providers/Zai/`：baseURL=`https://api.z.ai/api/anthropic/v1/messages`，alias=`zai`，Anthropic 兼容格式
-- [ ] 18.3 `Providers/MiniMax/`：baseURL=`https://api.minimax.io/anthropic/v1/messages`，alias=`mm`，Anthropic 兼容格式
-- [ ] 18.4 `Providers/XiaomiMimo/`：baseURL=`https://api.xiaomimimo.com/v1`，alias=`mimo`
-- [ ] 18.5 `Providers/QwenCloud/`：baseURL=`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`，alias=`qwc`
-- [ ] 18.6 调研每家用量查询 API，有则实现 `UsageFetcher`，无则不展示卡片（需求 10）
-- [ ] 18.7 BinviaCheck 集成测试
-- [ ] 18.8 README 供应商表格同步更新
+- [x] 18.1 `Providers/OpenCodeGo/`：baseURL=`https://opencode.ai/zen/go/v1`，alias=`ocgo`
+- [x] 18.2 `Providers/Zai/`：baseURL=`https://api.z.ai/api/anthropic/v1/messages`，alias=`zai`，Anthropic 兼容格式
+- [x] 18.3 `Providers/MiniMax/`：baseURL=`https://api.minimax.io/anthropic/v1/messages`，alias=`mm`，Anthropic 兼容格式
+- [x] 18.4 `Providers/XiaomiMimo/`：baseURL=`https://api.xiaomimimo.com/v1`，alias=`mimo`
+- [x] 18.5 `Providers/QwenCloud/`：baseURL=`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`，alias=`qwc`
+- [x] 18.6 调研每家用量查询 API，有则实现 `UsageFetcher`，无则不展示卡片（需求 10）
+- [x] 18.7 BinviaCheck 集成测试
+- [x] 18.8 README 供应商表格同步更新
 
 ---
 
@@ -295,20 +295,20 @@ GUI 轮询：在 `AppState` 新增 `usageSnapshots: [String: ProviderUsageSnapsh
 
 | Phase | 主题 | 状态 | 完成日期 |
 |---|---|---|---|
-| 12 | 路由与配置升级 | ⏳ 未开始 | — |
-| 13 | 供应商级测试 + 动态模型扩展 | ⏳ 未开始 | — |
-| 14 | OpenAI 接入 | ⏳ 未开始 | — |
-| 15 | opencode + kimi 接入 | ⏳ 未开始 | — |
-| 16 | 用量查询框架 + 三家已有供应商 | ⏳ 未开始 | — |
-| 17 | 网关密钥前缀迁移 | ⏳ 未开始 | — |
-| 18 | 第二批供应商 + 用量扩展 | ⏳ 未开始 | — |
+| 12 | 路由与配置升级 | ✅ 已完成 | 2026-08-01 |
+| 13 | 供应商级测试 + 动态模型扩展 | ✅ 已完成 | 2026-08-01 |
+| 14 | OpenAI 接入 | ✅ 已完成 | 2026-08-01 |
+| 15 | opencode + kimi 接入 | ✅ 已完成 | 2026-08-01 |
+| 16 | 用量查询框架 + 三家已有供应商 | ✅ 已完成（CodeBuddy-CN 用量暂缓） | 2026-08-01 |
+| 17 | 网关密钥前缀迁移 | ✅ 已完成 | 2026-08-01 |
+| 18 | 第二批供应商 + 用量扩展 | ✅ 已完成 | 2026-08-01 |
 
 ### 关键里程碑
 
-- **M1（Phase 12-13 完成）**：路由与配置基础就绪，可承接新供应商批量接入。
-- **M2（Phase 14-15 完成）**：第一批新供应商（OpenAI + opencode + kimi）端到端可用。
-- **M3（Phase 16 完成）**：DeepSeek / Antigravity / CodeBuddy-CN 用量卡片上线（CodeBuddy-CN 视抓包结果可能延期）。
-- **M4（Phase 17-18 完成）**：第二批供应商接入完毕，二期全部交付。
+- **M1（Phase 12-13 完成）**：✅ 路由与配置基础就绪（反向索引消歧、v2 配置迁移、enabledModels 白名单、供应商级批量测试、动态模型兜底）。
+- **M2（Phase 14-15 完成）**：✅ 第一批新供应商（OpenAI + opencode + kimi）端到端可用。
+- **M3（Phase 16 完成）**：✅ DeepSeek / Antigravity 用量卡片上线；**CodeBuddy-CN 用量暂缓**（需求 5，待逆向网页存储 schema，见 [二期完成报告](phase2-completion-report.md)）。
+- **M4（Phase 17-18 完成）**：✅ 第二批供应商接入完毕（opencode-go / xiaomi-mimo / qwen-cloud / zai / minimax），二期全部交付。
 
 ---
 
