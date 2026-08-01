@@ -167,8 +167,18 @@ public extension Provider {
         } else {
             return staticModels
         }
-        // 3. 打上游
-        var request = URLRequest(url: modelsURL)
+        // 3. 支持 <PROVIDER>_BASE_URL 环境变量覆盖（测试/镜像场景）：命中时用 base/models
+        //    替代描述符中的 modelsURL（base 已含 /v1，如 http://127.0.0.1:port/v1）。
+        let baseEnvName = "\(id.uppercased().replacingOccurrences(of: "-", with: "_"))_BASE_URL"
+        let effectiveURL: URL
+        if let base = RouteConfig.envValue([baseEnvName]), !base.isEmpty,
+           let derived = URL(string: base + "/models") {
+            effectiveURL = derived
+        } else {
+            effectiveURL = modelsURL
+        }
+        // 4. 打上游
+        var request = URLRequest(url: effectiveURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         do {

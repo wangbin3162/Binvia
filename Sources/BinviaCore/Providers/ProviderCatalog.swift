@@ -7,5 +7,8 @@ public enum ProviderCatalog {
         ProviderRegistry.shared.register(DeepSeekProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(CodeBuddyCNProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(AntigravityProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(OpenAIProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(OpenCodeProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(KimiProviderDescriptor.descriptor)
     }
 }

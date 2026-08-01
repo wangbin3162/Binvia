@@ -908,6 +908,300 @@ func antigravityIntegrationTests() async throws {
     expectTrue(failResult.message.contains("Unknown name"), "400 消息应提取上游 error.message，实际: \(failResult.message)")
 }
 
+// MARK: - OpenAI 集成（本地 HTTPServer 当 mock 上游，Phase 14）
+
+/// OpenAI mock 上游：GET /v1/models 返回模型列表；POST /v1/chat/completions 返回 SSE。
+private let openaiMockHandler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
+    if request.method == "GET", request.path == "/v1/models" {
+        return HTTPResponse.text(
+            200,
+            #"{"data":[{"id":"mock-gpt-1","owned_by":"mock"}]}"#,
+            contentType: "application/json"
+        )
+    }
+    let sse =
+        sseChunk(#"{"id":"chatcmpl-openai","model":"gpt-4o","created":1,"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-openai","model":"gpt-4o","created":1,"choices":[{"delta":{"content":" there"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-openai","model":"gpt-4o","created":1,"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+        + sseChunk("[DONE]")
+    return HTTPResponse.text(200, sse, contentType: "text/event-stream")
+}
+
+func openaiIntegrationTests() async throws {
+    // 0) 无凭据时 chat 应同步抛 missingCredentials
+    unsetenv("OPENAI_API_KEY")
+    unsetenv("OPENAI_BASE_URL")
+    let noCredRequest = ChatRequest(
+        model: "gpt-4o",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    await expectThrows({ _ = try await OpenAIProvider().chat(request: noCredRequest, rawBody: nil, credential: nil) },
+        "无凭据时 OpenAI chat 抛 missingCredentials")
+
+    // 启动本地 mock 上游（真实 socket + HTTP）
+    let server = HTTPServer(handler: openaiMockHandler)
+    var port: Int?
+    var lastError: Error?
+    for _ in 0 ..< 3 {
+        let candidate = Int.random(in: 20_000 ... 60_000)
+        do {
+            try server.start(host: "127.0.0.1", port: candidate)
+            port = candidate
+            break
+        } catch {
+            lastError = error
+        }
+    }
+    guard let port else {
+        failed += 1
+        print("FAIL: OpenAI 无法启动 mock 上游端口: \(String(describing: lastError))")
+        return
+    }
+    defer {
+        server.stop()
+        unsetenv("OPENAI_API_KEY")
+        unsetenv("OPENAI_BASE_URL")
+    }
+
+    setenv("OPENAI_API_KEY", "mock-key", 1)
+    setenv("OPENAI_BASE_URL", "http://127.0.0.1:\(port)/v1", 1)
+    await ModelCache.shared.invalidate("openai")
+
+    // 1) listModels 命中 mock 上游（默认实现：ModelCache → modelsURL → 静态兜底）
+    let models = try await OpenAIProvider().listModels(credential: nil)
+    expectEqual(models.map(\.id), ["mock-gpt-1"], "OpenAI listModels 命中 mock 上游")
+
+    // 2) chat stream=true 透传 SSE（含内容块与 [DONE]）
+    let streamRequest = ChatRequest(
+        model: "gpt-4o",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let stream = try await OpenAIProvider().chat(request: streamRequest, rawBody: nil, credential: nil)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""content":"Hi""#), "OpenAI SSE 应包含 Hi 内容块，实际: \(text)")
+    expectTrue(text.contains("[DONE]"), "OpenAI SSE 应包含 [DONE]")
+
+    // 3) chat stream=false 透传上游数据（不强制流式，原样转发）
+    let nonStreamRequest = ChatRequest(
+        model: "gpt-4o",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: false
+    )
+    let nonStream = try await OpenAIProvider().chat(request: nonStreamRequest, rawBody: nil, credential: nil)
+    var raw = Data()
+    for try await chunk in nonStream { raw.append(chunk) }
+    expectFalse(raw.isEmpty, "OpenAI 非流式请求也应透传上游数据")
+    let rawText = String(data: raw, encoding: .utf8) ?? ""
+    expectTrue(rawText.contains(#""content":"Hi""#), "OpenAI 非流式透传 SSE 应包含 Hi")
+
+    await ModelCache.shared.invalidate("openai")
+}
+
+// MARK: - opencode 集成（本地 HTTPServer 当 mock 上游，Phase 15）
+
+/// opencode mock 上游：GET /v1/models 返回模型列表；POST /v1/chat/completions 返回 SSE。
+private let opencodeMockHandler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
+    if request.method == "GET", request.path == "/v1/models" {
+        return HTTPResponse.text(
+            200,
+            #"{"data":[{"id":"mock-oc-1","owned_by":"mock"}]}"#,
+            contentType: "application/json"
+        )
+    }
+    let sse =
+        sseChunk(#"{"id":"chatcmpl-oc","model":"big-pickle","created":1,"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-oc","model":"big-pickle","created":1,"choices":[{"delta":{"content":" there"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-oc","model":"big-pickle","created":1,"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+        + sseChunk("[DONE]")
+    return HTTPResponse.text(200, sse, contentType: "text/event-stream")
+}
+
+func opencodeIntegrationTests() async throws {
+    unsetenv("OPENCODE_API_KEY")
+    unsetenv("OPENCODE_BASE_URL")
+
+    let server = HTTPServer(handler: opencodeMockHandler)
+    var port: Int?
+    var lastError: Error?
+    for _ in 0 ..< 3 {
+        let candidate = Int.random(in: 20_000 ... 60_000)
+        do {
+            try server.start(host: "127.0.0.1", port: candidate)
+            port = candidate
+            break
+        } catch {
+            lastError = error
+        }
+    }
+    guard let port else {
+        failed += 1
+        print("FAIL: opencode 无法启动 mock 上游端口: \(String(describing: lastError))")
+        return
+    }
+    defer {
+        server.stop()
+        unsetenv("OPENCODE_API_KEY")
+        unsetenv("OPENCODE_BASE_URL")
+    }
+
+    setenv("OPENCODE_API_KEY", "mock-key", 1)
+    setenv("OPENCODE_BASE_URL", "http://127.0.0.1:\(port)/v1", 1)
+    await ModelCache.shared.invalidate("opencode")
+
+    // 1) listModels 命中 mock 上游（modelsURL 路径）
+    let models = try await OpenCodeProvider().listModels(credential: nil)
+    expectEqual(models.map(\.id), ["mock-oc-1"], "opencode listModels 命中 mock 上游")
+
+    // 2) chat 调用成功（SSE 透传）
+    let request = ChatRequest(
+        model: "big-pickle",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let stream = try await OpenCodeProvider().chat(request: request, rawBody: nil, credential: nil)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""content":"Hi""#), "opencode SSE 应包含 Hi 内容块，实际: \(text)")
+    expectTrue(text.contains("[DONE]"), "opencode SSE 应包含 [DONE]")
+
+    await ModelCache.shared.invalidate("opencode")
+}
+
+// MARK: - Kimi 集成（强制流式 + SSEJSONAggregator 聚合，Phase 15）
+
+/// Kimi mock 上游共享状态：记录 chat 请求体（锁保护）。
+private final class KimiMockState: @unchecked Sendable {
+    static let shared = KimiMockState()
+    private let lock = NSLock()
+    private var bodies: [String] = []
+
+    /// 最近一次 chat 请求体。
+    var lastBody: String? {
+        lock.lock(); defer { lock.unlock() }
+        return bodies.last
+    }
+
+    var requestCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return bodies.count
+    }
+
+    func record(body: Data) {
+        lock.lock(); defer { lock.unlock() }
+        bodies.append(String(data: body, encoding: .utf8) ?? "")
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        bodies = []
+    }
+}
+
+/// Kimi mock 上游：仅处理 POST /v1/chat/completions，记录请求体并返回 SSE。
+private let kimiMockHandler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
+    guard request.path == "/v1/chat/completions" else {
+        return HTTPResponse.text(404, "not found")
+    }
+    KimiMockState.shared.record(body: request.body ?? Data())
+    let sse =
+        sseChunk(#"{"id":"chatcmpl-kimi","model":"kimi-k3","created":1,"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-kimi","model":"kimi-k3","created":1,"choices":[{"delta":{"content":" Kimi"},"finish_reason":null}]}"#)
+        + sseChunk(#"{"id":"chatcmpl-kimi","model":"kimi-k3","created":1,"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+        + sseChunk("[DONE]")
+    return HTTPResponse.text(200, sse, contentType: "text/event-stream")
+}
+
+func kimiIntegrationTests() async throws {
+    KimiMockState.shared.reset()
+    unsetenv("KIMI_API_KEY")
+    unsetenv("MOONSHOT_API_KEY")
+    unsetenv("KIMI_BASE_URL")
+
+    // 0) 无凭据时 chat 应同步抛 missingCredentials
+    let noCredRequest = ChatRequest(
+        model: "kimi-k3",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    await expectThrows({ _ = try await KimiProvider().chat(request: noCredRequest, rawBody: nil, credential: nil) },
+        "无凭据时 Kimi chat 抛 missingCredentials")
+
+    let server = HTTPServer(handler: kimiMockHandler)
+    var port: Int?
+    var lastError: Error?
+    for _ in 0 ..< 3 {
+        let candidate = Int.random(in: 20_000 ... 60_000)
+        do {
+            try server.start(host: "127.0.0.1", port: candidate)
+            port = candidate
+            break
+        } catch {
+            lastError = error
+        }
+    }
+    guard let port else {
+        failed += 1
+        print("FAIL: Kimi 无法启动 mock 上游端口: \(String(describing: lastError))")
+        return
+    }
+    defer {
+        server.stop()
+        unsetenv("KIMI_API_KEY")
+        unsetenv("MOONSHOT_API_KEY")
+        unsetenv("KIMI_BASE_URL")
+    }
+
+    setenv("KIMI_API_KEY", "mock-key", 1)
+    setenv("KIMI_BASE_URL", "http://127.0.0.1:\(port)/v1", 1)
+    await ModelCache.shared.invalidate("kimi")
+
+    // 1) 客户端 stream=false → 上游请求体必须强制 stream=true；返回单个聚合 JSON（而非 SSE 透传）
+    let nonStreamRequest = ChatRequest(
+        model: "kimi-k3",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: false
+    )
+    let nonStream = try await KimiProvider().chat(request: nonStreamRequest, rawBody: nil, credential: nil)
+    var chunks: [Data] = []
+    for try await chunk in nonStream { chunks.append(chunk) }
+    expectEqual(chunks.count, 1, "Kimi 非流式客户端应拿到单个聚合 JSON 块")
+    expectEqual(KimiMockState.shared.requestCount, 1, "Kimi chat 请求上游一次")
+    let upstreamBody = KimiMockState.shared.lastBody ?? ""
+    expectTrue(upstreamBody.contains("\"stream\":true"), "Kimi 上游请求体应强制 stream=true，实际: \(upstreamBody)")
+    if let json = try? JSONSerialization.jsonObject(with: chunks[0]) as? [String: Any],
+       let choices = json["choices"] as? [[String: Any]],
+       let first = choices.first,
+       let message = first["message"] as? [String: Any] {
+        expectEqual(message["content"] as? String, "Hello Kimi", "Kimi 聚合内容为 'Hello Kimi'")
+        expectEqual(first["finish_reason"] as? String, "stop", "Kimi 聚合 finish_reason 为 stop")
+    } else {
+        failed += 1
+        print("FAIL: Kimi 聚合 JSON 结构解析失败")
+    }
+
+    // 2) 客户端 stream=true → SSE 透传（含内容块与 [DONE]），且上游请求体仍强制 stream=true
+    KimiMockState.shared.reset()
+    let streamRequest = ChatRequest(
+        model: "kimi-k3",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let stream = try await KimiProvider().chat(request: streamRequest, rawBody: nil, credential: nil)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""content":"Hello""#), "Kimi SSE 透传应包含 Hello 内容块，实际: \(text)")
+    expectTrue(text.contains("[DONE]"), "Kimi SSE 透传应包含 [DONE]")
+    expectTrue(KimiMockState.shared.lastBody?.contains("\"stream\":true") ?? false, "Kimi 流式请求上游 body 也应强制 stream=true")
+
+    await ModelCache.shared.invalidate("kimi")
+}
+
 // MARK: - Phase 13: testAllModels 串行 + modelsURL 动态模型
 
 nonisolated(unsafe) var testAllOrder: [String] = []
@@ -1028,6 +1322,13 @@ unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
 unsetenv("ANTIGRAVITY_ACCESS_TOKEN")
 unsetenv("ANTIGRAVITY_BASE_URL")
 unsetenv("ANTIGRAVITY_PROJECT_ID")
+unsetenv("OPENAI_API_KEY")
+unsetenv("OPENAI_BASE_URL")
+unsetenv("OPENCODE_API_KEY")
+unsetenv("OPENCODE_BASE_URL")
+unsetenv("KIMI_API_KEY")
+unsetenv("MOONSHOT_API_KEY")
+unsetenv("KIMI_BASE_URL")
 
 await run("Router 路由解析与消歧", routerTests)
 await run("ProviderRegistry 反向索引", registryReverseIndexTests)
@@ -1043,6 +1344,9 @@ await run("ProviderHTTPClient 重试", httpRetryTests)
 await run("RouteHandler 路由分发", routeHandlerTests)
 await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)
 await run("Antigravity 集成（本地 mock 上游）", antigravityIntegrationTests)
+await run("OpenAI 集成（本地 mock 上游）", openaiIntegrationTests)
+await run("opencode 集成（本地 mock 上游）", opencodeIntegrationTests)
+await run("Kimi 集成（强制流式 + 聚合）", kimiIntegrationTests)
 await run("testAllModels 串行批量测试", testAllModelsSuite)
 await run("modelsURL 动态模型兜底", dynamicModelsURLSuite)
 

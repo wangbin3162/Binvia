@@ -24,6 +24,9 @@
 | deepseek | `ds` | api-key | ✅ 可用（Phase 0/1） |
 | codebuddy-cn | `cbcn` | OAuth 设备码 | ✅ 已实现（Phase 2，需 `oauth login`） |
 | antigravity | `agy` | Google OAuth PKCE | ✅ 已实现（Phase 3，需 `oauth login`） |
+| openai | `openai` | api-key | ✅ 已实现（Phase 14） |
+| opencode | `oc` | api-key | ✅ 已实现（Phase 15） |
+| kimi | `kimi` | api-key | ✅ 已实现（Phase 15，强制流式） |
 
 ## 快速开始
 
@@ -147,7 +150,7 @@ Sources/
 │   ├── Auth/APIKeyAuthenticator.swift
 │   ├── Monitoring/RequestLogger.swift
 │   ├── Server/                      # 本地 HTTP 服务器 + 路由分发
-│   └── Providers/                   # deepseek / codebuddy-cn / antigravity
+│   └── Providers/                   # deepseek / codebuddy-cn / antigravity / openai / opencode / kimi
 ├── BinviaServer/             # 服务器入口
 ├── BinviaCLI/                # CLI（含 oauth login）
 └── BinviaApp/                # 菜单栏 GUI（SwiftUI）
