@@ -32,6 +32,8 @@ struct SettingsView: View {
         switch selectionModel.pane {
         case .general:
             SettingsGeneralPane()
+        case .test:
+            SettingsTestPane()
         case .gatewayKeys:
             SettingsGatewayKeysPane()
         case let .provider(id):

@@ -72,19 +72,23 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     /// 网关 API Key 列表（v2：对象数组，兼容旧版 `[String]`，加载时自动转换）。
     public var apiKeys: [GatewayKeyConfig]
     public var providers: [String: ProviderConfig]
+    /// 供应商侧栏排序（拖拽自定义）。未列出或为空的 provider 追加在末尾（按 id 字母序）。
+    public var providerOrder: [String]
 
     public init(
         version: Int = 2,
         host: String = "127.0.0.1",
         port: Int = 8231,
         apiKeys: [GatewayKeyConfig] = [],
-        providers: [String: ProviderConfig] = [:]
+        providers: [String: ProviderConfig] = [:],
+        providerOrder: [String] = []
     ) {
         self.version = version
         self.host = host
         self.port = port
         self.apiKeys = apiKeys
         self.providers = providers
+        self.providerOrder = providerOrder
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -93,6 +97,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         case port
         case apiKeys
         case providers
+        case providerOrder
     }
 
     /// v1 → v2 兼容解码：`apiKeys` 既可能是 `[String]`（v1），也可能是 `[{key, enabledModels}]`（v2）。
@@ -107,6 +112,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         } else {
             self.apiKeys = try container.decodeIfPresent([GatewayKeyConfig].self, forKey: .apiKeys) ?? []
         }
+        self.providerOrder = try container.decodeIfPresent([String].self, forKey: .providerOrder) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -116,6 +122,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         try container.encode(port, forKey: .port)
         try container.encode(apiKeys, forKey: .apiKeys)
         try container.encode(providers, forKey: .providers)
+        try container.encodeIfPresent(providerOrder.isEmpty ? nil : providerOrder, forKey: .providerOrder)
     }
 
     /// 全部网关 Key 字符串（鉴权用）。

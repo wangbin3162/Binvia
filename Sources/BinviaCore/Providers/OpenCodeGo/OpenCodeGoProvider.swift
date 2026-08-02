@@ -5,7 +5,7 @@ public enum OpenCodeGoProviderDescriptor {
         metadata: ProviderMetadata(
             id: "opencode-go",
             alias: "ocgo",
-            displayName: "opencode (Go)",
+            displayName: "OpenCode Go",
             authType: .apiKey
         ),
         baseURL: URL(string: "https://opencode.ai/zen/go/v1"),
@@ -22,7 +22,7 @@ public enum OpenCodeGoProviderDescriptor {
     )
 }
 
-/// opencode (Go) 供应商（API key 型）。标准 OpenAI 兼容 chat，与 OpenAIProvider 行为一致。
+/// OpenCode Go 供应商（API key 型）。标准 OpenAI 兼容 chat，与 OpenAIProvider 行为一致。
 ///
 /// 单 key（无轮换）；不强制流式；客户端 `stream` 标志原样转发；非 2xx 错误 body 透传。
 /// `listModels` 走协议默认实现，支持 `OPENCODE_GO_BASE_URL` 覆盖。

@@ -438,8 +438,8 @@ func gatewayKeyWhitelistTests() async throws {
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         let models = json["data"] as? [[String: Any]] ?? []
         let ids = Set(models.compactMap { $0["id"] as? String })
-        expectTrue(ids.contains("deepseek-v4-pro"), "白名单 key 的 /v1/models 包含 deepseek-v4-pro")
-        expectFalse(ids.contains("deepseek-v4-flash"), "白名单 key 的 /v1/models 不含 deepseek-v4-flash")
+        expectTrue(ids.contains("ds/deepseek-v4-pro"), "白名单 key 的 /v1/models 包含 ds/deepseek-v4-pro")
+        expectFalse(ids.contains("ds/deepseek-v4-flash"), "白名单 key 的 /v1/models 不含 ds/deepseek-v4-flash")
     } else {
         failed += 1
         print("FAIL: /v1/models 白名单过滤响应解析失败")
@@ -450,7 +450,7 @@ func gatewayKeyWhitelistTests() async throws {
     if let data = openModelsResp.bodyData(),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         let models = json["data"] as? [[String: Any]] ?? []
-        expectTrue(models.contains { ($0["id"] as? String) == "deepseek-v4-flash" }, "无白名单 key 的 /v1/models 含 deepseek-v4-flash")
+        expectTrue(models.contains { ($0["id"] as? String) == "ds/deepseek-v4-flash" }, "无白名单 key 的 /v1/models 含 ds/deepseek-v4-flash")
     } else {
         failed += 1
         print("FAIL: 无白名单 key 的 /v1/models 响应解析失败")
@@ -646,7 +646,7 @@ func routeHandlerTests() async throws {
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         let models = json["data"] as? [[String: Any]] ?? []
         expectFalse(models.isEmpty, "模型列表不应为空")
-        expectTrue(models.contains { ($0["id"] as? String) == "glm-5.2" }, "模型列表应包含 glm-5.2")
+        expectTrue(models.contains { ($0["id"] as? String) == "cbcn/glm-5.2" }, "模型列表应包含 cbcn/glm-5.2")
     } else {
         failed += 1
         print("FAIL: /v1/models 响应 JSON 解析失败")

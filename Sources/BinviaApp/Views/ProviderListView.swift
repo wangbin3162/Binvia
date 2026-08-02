@@ -19,7 +19,7 @@ struct ProviderListView: View {
 
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(ProviderRegistry.shared.allDescriptors(), id: \.id) { descriptor in
+                    ForEach(appState.orderedProviderDescriptors(), id: \.id) { descriptor in
                         row(for: descriptor)
                         Divider()
                     }

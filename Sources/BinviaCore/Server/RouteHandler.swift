@@ -97,10 +97,13 @@ public struct RouteHandler: Sendable {
 
         var seen = Set<String>()
         var items: [ModelItem] = []
-        let appendModel = { (id: String, providerID: String) in
-            let key = "\(providerID)|\(id)"
-            guard seen.insert(key).inserted else { return }
-            items.append(ModelItem(id: id, object: "model", ownedBy: providerID))
+        // 模型 id 统一归一化为 `<alias>/<modelID>`（无别名用 provider id），
+        // 与网关 key 白名单格式及 Router 的 `alias/model` 解析一致。
+        // 这样同名模型（如 deepseek-v4-flash 同时存在于 codebuddy-cn 与 deepseek）可被区分。
+        let appendModel = { (alias: String, modelID: String, providerID: String) in
+            let normalized = "\(alias)/\(modelID)"
+            guard seen.insert(normalized).inserted else { return }
+            items.append(ModelItem(id: normalized, object: "model", ownedBy: providerID))
         }
 
         // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 时，只返回白名单内模型
@@ -114,7 +117,7 @@ public struct RouteHandler: Sendable {
             return allowedModels.contains("\(aliasOrID)/\(modelID)")
         }
 
-        for descriptor in registry.allDescriptors() {
+        for descriptor in registry.orderedDescriptors(config.providerOrder) {
             // 仅处理已注册且启用的 provider
             guard config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id) else { continue }
 
@@ -130,12 +133,12 @@ public struct RouteHandler: Sendable {
                 }
             }
 
-            // 静态目录与动态结果合并，按 (provider, model id) 去重
+            // 静态目录与动态结果合并，按归一化 id 去重
             for model in descriptor.models where isModelAllowed(alias, model.id) {
-                appendModel(model.id, descriptor.id)
+                appendModel(alias, model.id, descriptor.id)
             }
             for model in dynamicModels ?? [] where isModelAllowed(alias, model.id) {
-                appendModel(model.id, descriptor.id)
+                appendModel(alias, model.id, descriptor.id)
             }
         }
 

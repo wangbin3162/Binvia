@@ -4,6 +4,7 @@ import SwiftUI
 /// 结构借鉴 CodexBar `SettingsPane`。
 enum SettingsPane: Hashable {
     case general
+    case test
     case gatewayKeys
     case provider(String)
 
@@ -11,6 +12,7 @@ enum SettingsPane: Hashable {
     var title: String {
         switch self {
         case .general: return "服务器"
+        case .test: return "测试"
         case .gatewayKeys: return "网关密钥"
         case let .provider(id): return id
         }
@@ -20,6 +22,7 @@ enum SettingsPane: Hashable {
     var systemImage: String? {
         switch self {
         case .general: return "gearshape"
+        case .test: return "waveform"
         case .gatewayKeys: return "key.fill"
         case .provider: return nil
         }
@@ -29,6 +32,7 @@ enum SettingsPane: Hashable {
     var tint: SwiftUI.Color {
         switch self {
         case .general: return .blue
+        case .test: return .purple
         case .gatewayKeys: return .orange
         case .provider: return .accentColor
         }

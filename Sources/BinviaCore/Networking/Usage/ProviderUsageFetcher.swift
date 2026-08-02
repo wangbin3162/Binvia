@@ -68,6 +68,19 @@ public struct ModelQuota: Sendable, Codable, Equatable {
     }
 }
 
+/// 多 Key 余额条目（如 DeepSeek 多 api-key 各自的余额）。`label` 为掩码后的 Key 标识。
+public struct KeyedBalance: Sendable, Codable, Equatable {
+    public let label: String
+    public let balance: Decimal
+    public let currency: String?
+
+    public init(label: String, balance: Decimal, currency: String? = nil) {
+        self.label = label
+        self.balance = balance
+        self.currency = currency
+    }
+}
+
 /// 用量快照。由 `ProviderUsageFetcher.fetchUsage` 返回，`AppState.usageSnapshots` 持有并驱动 GUI。
 ///
 /// 注意：`rawJSON` 存 JSON 文本而非 `[String: Any]`，保持 `Sendable`/`Codable` 兼容（UI 详情可再解析）。
@@ -77,6 +90,8 @@ public struct ProviderUsageSnapshot: Sendable, Codable, Equatable {
     public let balance: Decimal?
     /// 余额币种（如 "CNY" / "USD"）。
     public let currency: String?
+    /// 多 Key 余额条目（DeepSeek 多 api-key 各自余额）。非空时 GUI 逐 Key 展示。
+    public let balances: [KeyedBalance]
     /// 配额窗口（Antigravity 5h / 周；无则空数组）。
     public let quotaWindows: [QuotaWindow]
     /// 模型级配额。
@@ -92,6 +107,7 @@ public struct ProviderUsageSnapshot: Sendable, Codable, Equatable {
         providerID: String,
         balance: Decimal? = nil,
         currency: String? = nil,
+        balances: [KeyedBalance] = [],
         quotaWindows: [QuotaWindow] = [],
         modelQuotas: [ModelQuota] = [],
         rawJSON: String? = nil,
@@ -101,6 +117,7 @@ public struct ProviderUsageSnapshot: Sendable, Codable, Equatable {
         self.providerID = providerID
         self.balance = balance
         self.currency = currency
+        self.balances = balances
         self.quotaWindows = quotaWindows
         self.modelQuotas = modelQuotas
         self.rawJSON = rawJSON

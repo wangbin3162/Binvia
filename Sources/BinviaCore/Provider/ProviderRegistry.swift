@@ -51,6 +51,26 @@ public final class ProviderRegistry: @unchecked Sendable {
         return Array(descriptorsByID.values).sorted { $0.id < $1.id }
     }
 
+    /// 按 `order` 返回描述符：`order` 中列出的 id 优先（保持给定顺序），
+    /// 未列出的追加在末尾（按 id 字母序）。拖拽排序与 /v1/models 输出顺序共用此方法。
+    public func orderedDescriptors(_ order: [String]) -> [ProviderDescriptor] {
+        lock.lock()
+        defer { lock.unlock() }
+        let all = descriptorsByID
+        var seen = Set<String>()
+        var result: [ProviderDescriptor] = []
+        for id in order {
+            if let d = all[id], seen.insert(id).inserted {
+                result.append(d)
+            }
+        }
+        let remaining = all.keys.filter { !seen.contains($0) }.sorted()
+        for id in remaining {
+            if let d = all[id] { result.append(d) }
+        }
+        return result
+    }
+
     public func allProviders() -> [(String, any Provider)] {
         lock.lock()
         defer { lock.unlock() }

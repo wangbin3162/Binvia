@@ -210,6 +210,26 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
+    // MARK: - 供应商排序（拖拽）
+
+    /// 按当前 config.providerOrder 返回有序描述符列表（侧栏 / 菜单 / /v1/models 共用）。
+    func orderedProviderDescriptors() -> [ProviderDescriptor] {
+        ProviderRegistry.shared.orderedDescriptors(config.providerOrder)
+    }
+
+    /// 拖拽重排供应商顺序并持久化。
+    func moveProvider(fromOffsets: IndexSet, toOffset: Int) {
+        var order = config.providerOrder
+        let allIDs = ProviderRegistry.shared.allDescriptors().map(\.id)
+        // 合并尚未记录的 provider（保证 order 覆盖全部已知 id）
+        for id in allIDs where !order.contains(id) {
+            order.append(id)
+        }
+        order.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        config.providerOrder = order
+        try? saveConfig()
+    }
+
     // MARK: - Provider 状态摘要
 
     /// 某 provider 是否已配置凭据（按认证类型判断）。

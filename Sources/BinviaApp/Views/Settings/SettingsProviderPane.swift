@@ -21,7 +21,6 @@ struct SettingsProviderPane: View {
     @State private var manualRefreshToken = ""
     @State private var tokenSaveMessage: String?
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
-    @State private var isManualTokensExpanded = false
     @State private var isManualTokenExpanded = false
 
     /// 模型列表与模型级测试状态。
@@ -175,53 +174,51 @@ struct SettingsProviderPane: View {
     }
 
     /// CodeBuddy：OAuth 设备码登录 + 手动 Access Token（支持多 token 轮换）。
+    /// 手动 Token 区域始终展开（不折叠），样式对齐 DeepSeek 的 API Key 列表。
     private var deviceFlowConnectionSection: some View {
         Section {
             OAuthLoginButton(providerID: providerID)
 
-            DisclosureGroup("手动配置 Access Token（支持多 token 轮换）", isExpanded: $isManualTokensExpanded) {
-                ForEach(Array(draftTokens.indices), id: \.self) { index in
-                    HStack(spacing: 6) {
-                        APIKeyInputField(
-                            title: draftTokens.count > 1 ? "Access Token \(index + 1)" : "Access Token",
-                            text: $draftTokens[index])
-                        if draftTokens.count > 1 {
-                            Button {
-                                draftTokens.remove(at: index)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                                    .foregroundStyle(.secondary)
-                                    .padding(4)
-                            }
-                            .buttonStyle(.plain)
-                            .hoverHighlight(cornerRadius: 4)
-                            .help("移除该 Token")
+            ForEach(Array(draftTokens.indices), id: \.self) { index in
+                HStack(spacing: 6) {
+                    APIKeyInputField(
+                        title: draftTokens.count > 1 ? "Access Token \(index + 1)" : "Access Token",
+                        text: $draftTokens[index])
+                    if draftTokens.count > 1 {
+                        Button {
+                            draftTokens.remove(at: index)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                                .foregroundStyle(.secondary)
+                                .padding(4)
                         }
+                        .buttonStyle(.plain)
+                        .hoverHighlight(cornerRadius: 4)
+                        .help("移除该 Token")
                     }
-                }
-
-                Button {
-                    draftTokens.append("")
-                } label: {
-                    Label("添加 Token（公司/个人切换用）", systemImage: "plus")
-                }
-
-                // refreshToken 与首 token 配套保存（仅首 token 专用）。
-                APIKeyInputField(title: "Refresh Token（可选，用于刷新首 Token）", text: $manualRefreshToken)
-
-                HStack {
-                    if let msg = tokenSaveMessage {
-                        Text(msg)
-                            .font(.caption)
-                            .foregroundStyle(msg.contains("失败") ? .red : .green)
-                    }
-                    Spacer()
-                    Button("保存 Tokens") { saveTokens() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(draftTokens.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
                 }
             }
-            .disclosurePointingHand(isExpanded: isManualTokensExpanded)
+
+            Button {
+                draftTokens.append("")
+            } label: {
+                Label("添加 Token", systemImage: "plus")
+            }
+
+            // refreshToken 与首 token 配套保存（仅首 token 专用）。
+            APIKeyInputField(title: "Refresh Token（可选，用于刷新首 Token）", text: $manualRefreshToken)
+
+            HStack {
+                if let msg = tokenSaveMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(msg.contains("失败") ? .red : .green)
+                }
+                Spacer()
+                Button("保存 Tokens") { saveTokens() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(draftTokens.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            }
 
             HStack {
                 Spacer()
@@ -486,7 +483,16 @@ struct SettingsProviderPane: View {
                 }
 
                 // 余额卡
-                if let balance = snapshot.balance {
+                if !snapshot.balances.isEmpty {
+                    // 多 Key 余额：逐行展示（DeepSeek 多 api-key）
+                    ForEach(Array(snapshot.balances.indices), id: \.self) { index in
+                        let entry = snapshot.balances[index]
+                        LabeledContent(entry.label) {
+                            Text(balanceText(entry.balance, currency: entry.currency))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else if let balance = snapshot.balance {
                     LabeledContent("余额") {
                         Text(balanceText(balance, currency: snapshot.currency))
                             .foregroundStyle(.secondary)

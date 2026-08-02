@@ -152,8 +152,22 @@ struct SettingsGatewayKeysPane: View {
                         } else {
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(allModelOptions) { option in
-                                        modelToggleRow(key: key, option: option)
+                                    ForEach(Array(groupedOptions.enumerated()), id: \.element.providerID) { (index, group) in
+                                        if index > 0 {
+                                            Divider()
+                                                .padding(.vertical, 2)
+                                        }
+                                        HStack(spacing: 4) {
+                                            ProviderBrandIcon(providerID: group.providerID, size: 12)
+                                            Text(group.label)
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                            Spacer()
+                                        }
+                                        .padding(.top, index == 0 ? 0 : 4)
+                                        ForEach(group.options) { option in
+                                            modelToggleRow(key: key, option: option)
+                                        }
                                     }
                                 }
                                 .padding(.trailing, 4)
@@ -265,6 +279,22 @@ struct SettingsGatewayKeysPane: View {
 
     // MARK: - 模型列表加载
 
+    /// 按 provider 分组的模型选项（用于白名单勾选列表的分割线分组）。
+    /// 组顺序跟随 `config.providerOrder`，组内按模型 id 字母序。
+    private var groupedOptions: [ProviderModelGroup] {
+        let byProvider = Dictionary(grouping: allModelOptions, by: \.providerID)
+        return appState.orderedProviderDescriptors()
+            .compactMap { descriptor in
+                guard let opts = byProvider[descriptor.id], !opts.isEmpty else { return nil }
+                let sorted = opts.sorted { $0.modelID < $1.modelID }
+                return ProviderModelGroup(
+                    providerID: descriptor.id,
+                    label: descriptor.displayName,
+                    options: sorted
+                )
+            }
+    }
+
     /// 加载全部「已启用且已配置凭据」供应商的模型：先静态目录（立即），再动态模型（异步补全）。
     /// 归一化格式 `<alias>/<modelID>` 与 RouteHandler.enforceEnabledModels 一致。
     /// 未接入（无凭据）或未启用的供应商模型不展示（避免白名单中出现不可用模型）。
@@ -316,4 +346,12 @@ private struct GatewayModelOption: Identifiable, Equatable {
     let id: String
     let providerID: String
     let modelID: String
+}
+
+/// 白名单勾选列表中按 provider 分组的模型集合（用于分割线分组展示）。
+private struct ProviderModelGroup: Identifiable, Equatable {
+    let providerID: String
+    let label: String
+    let options: [GatewayModelOption]
+    var id: String { providerID }
 }

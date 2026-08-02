@@ -22,12 +22,12 @@ struct SettingsGeneralPane: View {
         Form {
             Section {
                 LabeledContent("监听地址") {
-                    TextField("127.0.0.1", text: $hostText)
+                    TextField("", text: $hostText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
                 }
                 LabeledContent("监听端口") {
-                    TextField("8231", text: $portText)
+                    TextField("", text: $portText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 120)
                 }

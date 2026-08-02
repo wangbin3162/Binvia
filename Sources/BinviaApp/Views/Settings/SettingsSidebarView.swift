@@ -11,6 +11,7 @@ struct SettingsSidebarView: View {
         List(selection: selectionBinding) {
             Section {
                 paneRow(.general)
+                paneRow(.test)
                 paneRow(.gatewayKeys)
             } header: {
                 Text("通用")
@@ -20,6 +21,9 @@ struct SettingsSidebarView: View {
                 ForEach(providerDescriptors, id: \.id) { descriptor in
                     providerRow(descriptor)
                         .tag(SettingsPane.provider(descriptor.id))
+                }
+                .onMove { fromOffsets, toOffset in
+                    appState.moveProvider(fromOffsets: fromOffsets, toOffset: toOffset)
                 }
             } header: {
                 HStack(spacing: 4) {
@@ -47,7 +51,7 @@ struct SettingsSidebarView: View {
     }
 
     private var providerDescriptors: [ProviderDescriptor] {
-        ProviderRegistry.shared.allDescriptors()
+        appState.orderedProviderDescriptors()
     }
 
     private var configuredCount: Int {

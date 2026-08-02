@@ -7,7 +7,7 @@ public enum CodeBuddyCNProviderDescriptor {
         metadata: ProviderMetadata(
             id: "codebuddy-cn",
             alias: "cbcn",
-            displayName: "CodeBuddy (Tencent)",
+            displayName: "CodeBuddy cn",
             authType: .deviceFlow
         ),
         baseURL: URL(string: "https://copilot.tencent.com/v2/chat/completions"),
