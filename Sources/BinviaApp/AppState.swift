@@ -144,11 +144,11 @@ final class AppState: ObservableObject {
         try saveConfig()
     }
 
-    /// 设置某 provider 的 api-key 列表（DeepSeek 多 key 轮换）。
-    func setAPIKeys(_ keys: [String], for providerID: String) throws {
+    /// 设置某 provider 的带标签令牌列表（DeepSeek 多 key 轮换；API 令牌 / Access Token 通用）。
+    func setTokens(_ tokens: [KeyedToken], for providerID: String) throws {
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true
-        providerConfig.apiKeys = keys
+        providerConfig.apiKeys = tokens
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
@@ -163,16 +163,19 @@ final class AppState: ObservableObject {
     }
 
     /// 设置 deviceFlow 类型 provider 的多 AccessToken（首 token → credential.accessToken，其余 → apiKeys[]）。
-    /// 配套的 refreshToken 保留在 credential 中。
-    func setAccessTokens(_ tokens: [String], refreshToken: String?, for providerID: String) throws {
+    /// 配套的 refreshToken 保留在 credential 中。令牌带标签（CodexBar 令牌账户风格）。
+    func setAccessTokens(_ tokens: [KeyedToken], refreshToken: String?, for providerID: String) throws {
         let cleaned = tokens
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { !$0.value.isEmpty }
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true
         var credential = providerConfig.credential
         if let primary = cleaned.first {
-            credential.accessToken = primary
+            credential.accessToken = primary.value
+        } else {
+            // 全部令牌被移除时清空主 token（避免残留已删除的凭据）
+            credential.accessToken = nil
         }
         credential.refreshToken = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? refreshToken!.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -191,7 +194,7 @@ final class AppState: ObservableObject {
         if let access = pc.credential.accessToken, !access.isEmpty {
             result.append(access)
         }
-        result.append(contentsOf: pc.apiKeys)
+        result.append(contentsOf: pc.apiKeyValues)
         var seen = Set<String>()
         return result.filter { seen.insert($0).inserted }
     }

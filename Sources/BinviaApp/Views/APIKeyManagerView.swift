@@ -83,6 +83,7 @@ struct APIKeyManagerView: View {
                     Image(systemName: "doc.on.doc")
                         .foregroundStyle(.secondary)
                         .padding(4)
+                        .contentShape(Rectangle())
                 }
             }
             .buttonStyle(.plain)
@@ -96,6 +97,7 @@ struct APIKeyManagerView: View {
                 Image(systemName: "xmark.circle")
                     .foregroundStyle(.secondary)
                     .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .hoverHighlight(cornerRadius: 4)

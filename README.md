@@ -118,7 +118,7 @@ open bin/Binvia.app
 **设置窗口**（点面板底部 Settings 打开）为 CodexBar 风格：左侧栏 + 右侧详情，全部配置均在面板中完成，无需手改文件：
 
 - **服务器**：修改监听端口/地址，保存即热更新（运行中替换 handler，无需重启）。
-- **供应商**：DeepSeek 填 API Key（支持多 Key 轮换）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
+- **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
 - **网关密钥**：生成/复制/删除 `sk-tg-` 网关 Key。
 
 ## 配置
@@ -134,13 +134,14 @@ open bin/Binvia.app
   "providers": {
     "deepseek": {
       "enabled": true,
+      "apiKeys": [{ "label": "主 Key", "value": "sk-..." }],
       "credential": { "api_key": "sk-..." }
     }
   }
 }
 ```
 
-未配置 `apiKeys` 时允许匿名访问（开发模式）；配置后所有 `/v1/*` 端点需携带有效 key。
+`providers.<id>.apiKeys` 为带标签的令牌数组（`{label, value}`）；旧格式 `["sk-..."]` 纯字符串数组仍可正常读取，加载时自动迁移（标签为密钥掩码）。未配置 `apiKeys` 时允许匿名访问（开发模式）；配置后所有 `/v1/*` 端点需携带有效 key。为兼容未带 `/v1` 前缀的客户端，`/chat/completions`、`/models`、`/health`、`/usage` 等同路径也自动归一化到 `/v1/*`。
 
 环境变量：`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（可指向自建网关/测试 mock）、`CODEBUDDY_CN_ACCESS_TOKEN`、`ANTIGRAVITY_ACCESS_TOKEN`、`BINVIA_API_KEY` / `ROUTER_API_KEY`（恒有效的网关 key）。
 

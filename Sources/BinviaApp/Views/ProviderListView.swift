@@ -56,6 +56,7 @@ struct ProviderListView: View {
                 Image(systemName: "gearshape")
                     .foregroundStyle(.secondary)
                     .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .hoverHighlight(cornerRadius: 4)

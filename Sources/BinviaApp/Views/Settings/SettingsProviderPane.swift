@@ -12,10 +12,14 @@ struct SettingsProviderPane: View {
     let providerID: String
     @EnvironmentObject private var appState: AppState
 
-    /// DeepSeek 多 Key 草稿。
-    @State private var draftKeys: [String] = [""]
-    /// CodeBuddy 多 Token 草稿（首 token = 主 token，其余为轮换用）。
-    @State private var draftTokens: [String] = [""]
+    /// DeepSeek 多令牌草稿（带标签，CodexBar 令牌账户风格）。
+    @State private var draftKeys: [KeyedToken] = []
+    /// CodeBuddy 多 Access Token 草稿（首 token = 主 token，其余为轮换用）。
+    @State private var draftTokens: [KeyedToken] = []
+    /// 令牌添加行的标签输入。
+    @State private var newTokenLabel = ""
+    /// 令牌添加行的密钥输入。
+    @State private var newTokenValue = ""
     /// OAuth (Antigravity) 手动 Token 草稿。
     @State private var manualToken = ""
     @State private var manualRefreshToken = ""
@@ -52,14 +56,15 @@ struct SettingsProviderPane: View {
                 .padding(20)
         } else if let descriptor = ProviderRegistry.shared.descriptor(for: providerID) {
             Form {
+                // 第一个 Section：头部（logo + 名称 + 开关）+ 基础信息（仿 CodexBar ProviderDetailView）
                 Section {
                     headerRow(descriptor)
+                    infoSection(descriptor)
                 }
 
+                usageSection
                 connectionSection(descriptor)
                 testResultSection
-                infoSection(descriptor)
-                usageSection
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
@@ -68,9 +73,10 @@ struct SettingsProviderPane: View {
                 loadModels()
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
-                // 凭据变更时刷新模型列表
+                // 凭据变更时刷新模型列表与令牌草稿（OAuth 登录后令牌列表即时反映新 token）
                 modelTestResults.removeAll()
                 loadModels()
+                loadDrafts()
             }
         } else {
             Text("未注册的 provider: \(providerID)")
@@ -83,7 +89,8 @@ struct SettingsProviderPane: View {
 
     private func headerRow(_ descriptor: ProviderDescriptor) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            ProviderBrandIcon(providerID: descriptor.id, size: 20)
+            // logo 28pt，对齐 CodexBar ProviderDetailBrandIcon
+            ProviderBrandIcon(providerID: descriptor.id, size: 28)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(descriptor.displayName)
@@ -143,7 +150,8 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// DeepSeek：API Key 多行输入 + 添加/移除 + 测试/保存。
+    /// DeepSeek：带标签 API 令牌列表（CodexBar 令牌账户风格）——已有令牌行 = 标签 + 掩码 + 移除；
+    /// 常驻添加行 = 标签输入 + 密钥输入 + 「添加」按钮；添加/移除即时持久化。
     /// z.ai 等带区域选项的供应商在顶部渲染「API 区域」Picker。
     private var apiKeyConnectionSection: some View {
         Section {
@@ -156,30 +164,21 @@ struct SettingsProviderPane: View {
                 Divider()
             }
 
-            ForEach(Array(draftKeys.indices), id: \.self) { index in
-                HStack(spacing: 6) {
-                    APIKeyInputField(
-                        title: draftKeys.count > 1 ? "API Key \(index + 1)" : "API Key",
-                        text: $draftKeys[index])
-                    if draftKeys.count > 1 {
-                        Button {
-                            draftKeys.remove(at: index)
-                        } label: {
-                            Image(systemName: "minus.circle")
-                                .foregroundStyle(.secondary)
-                                .padding(4)
-                        }
-                        .buttonStyle(.plain)
-                        .hoverHighlight(cornerRadius: 4)
-                        .help("移除该 Key")
+            if draftKeys.isEmpty {
+                Text("暂无令牌")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(draftKeys.enumerated()), id: \.offset) { index, token in
+                    tokenRow(label: token.label, value: token.value) {
+                        draftKeys.remove(at: index)
+                        persistAPIKeys()
                     }
                 }
             }
 
-            Button {
-                draftKeys.append("")
-            } label: {
-                Label("添加 Key（用于轮换）", systemImage: "plus")
+            tokenAddRow(placeholder: "sk-…") {
+                addAPIKey()
             }
 
             HStack {
@@ -187,47 +186,80 @@ struct SettingsProviderPane: View {
                 Button("测试连接") { startTest() }
                     .buttonStyle(.bordered)
                     .pointingHandCursor()
-                Button("保存") { saveKeys() }
-                    .buttonStyle(.borderedProminent)
-                    .pointingHandCursor()
             }
         } header: {
-            Text("连接")
+            Text("API 令牌")
         } footer: {
             Text("请求会通过 Authorization: Bearer <key> 转发到 DeepSeek。保存后立即热更新。")
         }
     }
 
+    /// 令牌添加行：标签输入框 + 密钥输入框 + 右侧「添加」按钮（仿 CodexBar 令牌账户）。
+    private func tokenAddRow(placeholder: String, onAdd: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            TextField("", text: $newTokenLabel, prompt: Text("标签"))
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .font(.footnote)
+                .frame(maxWidth: 140)
+            APIKeyInputField(title: placeholder, text: $newTokenValue)
+            Button("添加") { onAdd() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(newTokenValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    /// 单个令牌行：标签 + 掩码值 + 右侧移除按钮。
+    private func tokenRow(label: String, value: String, onRemove: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "key")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text(label)
+                .font(.footnote.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(KeyedToken.defaultLabel(for: value))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button {
+                onRemove()
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .foregroundStyle(.secondary)
+                    .padding(4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .hoverHighlight(cornerRadius: 4)
+            .help("移除该令牌")
+        }
+    }
+
     /// CodeBuddy：OAuth 设备码登录 + 手动 Access Token（支持多 token 轮换）。
-    /// 手动 Token 区域始终展开（不折叠），样式对齐 DeepSeek 的 API Key 列表。
+    /// 令牌行样式对齐 DeepSeek 的 API 令牌列表（标签 + 掩码 + 移除，添加/移除即时持久化）。
     private var deviceFlowConnectionSection: some View {
         Section {
             OAuthLoginButton(providerID: providerID)
 
-            ForEach(Array(draftTokens.indices), id: \.self) { index in
-                HStack(spacing: 6) {
-                    APIKeyInputField(
-                        title: draftTokens.count > 1 ? "Access Token \(index + 1)" : "Access Token",
-                        text: $draftTokens[index])
-                    if draftTokens.count > 1 {
-                        Button {
-                            draftTokens.remove(at: index)
-                        } label: {
-                            Image(systemName: "minus.circle")
-                                .foregroundStyle(.secondary)
-                                .padding(4)
-                        }
-                        .buttonStyle(.plain)
-                        .hoverHighlight(cornerRadius: 4)
-                        .help("移除该 Token")
+            if draftTokens.isEmpty {
+                Text("暂无令牌")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
+                    tokenRow(label: token.label, value: token.value) {
+                        draftTokens.remove(at: index)
+                        persistDeviceTokens()
                     }
                 }
             }
 
-            Button {
-                draftTokens.append("")
-            } label: {
-                Label("添加 Token", systemImage: "plus")
+            tokenAddRow(placeholder: "Access Token") {
+                addDeviceToken()
             }
 
             // refreshToken 与首 token 配套保存（仅首 token 专用）。
@@ -240,19 +272,12 @@ struct SettingsProviderPane: View {
                         .foregroundStyle(msg.contains("失败") ? .red : .green)
                 }
                 Spacer()
-                Button("保存 Tokens") { saveTokens() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draftTokens.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-            }
-
-            HStack {
-                Spacer()
                 Button("测试连接") { startTest() }
                     .buttonStyle(.bordered)
                     .pointingHandCursor()
             }
         } header: {
-            Text("连接")
+            Text("Access Token")
         } footer: {
             Text("请求会通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy。多 token 轮换：首个 token 失败（401/403）时自动试用下一个。")
         }
@@ -287,7 +312,7 @@ struct SettingsProviderPane: View {
                     .pointingHandCursor()
             }
         } header: {
-            Text("连接")
+            Text("Access Token")
         } footer: {
             Text("使用 Google OAuth (PKCE) 登录：授权后在弹窗中粘贴授权码完成连接。也可手动粘贴 Token。")
         }
@@ -507,21 +532,15 @@ struct SettingsProviderPane: View {
                     }
                 }
 
-                // 余额卡
+                // 余额（CodexBar ProviderMetricInlineRow 风格：标签左 semibold，余额右 footnote secondary）
                 if !snapshot.balances.isEmpty {
                     // 多 Key 余额：逐行展示（DeepSeek 多 api-key）
                     ForEach(Array(snapshot.balances.indices), id: \.self) { index in
                         let entry = snapshot.balances[index]
-                        LabeledContent(entry.label) {
-                            Text(balanceText(entry.balance, currency: entry.currency))
-                                .foregroundStyle(.secondary)
-                        }
+                        usageMetricRow(label: entry.label, value: balanceText(entry.balance, currency: entry.currency))
                     }
                 } else if let balance = snapshot.balance {
-                    LabeledContent("余额") {
-                        Text(balanceText(balance, currency: snapshot.currency))
-                            .foregroundStyle(.secondary)
-                    }
+                    usageMetricRow(label: "余额", value: balanceText(balance, currency: snapshot.currency))
                 }
 
                 // 配额窗口
@@ -543,12 +562,30 @@ struct SettingsProviderPane: View {
         }
     }
 
+    /// 用量指标行（CodexBar ProviderMetricInlineRow 风格）：标签左 `.subheadline.weight(.semibold)`，
+    /// 值右 `.footnote` `.secondary` `.monospacedDigit()`。
+    private func usageMetricRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 2)
+    }
+
     /// 单个配额窗口行：label + ProgressView + 百分比 + 重置时间。
     private func quotaWindowRow(_ window: QuotaWindow) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(window.label)
-                    .font(.callout)
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
@@ -572,7 +609,7 @@ struct SettingsProviderPane: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(quota.modelID)
-                    .font(.callout)
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
@@ -609,23 +646,30 @@ struct SettingsProviderPane: View {
 
     // MARK: - Actions
 
-    /// 首次显示时加载已有配置：DeepSeek 的 Key 列表、deviceFlow 多 Token、oauth 的 Token 草稿。
+    /// 首次显示时加载已有配置：DeepSeek 的令牌列表、deviceFlow 多 Token、oauth 的 Token 草稿。
     private func loadDrafts() {
         let pc = appState.config.providers[providerID]
 
-        if draftKeys.count == 1, draftKeys[0].isEmpty {
-            if let keys = pc?.apiKeys, !keys.isEmpty {
-                draftKeys = keys
+        // apiKey：已保存的带标签令牌列表
+        if draftKeys.isEmpty {
+            if let tokens = pc?.apiKeys, !tokens.isEmpty {
+                draftKeys = tokens
             } else if let key = pc?.credential.apiKey, !key.isEmpty {
-                draftKeys = [key]
+                draftKeys = [KeyedToken(value: key)]
             }
         }
 
-        // deviceFlow (CodeBuddy)：多 token 草稿
-        if draftTokens.count == 1, draftTokens[0].isEmpty {
-            let existing = appState.accessTokens(for: providerID)
-            if !existing.isEmpty {
-                draftTokens = existing
+        // deviceFlow (CodeBuddy)：主 token（credential.accessToken）+ 轮换 token（apiKeys）
+        if draftTokens.isEmpty {
+            var tokens: [KeyedToken] = []
+            if let access = pc?.credential.accessToken, !access.isEmpty {
+                tokens.append(KeyedToken(value: access))
+            }
+            if let rest = pc?.apiKeys, !rest.isEmpty {
+                tokens.append(contentsOf: rest)
+            }
+            if !tokens.isEmpty {
+                draftTokens = tokens
             }
         }
 
@@ -640,22 +684,36 @@ struct SettingsProviderPane: View {
         }
     }
 
-    private func saveKeys() {
-        let keys = draftKeys
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        try? appState.setAPIKeys(keys, for: providerID)
+    /// 从添加行取标签+值构造 KeyedToken（空标签自动用掩码），并清空添加行。
+    private func makeTokenFromAddRow() -> KeyedToken? {
+        let label = newTokenLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = newTokenValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        newTokenLabel = ""
+        newTokenValue = ""
+        return KeyedToken(label: label.isEmpty ? KeyedToken.defaultLabel(for: value) : label, value: value)
     }
 
-    private func saveTokens() {
-        let tokens = draftTokens.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if tokens.isEmpty {
-            tokenSaveMessage = "请至少填写一个 Token"
-            return
-        }
+    private func addAPIKey() {
+        guard let token = makeTokenFromAddRow() else { return }
+        draftKeys.append(token)
+        persistAPIKeys()
+    }
+
+    private func addDeviceToken() {
+        guard let token = makeTokenFromAddRow() else { return }
+        draftTokens.append(token)
+        persistDeviceTokens()
+    }
+
+    private func persistAPIKeys() {
+        try? appState.setTokens(draftKeys, for: providerID)
+    }
+
+    private func persistDeviceTokens() {
         do {
-            try appState.setAccessTokens(tokens, refreshToken: manualRefreshToken, for: providerID)
-            tokenSaveMessage = "已保存 \(tokens.count) 个 Token"
+            try appState.setAccessTokens(draftTokens, refreshToken: manualRefreshToken, for: providerID)
+            tokenSaveMessage = draftTokens.isEmpty ? nil : "已保存 \(draftTokens.count) 个 Token"
         } catch {
             tokenSaveMessage = "保存失败: \(error.localizedDescription)"
         }

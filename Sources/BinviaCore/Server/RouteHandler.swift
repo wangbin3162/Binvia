@@ -17,7 +17,7 @@ public struct RouteHandler: Sendable {
     }
 
     public func handle(_ request: HTTPRequest) async throws -> HTTPResponse {
-        switch (request.method, request.path) {
+        switch (request.method, normalizePath(request.path)) {
         case ("GET", "/v1/health"):
             return healthResponse()
         case ("GET", "/v1/models"):
@@ -29,6 +29,14 @@ public struct RouteHandler: Sendable {
         default:
             return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
         }
+    }
+
+    /// 路径归一化：兼容未带 `/v1` 前缀的客户端。
+    /// 例如 opencode 配置 `baseURL` 漏写 `/v1` 时，AI SDK 会请求 `/chat/completions` 而非
+    /// `/v1/chat/completions`，此处自动补前缀避免 404 Not Found。
+    private func normalizePath(_ path: String) -> String {
+        if path.hasPrefix("/v1") { return path }
+        return "/v1" + path
     }
 
     // MARK: - 认证

@@ -83,6 +83,8 @@ struct MenuPanelView: View {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+                // 让整个悬停高亮区域（含 padding）都可点击，否则只有图标/文字本身命中
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .hoverHighlight()
@@ -103,6 +105,8 @@ struct MenuPanelView: View {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+                // 同设置按钮：让整个悬停区域可点击
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .hoverHighlight()

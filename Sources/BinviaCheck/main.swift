@@ -70,6 +70,11 @@ func run(_ name: String, _ body: () async throws -> Void) async {
     }
 }
 
+/// 构造带标签令牌的便捷函数（测试用）：空标签自动生成掩码标签。
+func kt(_ value: String, label: String = "") -> KeyedToken {
+    label.isEmpty ? KeyedToken(value: value) : KeyedToken(label: label, value: value)
+}
+
 // MARK: - Router 路由解析与消歧
 
 func routerTests() {
@@ -258,7 +263,7 @@ func routeConfigTests() throws {
     // apiKeys：config 数组 + env 合并、去重、过滤空值
     setenv("DEEPSEEK_API_KEY", "env-key", 1)
     let cfg3 = RouteConfig(providers: [
-        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: ["cfg-a", "env-key"])
+        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: [kt("cfg-a"), kt("env-key")])
     ])
     expectEqual(cfg3.apiKeys(for: "deepseek"), ["cfg-a", "env-key"], "apiKeys 合并 config 与 env 并去重")
 
@@ -275,16 +280,29 @@ func routeConfigTests() throws {
     expectEqual(decoded.credential.apiKey, "legacy-key", "legacy credential apiKey")
     expectEqual(decoded.apiKeys, [], "legacy apiKeys 回退空数组")
 
-    // round trip
-    let pc = ProviderConfig(enabled: false, credential: ProviderCredential(apiKey: "k", accessToken: "t"), apiKeys: ["a", "b"])
+    // 旧格式 apiKeys: [String] → 自动迁移为 KeyedToken（掩码标签）
+    let legacyKeys = #"{"enabled": true, "apiKeys": ["sk-abcdef1234567890"]}"#
+    let legacyKeysDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacyKeys.utf8))
+    expectEqual(legacyKeysDecoded.apiKeyValues, ["sk-abcdef1234567890"], "旧 [String] apiKeys 迁移为 KeyedToken")
+    expectEqual(legacyKeysDecoded.apiKeys.first?.label, "sk-abc••••7890", "旧 key 自动生成掩码标签")
+    expectEqual(KeyedToken.defaultLabel(for: "sk-abcdef1234567890"), "sk-abc••••7890", "掩码标签规则（前6后4）")
+    // 新格式 {label,value} 解码
+    let newFormat = #"{"enabled": true, "apiKeys": [{"label": "主 Key", "value": "sk-xyz"}]}"#
+    let newFormatDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(newFormat.utf8))
+    expectEqual(newFormatDecoded.apiKeys.first?.label, "主 Key", "新版 {label,value} 解码标签")
+    expectEqual(newFormatDecoded.apiKeys.first?.value, "sk-xyz", "新版 {label,value} 解码值")
+
+    // round trip（含 KeyedToken 标签）
+    let pc = ProviderConfig(enabled: false, credential: ProviderCredential(apiKey: "k", accessToken: "t"), apiKeys: [kt("a", label: "主"), kt("b")])
     let pcData = try JSONEncoder().encode(pc)
     let pcDecoded = try JSONDecoder().decode(ProviderConfig.self, from: pcData)
     expectEqual(pcDecoded, pc, "ProviderConfig round trip")
+    expectEqual(pcDecoded.apiKeyValues, ["a", "b"], "apiKeyValues 返回全部令牌值")
 
     let rc = RouteConfig(
         version: 1, host: "0.0.0.0", port: 9999,
         apiKeys: [GatewayKeyConfig(key: "router-key", enabledModels: ["ds/deepseek-v4-pro"])],
-        providers: ["deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: ["a"])]
+        providers: ["deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: [kt("a")])]
     )
     let rcData = try JSONEncoder().encode(rc)
     let rcDecoded = try JSONDecoder().decode(RouteConfig.self, from: rcData)
@@ -292,19 +310,19 @@ func routeConfigTests() throws {
 
     // Phase 20: credential(for:) 把 apiKeys[0] 合并进 credential.apiKey（GUI 单 key 存 apiKeys[]）
     let cfg5 = RouteConfig(providers: [
-        "opencode": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: ["gui-key"])
+        "opencode": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: [kt("gui-key")])
     ])
     expectEqual(cfg5.credential(for: "opencode").apiKey, "gui-key", "credential(for:) 合并 apiKeys[0]")
 
     // Phase 20 补充: enabled=false 也应返回已保存凭据（禁用态仍可测试模型）
     let cfg5b = RouteConfig(providers: [
-        "opencode": ProviderConfig(enabled: false, credential: ProviderCredential(), apiKeys: ["gui-key"])
+        "opencode": ProviderConfig(enabled: false, credential: ProviderCredential(), apiKeys: [kt("gui-key")])
     ])
     expectEqual(cfg5b.credential(for: "opencode").apiKey, "gui-key", "禁用态仍返回合并后的凭据")
 
     // 已显式配置 credential.apiKey 时不被 apiKeys[] 覆盖
     let cfg6 = RouteConfig(providers: [
-        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: ["first-rotation"])
+        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: [kt("first-rotation")])
     ])
     expectEqual(cfg6.credential(for: "deepseek").apiKey, "explicit", "显式 apiKey 优先于 apiKeys[]")
 
@@ -737,6 +755,24 @@ func routeHandlerTests() async throws {
     expectEqual(usage.status, 200, "/v1/usage 返回 200")
     let nope = try await handler.handle(req("GET", "/v1/nope"))
     expectEqual(nope.status, 404, "未知路径返回 404")
+
+    // 裸路径归一化（Issue 5：客户端 baseURL 漏写 /v1 时请求打到 /chat/completions 等）
+    let bareModels = try await handler.handle(req("GET", "/models", authorization: "Bearer test-key"))
+    expectEqual(bareModels.status, 200, "裸路径 /models 返回 200（归一化为 /v1/models）")
+    let bareHealth = try await handler.handle(req("GET", "/health"))
+    expectEqual(bareHealth.status, 200, "裸路径 /health 返回 200")
+    let bareUsage = try await handler.handle(req("GET", "/usage", authorization: "Bearer test-key"))
+    expectEqual(bareUsage.status, 200, "裸路径 /usage 返回 200")
+    let bareUnknownModel = try await handler.handle(req(
+        "POST", "/chat/completions",
+        authorization: "Bearer test-key", body: chatBody(model: "nope/nope")
+    ))
+    expectEqual(bareUnknownModel.status, 404, "裸路径未知模型 chat 返回 404（归一化后走同一逻辑）")
+    let bareNope = try await handler.handle(req("GET", "/nope"))
+    expectEqual(bareNope.status, 404, "裸路径未知路径返回 404")
+    // 已带 /v1 的路径不应重复加前缀
+    let doubleV1 = try await handler.handle(req("GET", "/v1/health"))
+    expectEqual(doubleV1.status, 200, "/v1/health 不受归一化影响")
 }
 
 // MARK: - DeepSeek 集成（本地 HTTPServer 当 mock 上游）

@@ -31,19 +31,49 @@ public struct GatewayKeyConfig: Codable, Sendable, Equatable {
     }
 }
 
+/// 带标签的令牌（API Key / Access Token）。`label` 为展示名（用户自定义，
+/// 仿 CodexBar 令牌账户），`value` 为实际密钥。
+/// 旧配置 `apiKeys: [String]` 解码时自动生成掩码标签。
+public struct KeyedToken: Codable, Sendable, Equatable {
+    public var label: String
+    public var value: String
+
+    public init(label: String, value: String) {
+        self.label = label
+        self.value = value
+    }
+
+    public init(value: String) {
+        self.value = value
+        self.label = Self.defaultLabel(for: value)
+    }
+
+    /// 默认标签：密钥掩码（前 6 位 + •••• + 后 4 位），与用量展示的掩码一致。
+    public static func defaultLabel(for value: String) -> String {
+        guard value.count > 10 else { return String(value.prefix(3)) + "••••" }
+        return "\(String(value.prefix(6)))••••\(String(value.suffix(4)))"
+    }
+}
+
 public struct ProviderConfig: Codable, Sendable, Equatable {
     public var enabled: Bool
     public var credential: ProviderCredential
-    /// 多 api-key 列表（key 轮换）。空数组表示未配置。
-    public var apiKeys: [String]
+    /// 多令牌列表（label + value，key 轮换 / 多 token）。空数组表示未配置。
+    /// 兼容旧格式 `[String]`：解码时自动转成 `KeyedToken`（标签为掩码）。
+    public var apiKeys: [KeyedToken]
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。nil = 供应商默认区域。
     public var region: String?
 
-    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [String] = [], region: String? = nil) {
+    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil) {
         self.enabled = enabled
         self.credential = credential
         self.apiKeys = apiKeys
         self.region = region
+    }
+
+    /// 全部令牌值（provider / 路由层用，忽略标签）。
+    public var apiKeyValues: [String] {
+        apiKeys.map(\.value)
     }
 
     // 兼容旧配置：`apiKeys`/`region` 是新增字段，缺失时回退默认值。
@@ -58,7 +88,12 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         self.credential = try container.decodeIfPresent(ProviderCredential.self, forKey: .credential) ?? ProviderCredential()
-        self.apiKeys = try container.decodeIfPresent([String].self, forKey: .apiKeys) ?? []
+        // 兼容旧格式 `[String]` 与新版 `[{label,value}]`（旧 key 自动生成掩码标签）
+        if let legacy = try? container.decodeIfPresent([String].self, forKey: .apiKeys) {
+            self.apiKeys = legacy.map { KeyedToken(value: $0) }
+        } else {
+            self.apiKeys = try container.decodeIfPresent([KeyedToken].self, forKey: .apiKeys) ?? []
+        }
         self.region = try container.decodeIfPresent(String.self, forKey: .region)
     }
 
@@ -156,8 +191,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         if let pc = providers[providerID] {
             var cred = pc.credential
             if (cred.apiKey ?? "").isEmpty,
-               let first = pc.apiKeys.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-                cred.apiKey = first
+               let first = pc.apiKeys.first(where: { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                cred.apiKey = first.value
             }
             cred.region = pc.region
             // 配置条目存在且带凭据 → 直接返回；完全空的条目回退环境变量（保持旧行为）。
@@ -176,7 +211,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     public func apiKeys(for providerID: String) -> [String] {
         var keys: [String] = []
         if let pc = providers[providerID] {
-            keys.append(contentsOf: pc.apiKeys)
+            keys.append(contentsOf: pc.apiKeyValues)
         }
         let envName = "\(providerID.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"
         if let env = Self.envValue([envName]), !env.isEmpty {
