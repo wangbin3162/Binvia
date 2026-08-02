@@ -106,7 +106,7 @@ struct SettingsProviderPane: View {
             Toggle("启用", isOn: enabledBinding)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .controlSize(.small)
+                .controlSize(.mini)
                 .help(enabled ? "停用该供应商" : "启用该供应商")
         }
         .padding(.vertical, 2)
@@ -195,15 +195,19 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 令牌添加行：标签输入框 + 密钥输入框 + 右侧「添加」按钮（仿 CodexBar 令牌账户）。
+    /// 令牌添加行：标签输入框 + 密钥输入框 + 右侧「添加」按钮（对齐 CodexBar 令牌账户）。
+    /// 标签框限宽 160；密钥框用 SecureField 撑满剩余宽度（无显示/隐藏切换）；按钮 .bordered .small。
     private func tokenAddRow(placeholder: String, onAdd: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             TextField("", text: $newTokenLabel, prompt: Text("标签"))
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
                 .font(.footnote)
-                .frame(maxWidth: 140)
-            APIKeyInputField(title: placeholder, text: $newTokenValue)
+                .frame(maxWidth: 160)
+            SecureField("", text: $newTokenValue, prompt: Text(placeholder))
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .font(.footnote)
             Button("添加") { onAdd() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -211,7 +215,7 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 单个令牌行：标签 + 掩码值 + 右侧移除按钮。
+    /// 单个令牌行：图标 + 标签 + 掩码值 + 右侧「移除」按钮（对齐 CodexBar 令牌账户）。
     private func tokenRow(label: String, value: String, onRemove: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "key")
@@ -226,17 +230,9 @@ struct SettingsProviderPane: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Button {
-                onRemove()
-            } label: {
-                Image(systemName: "xmark.circle")
-                    .foregroundStyle(.secondary)
-                    .padding(4)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .hoverHighlight(cornerRadius: 4)
-            .help("移除该令牌")
+            Button("移除") { onRemove() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
     }
 
