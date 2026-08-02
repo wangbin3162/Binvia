@@ -46,11 +46,11 @@ swift build
 ### 启动服务器
 
 ```bash
-# 方式一：默认配置（端口 8231）
+# 方式一：默认配置（监听 localhost:20427，API 端点 http://localhost:20427/v1）
 swift run BinviaServer
 
 # 方式二：指定配置/端口
-swift run BinviaServer --port 8231 --config ~/.config/binvia/config.json
+swift run BinviaServer --port 20427 --config ~/.config/binvia/config.json
 ```
 
 ### 登录供应商（OAuth）
@@ -69,19 +69,19 @@ swift run BinviaCLI oauth login antigravity
 
 ```bash
 # 健康检查
-curl http://127.0.0.1:8231/v1/health
+curl http://localhost:20427/v1/health
 
 # 模型列表（含动态模型）
-curl http://127.0.0.1:8231/v1/models
+curl http://localhost:20427/v1/models
 
 # 聊天（流式）
-curl -N http://127.0.0.1:8231/v1/chat/completions \
+curl -N http://localhost:20427/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <your-api-key>" \
   -d '{"model":"deepseek/deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
 # 用量
-curl http://127.0.0.1:8231/v1/usage
+curl http://localhost:20427/v1/usage
 ```
 
 ### CLI
@@ -117,8 +117,9 @@ open bin/Binvia.app
 
 **设置窗口**（点面板底部 Settings 打开）为 CodexBar 风格：左侧栏 + 右侧详情，全部配置均在面板中完成，无需手改文件：
 
-- **服务器**：修改监听端口/地址，保存即热更新（运行中替换 handler，无需重启）。
+- **服务器**：监听地址固定为本机 localhost（不可修改）；端口默认 20427，可改，保存即热更新（运行中替换 handler，无需重启）。「API 端点」区展示 `http://localhost:<端口>/v1` 并提供一键复制，供 Claude Code / opencode / curl 等配置。
 - **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
+- **用量**：供应商面板自动展示用量——DeepSeek（多 Key 余额）、Kimi（余额）、Antigravity（模型配额 + 周窗口）每 5 分钟轮询 + 手动「刷新用量」；z.ai、opencode、CodeBuddy CN 上游未提供可用的公开用量 API（CodeBuddy CN 官方接口返回 500），面板提供「在网页查看」跳转对应网页看板（智谱 `bigmodel.cn/finance-center/finance/overview`、opencode `opencode.ai/zh/zen`、CodeBuddy `codebuddy.cn/profile/usage`）。
 - **网关密钥**：生成/复制/删除 `sk-tg-` 网关 Key。
 
 ## 配置
@@ -128,8 +129,8 @@ open bin/Binvia.app
 ```json
 {
   "version": 1,
-  "host": "127.0.0.1",
-  "port": 8231,
+  "host": "localhost",
+  "port": 20427,
   "apiKeys": ["sk-local-xxx"],
   "providers": {
     "deepseek": {

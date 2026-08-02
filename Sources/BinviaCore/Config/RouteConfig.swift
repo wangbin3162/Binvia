@@ -118,8 +118,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
 
     public init(
         version: Int = 2,
-        host: String = "127.0.0.1",
-        port: Int = 8231,
+        host: String = "localhost",
+        port: Int = 20427,
         apiKeys: [GatewayKeyConfig] = [],
         providers: [String: ProviderConfig] = [:],
         providerOrder: [String] = []
@@ -145,8 +145,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        self.host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
-        self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 8231
+        self.host = try container.decodeIfPresent(String.self, forKey: .host) ?? "localhost"
+        self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 20427
         self.providers = try container.decodeIfPresent([String: ProviderConfig].self, forKey: .providers) ?? [:]
         if let legacyKeys = try? container.decodeIfPresent([String].self, forKey: .apiKeys) {
             self.apiKeys = legacyKeys.map { GatewayKeyConfig(key: $0) }

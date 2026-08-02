@@ -592,7 +592,7 @@ extension AppState {
             close(fd)
             if ok { return candidate }
         }
-        return 8231
+        return 20427
     }
 
     /// 无界面自检：验证配置读写、网关 Key 生成、服务器启停、热更新。

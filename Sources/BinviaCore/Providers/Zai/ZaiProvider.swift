@@ -46,6 +46,8 @@ public enum ZaiProviderDescriptor {
             ProviderAPIRegion(id: ZaiAPIRegion.bigmodelCN.rawValue, displayName: ZaiAPIRegion.bigmodelCN.displayName),
             ProviderAPIRegion(id: ZaiAPIRegion.global.rawValue, displayName: ZaiAPIRegion.global.displayName),
         ],
+        // 智谱官方未提供公开用量 API，提供网页看板入口（登录后查看余额/用量）。
+        usageDashboardURL: URL(string: "https://bigmodel.cn/finance-center/finance/overview"),
         makeProvider: { ZaiProvider() }
     )
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import BinviaCore
 
 /// 设置窗口的单个 Provider 配置面板。
@@ -177,7 +178,7 @@ struct SettingsProviderPane: View {
                 }
             }
 
-            tokenAddRow(placeholder: "sk-…") {
+            tokenAddRow(placeholder: "粘贴API密钥/Token") {
                 addAPIKey()
             }
 
@@ -258,7 +259,7 @@ struct SettingsProviderPane: View {
                 }
             }
 
-            tokenAddRow(placeholder: "Access Token") {
+            tokenAddRow(placeholder: "粘贴Access Token") {
                 addDeviceToken()
             }
 
@@ -462,31 +463,30 @@ struct SettingsProviderPane: View {
         }
     }
 
-    // MARK: - 信息 Section
+    // MARK: - 基础信息行（与头部同处一个 Section，无独立「信息」标题）
 
+    /// 基础信息行：别名 / Base URL / 认证方式 / 已配置，紧跟 logo + 启用开关下方
+    /// （对齐 CodexBar ProviderDetailInfoRows：同一 Section 内直接排布 LabeledContent）。
+    @ViewBuilder
     private func infoSection(_ descriptor: ProviderDescriptor) -> some View {
-        Section {
-            LabeledContent("别名") {
-                Text(descriptor.alias ?? "—")
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("Base URL") {
-                Text(descriptor.baseURL?.absoluteString ?? "—")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            LabeledContent("认证方式") {
-                Text(authTypeLabel(descriptor.metadata.authType))
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("已配置") {
-                let configured = appState.isProviderConfigured(providerID)
-                Text(configured ? "是" : "否")
-                    .foregroundStyle(configured ? .green : .secondary)
-            }
-        } header: {
-            Text("信息")
+        LabeledContent("别名") {
+            Text(descriptor.alias ?? "—")
+                .foregroundStyle(.secondary)
+        }
+        LabeledContent("Base URL") {
+            Text(descriptor.baseURL?.absoluteString ?? "—")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        LabeledContent("认证方式") {
+            Text(authTypeLabel(descriptor.metadata.authType))
+                .foregroundStyle(.secondary)
+        }
+        LabeledContent("已配置") {
+            let configured = appState.isProviderConfigured(providerID)
+            Text(configured ? "是" : "否")
+                .foregroundStyle(configured ? .green : .secondary)
         }
     }
 
@@ -501,7 +501,8 @@ struct SettingsProviderPane: View {
 
     // MARK: - 用量 Section（Phase 16）
 
-    /// 用量卡片：余额 / 配额窗口 / 模型配额。无快照时不展示（「有则展示无则隐藏」）。
+    /// 用量卡片：余额 / 配额窗口 / 模型配额。无快照时不展示（「有则展示无则隐藏」）；
+    /// 供应商声明了 `usageDashboardURL` 且无公开用量 API 时，显示「在网页查看」入口。
     @ViewBuilder
     private var usageSection: some View {
         if let snapshot = appState.usageSnapshots[providerID] {
@@ -555,6 +556,23 @@ struct SettingsProviderPane: View {
                     ForEach(Array(snapshot.modelQuotas.indices), id: \.self) { index in
                         modelQuotaRow(snapshot.modelQuotas[index])
                     }
+                }
+            } header: {
+                Text("用量")
+            }
+        } else if let dashboard = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
+            // 无公开用量 API 的供应商（如 opencode）：提供网页看板入口。
+            Section {
+                HStack(spacing: 8) {
+                    Label("上游暂未开放用量 API，可在网页查看余额。", systemImage: "globe")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button("在网页查看") {
+                        NSWorkspace.shared.open(dashboard)
+                    }
+                    .buttonStyle(.link)
+                    .pointingHandCursor()
                 }
             } header: {
                 Text("用量")

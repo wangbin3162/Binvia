@@ -7,7 +7,7 @@ public enum CodeBuddyCNProviderDescriptor {
         metadata: ProviderMetadata(
             id: "codebuddy-cn",
             alias: "cbcn",
-            displayName: "CodeBuddy cn",
+            displayName: "CodeBuddy CN",
             authType: .deviceFlow
         ),
         baseURL: URL(string: "https://copilot.tencent.com/v2/chat/completions"),
@@ -29,6 +29,8 @@ public enum CodeBuddyCNProviderDescriptor {
             Model(id: "deepseek-v3-2-volc", name: "DeepSeek-V3.2", contextLength: 96_000, supportsReasoning: true),
         ],
         supportsStreaming: true,
+        // CodeBuddy CN 官方用量接口返回 500，改为网页看板入口（登录后查看积分/余额）。
+        usageDashboardURL: URL(string: "https://www.codebuddy.cn/profile/usage"),
         makeProvider: { CodeBuddyCNProvider() }
     )
 }

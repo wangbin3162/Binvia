@@ -41,6 +41,7 @@ public struct ProviderMetadata: Sendable, Codable, Equatable {
 /// - `forceStream`：上游是否强制 `stream=true`（如 CodeBuddyCN / Kimi），非流式客户端
 ///   由 provider 内部用 `SSEJSONAggregator` 聚合。
 /// - `usageFetcherFactory`：用量查询器工厂（null 表示该供应商无用量卡片）。
+/// - `usageDashboardURL`：上游网页用量看板（如 opencode 无公开用量 API 时，指向登录后看板）。
 public struct ProviderDescriptor: Sendable {
     public let metadata: ProviderMetadata
     public let baseURL: URL?
@@ -56,6 +57,9 @@ public struct ProviderDescriptor: Sendable {
     /// API 区域选项（空 = 无区域选择，设置面板不渲染 Picker）。首个区域作为默认。
     public let regions: [ProviderAPIRegion]
 
+    /// 上游网页用量看板（无公开用量 API 的供应商可在此声明，面板提供「在网页查看」入口）。
+    public let usageDashboardURL: URL?
+
     public init(
         metadata: ProviderMetadata,
         baseURL: URL?,
@@ -65,6 +69,7 @@ public struct ProviderDescriptor: Sendable {
         forceStream: Bool = false,
         usageFetcherFactory: @escaping @Sendable () -> (any ProviderUsageFetcher)? = { nil },
         regions: [ProviderAPIRegion] = [],
+        usageDashboardURL: URL? = nil,
         makeProvider: @escaping @Sendable () -> any Provider
     ) {
         self.metadata = metadata
@@ -75,6 +80,7 @@ public struct ProviderDescriptor: Sendable {
         self.forceStream = forceStream
         self.usageFetcherFactory = usageFetcherFactory
         self.regions = regions
+        self.usageDashboardURL = usageDashboardURL
         self.makeProvider = makeProvider
     }
 

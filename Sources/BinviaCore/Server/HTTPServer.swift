@@ -105,7 +105,7 @@ public final class HTTPServer: @unchecked Sendable {
         return stopped
     }
 
-    public func start(host: String = "127.0.0.1", port: Int) throws {
+    public func start(host: String = "localhost", port: Int) throws {
         let fd = try SocketUtil.createListener(host: host, port: port)
         lifecycleLock.lock()
         self.stopped = false
@@ -164,7 +164,9 @@ enum SocketUtil {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr(host)
+        // `inet_addr` 只认 IPv4 点分十进制；`localhost` 需先映射到环回地址。
+        let bindHost = host == "localhost" ? "127.0.0.1" : host
+        addr.sin_addr.s_addr = inet_addr(bindHost)
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {

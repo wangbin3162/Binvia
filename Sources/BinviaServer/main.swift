@@ -2,7 +2,7 @@ import Foundation
 import BinviaCore
 
 // Binvia 本地代理服务器入口。
-// 用法：BinviaServer [--port 8231] [--config /path/to/config.json]
+// 用法：BinviaServer [--port 20427] [--config /path/to/config.json]
 
 let args = Array(CommandLine.arguments.dropFirst())
 
@@ -16,7 +16,7 @@ func value(for flag: String) -> String? {
 if args.contains("--help") || args.contains("-h") {
     print("""
     Binvia Server
-    Usage: BinviaServer [--port 8231] [--config /path/to/config.json]
+    Usage: BinviaServer [--port 20427] [--config /path/to/config.json]
     Endpoints:
       GET  /v1/health
       GET  /v1/models

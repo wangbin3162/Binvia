@@ -1,13 +1,14 @@
 import SwiftUI
+import AppKit
 
-/// 设置窗口「通用」面板：监听地址/端口、配置文件路径、环境变量说明、保存并应用。
+/// 设置窗口「通用」面板：监听地址/端口、API 端点、配置文件路径、环境变量说明、保存并应用。
 /// 样式与 CodexBar `GeneralPane` 一致：`Form` + `.formStyle(.grouped)` + `.scrollContentBackground(.hidden)`。
 struct SettingsGeneralPane: View {
     @EnvironmentObject private var appState: AppState
 
     @State private var portText = ""
-    @State private var hostText = ""
     @State private var saveMessage: String?
+    @State private var endpointCopied = false
 
     private let envVars = [
         "BINVIA_CONFIG",
@@ -22,9 +23,9 @@ struct SettingsGeneralPane: View {
         Form {
             Section {
                 LabeledContent("监听地址") {
-                    TextField("", text: $hostText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
+                    Text("localhost")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 220, alignment: .trailing)
                 }
                 LabeledContent("监听端口") {
                     TextField("", text: $portText)
@@ -34,7 +35,34 @@ struct SettingsGeneralPane: View {
             } header: {
                 Text("服务器")
             } footer: {
-                Text("启动后，任意工具（Claude Code / Codex / curl 等）通过 http://\(hostText):\(portText) 访问本地网关。")
+                Text("仅监听本机回环地址（localhost），不对外网开放。")
+            }
+
+            Section {
+                HStack(spacing: 8) {
+                    Text(endpointText)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button {
+                        copyEndpoint()
+                    } label: {
+                        Image(systemName: endpointCopied ? "checkmark" : "doc.on.doc")
+                            .foregroundStyle(endpointCopied ? .green : .secondary)
+                            .padding(4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .hoverHighlight(cornerRadius: 4)
+                    .help("复制 API 端点")
+                }
+            } header: {
+                Text("API 端点")
+            } footer: {
+                Text("OpenAI 兼容本地端点（含 /v1）。Claude Code / opencode / curl 等工具配置此地址。")
             }
 
             Section {
@@ -92,7 +120,23 @@ struct SettingsGeneralPane: View {
         .background(FocusResigningBackground())
         .onAppear {
             portText = String(appState.config.port)
-            hostText = appState.config.host
+        }
+    }
+
+    /// 展示用端点：随端口输入实时变化，端口无效时回退到当前已保存端口。
+    private var endpointText: String {
+        let port = Int(portText) ?? appState.config.port
+        return "http://localhost:\(port)/v1"
+    }
+
+    private func copyEndpoint() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(endpointText, forType: .string)
+        endpointCopied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            endpointCopied = false
         }
     }
 
@@ -103,7 +147,7 @@ struct SettingsGeneralPane: View {
         }
         let portChanged = appState.config.port != port
         appState.config.port = port
-        appState.config.host = hostText.trimmingCharacters(in: .whitespaces)
+        appState.config.host = "localhost"
         do {
             try appState.saveConfig()
         } catch {
