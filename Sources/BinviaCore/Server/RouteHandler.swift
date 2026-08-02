@@ -116,7 +116,7 @@ public struct RouteHandler: Sendable {
 
         for descriptor in registry.allDescriptors() {
             // 仅处理已注册且启用的 provider
-            guard config.providers[descriptor.id]?.enabled ?? true else { continue }
+            guard config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id) else { continue }
 
             let alias = descriptor.alias ?? descriptor.id
 

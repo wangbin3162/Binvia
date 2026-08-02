@@ -64,7 +64,7 @@ struct SettingsSidebarView: View {
     }
 
     private func providerRow(_ descriptor: ProviderDescriptor) -> some View {
-        let enabled = appState.config.providers[descriptor.id]?.enabled ?? true
+        let enabled = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
         let configured = appState.isProviderConfigured(descriptor.id)
         return HStack(spacing: 8) {
             ProviderBrandIcon(providerID: descriptor.id, size: 16)

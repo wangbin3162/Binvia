@@ -201,43 +201,66 @@ public struct AntigravityProvider: Provider {
         )
     }
 
-    /// `:fetchAvailableModels` 动态模型列表（401 时 refresh 重试一次）。
+    /// `:fetchAvailableModels` 动态模型列表。
+    ///
+    /// 依序尝试 discovery base URL（daily 优先，参考 OmniRoute `getAntigravityFetchAvailableModelsUrls`）：
+    /// - 2xx → 返回模型；
+    /// - 401：有 refreshToken 则刷新后重试一次；仍失败或 403 直接抛错（认证问题，无谓尝试其它 URL）；
+    /// - 其余状态（400/404/429/5xx）：记录错误并尝试下一个 base URL。
     private func fetchAvailableModels(
         accessToken: String,
         refreshToken: String?,
         config: AntigravityConfig
     ) async throws -> [Model] {
-        var request = URLRequest(url: config.fetchAvailableModelsURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        // 注意：`:fetchAvailableModels` 接受空 body（`{}`），不需要 metadata / projectId——
-        // `metadata: {ideType:"ANTIGRAVITY"}` 是 `loadCodeAssist` 的字段，误加到此处会被
-        // 上游 protobuf JSON 解析拒绝并返回 400（参考 OmniRoute `fetcher.ts` 发 `{}`）。
-        request.httpBody = Data("{}".utf8)
+        var lastError: Error?
+        for url in config.fetchAvailableModelsURLs {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+            // 注意：`:fetchAvailableModels` 接受空 body（`{}`），不需要 metadata / projectId——
+            // `metadata: {ideType:"ANTIGRAVITY"}` 是 `loadCodeAssist` 的字段，误加到此处会被
+            // 上游 protobuf JSON 解析拒绝并返回 400（参考 OmniRoute `fetcher.ts` 发 `{}`）。
+            request.httpBody = Data("{}".utf8)
 
-        let (data, response) = try await ProviderHTTPClient.shared.data(for: request)
-        guard response.statusCode == 401, let rt = refreshToken, !rt.isEmpty else {
-            guard (200 ..< 300).contains(response.statusCode) else {
+            let (data, response) = try await ProviderHTTPClient.shared.data(for: request)
+
+            if (200 ..< 300).contains(response.statusCode) {
+                return AntigravityEnvelopeTranslator.parseModels(from: data)
+            }
+
+            if response.statusCode == 401, let rt = refreshToken, !rt.isEmpty {
+                let refreshed = try await oauth.refreshAccessToken(refreshToken: rt)
+                request.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
+                let (retryData, retryResponse) = try await ProviderHTTPClient.shared.data(for: request)
+                if (200 ..< 300).contains(retryResponse.statusCode) {
+                    return AntigravityEnvelopeTranslator.parseModels(from: retryData)
+                }
+                throw ProviderError.upstreamError(
+                    statusCode: retryResponse.statusCode,
+                    message: Self.describeHTTPError(retryResponse.statusCode, String(data: retryData, encoding: .utf8) ?? "")
+                )
+            }
+
+            if response.statusCode == 401 || response.statusCode == 403 {
+                // 无 refresh token 或刷新失败：认证失败，直接抛，不继续尝试其它 URL
                 throw ProviderError.upstreamError(
                     statusCode: response.statusCode,
                     message: Self.describeHTTPError(response.statusCode, String(data: data, encoding: .utf8) ?? "")
                 )
             }
-            return AntigravityEnvelopeTranslator.parseModels(from: data)
-        }
 
-        let refreshed = try await oauth.refreshAccessToken(refreshToken: rt)
-        request.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
-        let (retryData, retryResponse) = try await ProviderHTTPClient.shared.data(for: request)
-        guard (200 ..< 300).contains(retryResponse.statusCode) else {
-            throw ProviderError.upstreamError(
-                statusCode: retryResponse.statusCode,
-                message: Self.describeHTTPError(retryResponse.statusCode, String(data: retryData, encoding: .utf8) ?? "")
+            // 其它状态：记录错误，尝试下一个 discovery base URL
+            lastError = ProviderError.upstreamError(
+                statusCode: response.statusCode,
+                message: Self.describeHTTPError(response.statusCode, String(data: data, encoding: .utf8) ?? "")
             )
         }
-        return AntigravityEnvelopeTranslator.parseModels(from: retryData)
+        throw lastError ?? ProviderError.upstreamError(
+            statusCode: 0,
+            message: "Antigravity API unavailable"
+        )
     }
 
     /// 始终流式请求上游，把 cloudcode SSE 翻译为 OpenAI SSE 逐事件 yield。

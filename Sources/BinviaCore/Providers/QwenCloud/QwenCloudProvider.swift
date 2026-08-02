@@ -5,7 +5,7 @@ public enum QwenCloudProviderDescriptor {
         metadata: ProviderMetadata(
             id: "qwen-cloud",
             alias: "qwc",
-            displayName: "Qwen Cloud (DashScope)",
+            displayName: "Qwen Cloud",
             authType: .apiKey
         ),
         baseURL: URL(string: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),

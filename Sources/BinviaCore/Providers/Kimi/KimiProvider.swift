@@ -5,7 +5,7 @@ public enum KimiProviderDescriptor {
         metadata: ProviderMetadata(
             id: "kimi",
             alias: "kimi",
-            displayName: "Kimi (Moonshot)",
+            displayName: "Kimi",
             authType: .apiKey
         ),
         baseURL: URL(string: "https://api.moonshot.ai/v1"),

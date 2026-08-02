@@ -56,6 +56,34 @@ extension View {
     }
 }
 
+/// DisclosureGroup 折叠态悬停小手光标：仅折叠时整行（含 `>` 展开箭头）显示小手，
+/// 展开后内容区保持默认光标，避免列表/开关行误显示为可点击。
+private struct DisclosurePointingCursorModifier: ViewModifier {
+    var isExpanded: Bool
+    @State private var cursorActive = false
+
+    func body(content: Content) -> some View {
+        content.onHover { hovering in
+            let shouldShow = hovering && !isExpanded
+            if shouldShow != cursorActive {
+                if shouldShow {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+                cursorActive = shouldShow
+            }
+        }
+    }
+}
+
+extension View {
+    /// 折叠态（含 `>` 展开箭头）悬停显示小手光标；展开后自动恢复默认光标。
+    func disclosurePointingHand(isExpanded: Bool) -> some View {
+        modifier(DisclosurePointingCursorModifier(isExpanded: isExpanded))
+    }
+}
+
 /// 点击空白区域时取消第一响应者（借鉴 CodexBar `FocusResigningBackground`）。
 struct FocusResigningBackground: View {
     var body: some View {

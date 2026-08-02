@@ -20,6 +20,9 @@ struct SettingsProviderPane: View {
     @State private var manualToken = ""
     @State private var manualRefreshToken = ""
     @State private var tokenSaveMessage: String?
+    /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
+    @State private var isManualTokensExpanded = false
+    @State private var isManualTokenExpanded = false
 
     /// 模型列表与模型级测试状态。
     @State private var models: [Model] = []
@@ -103,7 +106,7 @@ struct SettingsProviderPane: View {
     }
 
     private var enabled: Bool {
-        appState.config.providers[providerID]?.enabled ?? true
+        appState.config.providers[providerID]?.enabled ?? ProviderCatalog.isEnabledByDefault(providerID)
     }
 
     private var enabledBinding: Binding<Bool> {
@@ -176,7 +179,7 @@ struct SettingsProviderPane: View {
         Section {
             OAuthLoginButton(providerID: providerID)
 
-            DisclosureGroup("手动配置 Access Token（支持多 token 轮换）") {
+            DisclosureGroup("手动配置 Access Token（支持多 token 轮换）", isExpanded: $isManualTokensExpanded) {
                 ForEach(Array(draftTokens.indices), id: \.self) { index in
                     HStack(spacing: 6) {
                         APIKeyInputField(
@@ -218,6 +221,7 @@ struct SettingsProviderPane: View {
                         .disabled(draftTokens.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
                 }
             }
+            .disclosurePointingHand(isExpanded: isManualTokensExpanded)
 
             HStack {
                 Spacer()
@@ -237,7 +241,7 @@ struct SettingsProviderPane: View {
         Section {
             OAuthLoginButton(providerID: providerID)
 
-            DisclosureGroup("手动配置 Token") {
+            DisclosureGroup("手动配置 Token", isExpanded: $isManualTokenExpanded) {
                 APIKeyInputField(title: "Access Token", text: $manualToken)
                 APIKeyInputField(title: "Refresh Token", text: $manualRefreshToken)
                 HStack {
@@ -252,6 +256,7 @@ struct SettingsProviderPane: View {
                         .disabled(manualToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+            .disclosurePointingHand(isExpanded: isManualTokenExpanded)
 
             HStack {
                 Spacer()
@@ -298,7 +303,7 @@ struct SettingsProviderPane: View {
     }
 
     /// 测试全部模型入口：未运行时显示按钮 + 上次批量测试汇总（结果保留在模型列表中）；
-    /// 运行时显示进度条 + 实时结果列表。
+    /// 运行时显示进度条（各模型调用结果实时体现在下方模型列表中，不再单独列状态清单）。
     @ViewBuilder
     private var testAllRow: some View {
         if isTestingAll {
@@ -309,9 +314,6 @@ struct SettingsProviderPane: View {
                     Text("测试全部模型：\(testAllCurrent)/\(testAllTotal)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-                ForEach(testAllOutcomes) { outcome in
-                    outcomeRow(outcome)
                 }
             }
         } else {
@@ -340,22 +342,6 @@ struct SettingsProviderPane: View {
                         .pointingHandCursor()
                 }
             }
-        }
-    }
-
-    /// 单个批量测试结果行。
-    private func outcomeRow(_ outcome: ModelTestOutcome) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: outcome.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(outcome.success ? .green : .red)
-                .font(.footnote)
-            Text(outcome.modelID)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(outcome.message)
-                .font(.caption2)
-                .foregroundStyle(outcome.success ? Color.secondary : Color.red)
-                .lineLimit(2)
         }
     }
 

@@ -5,7 +5,7 @@ public enum ZaiProviderDescriptor {
         metadata: ProviderMetadata(
             id: "zai",
             alias: "zai",
-            displayName: "Z.ai (GLM)",
+            displayName: "z.ai",
             authType: .apiKey
         ),
         baseURL: URL(string: "https://api.z.ai/api/anthropic/v1/messages"),

@@ -25,13 +25,11 @@ struct SettingsGeneralPane: View {
                     TextField("127.0.0.1", text: $hostText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
-                        .multilineTextAlignment(.trailing)
                 }
                 LabeledContent("监听端口") {
                     TextField("8231", text: $portText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 120)
-                        .multilineTextAlignment(.trailing)
                 }
             } header: {
                 Text("服务器")

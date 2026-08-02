@@ -200,6 +200,7 @@ struct SettingsGatewayKeysPane: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            .disclosurePointingHand(isExpanded: expandedKeys.contains(key))
         }
         .padding(.vertical, 4)
     }
@@ -264,16 +265,22 @@ struct SettingsGatewayKeysPane: View {
 
     // MARK: - 模型列表加载
 
-    /// 加载全部已启用供应商的模型：先静态目录（立即），再动态模型（异步补全）。
+    /// 加载全部「已启用且已配置凭据」供应商的模型：先静态目录（立即），再动态模型（异步补全）。
     /// 归一化格式 `<alias>/<modelID>` 与 RouteHandler.enforceEnabledModels 一致。
+    /// 未接入（无凭据）或未启用的供应商模型不展示（避免白名单中出现不可用模型）。
     @MainActor
     private func loadAllModels() {
         guard !loadingModels else { return }
         loadingModels = true
 
+        let isIncluded: (ProviderDescriptor) -> Bool = { descriptor in
+            let enabled = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
+            return enabled && appState.isProviderConfigured(descriptor.id)
+        }
+
         var options: [GatewayModelOption] = []
         var seen = Set<String>()
-        for descriptor in ProviderRegistry.shared.allDescriptors() {
+        for descriptor in ProviderRegistry.shared.allDescriptors() where isIncluded(descriptor) {
             let alias = descriptor.alias ?? descriptor.id
             for model in descriptor.models {
                 let normalized = "\(alias)/\(model.id)"
@@ -284,9 +291,8 @@ struct SettingsGatewayKeysPane: View {
         allModelOptions = options.sorted { $0.id < $1.id }
 
         Task {
-            for descriptor in ProviderRegistry.shared.allDescriptors() {
-                guard appState.config.providers[descriptor.id]?.enabled ?? true,
-                      let provider = ProviderRegistry.shared.provider(for: descriptor.id) else { continue }
+            for descriptor in ProviderRegistry.shared.allDescriptors() where isIncluded(descriptor) {
+                guard let provider = ProviderRegistry.shared.provider(for: descriptor.id) else { continue }
                 let alias = descriptor.alias ?? descriptor.id
                 let dynamic = (try? await provider.listModels(credential: appState.config.credential(for: descriptor.id))) ?? []
                 guard !dynamic.isEmpty else { continue }

@@ -5,7 +5,7 @@ public enum OpenCodeProviderDescriptor {
         metadata: ProviderMetadata(
             id: "opencode",
             alias: "oc",
-            displayName: "opencode",
+            displayName: "OpenCode",
             authType: .apiKey
         ),
         baseURL: URL(string: "https://opencode.ai/zen/v1"),
