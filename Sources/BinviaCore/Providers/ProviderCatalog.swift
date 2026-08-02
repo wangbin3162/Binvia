@@ -17,5 +17,8 @@ public enum ProviderCatalog {
         // Phase 18：Anthropic 兼容（zai / minimax）
         ProviderRegistry.shared.register(ZaiProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(MiniMaxProviderDescriptor.descriptor)
+        // Phase 19：codex / cursor（参考 OmniRoute）
+        ProviderRegistry.shared.register(CodexProviderDescriptor.descriptor)
+        ProviderRegistry.shared.register(CursorProviderDescriptor.descriptor)
     }
 }

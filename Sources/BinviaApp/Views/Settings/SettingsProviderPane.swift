@@ -297,7 +297,8 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 测试全部模型入口：未运行时显示按钮；运行时显示进度条 + 实时结果列表。
+    /// 测试全部模型入口：未运行时显示按钮 + 上次批量测试汇总（结果保留在模型列表中）；
+    /// 运行时显示进度条 + 实时结果列表。
     @ViewBuilder
     private var testAllRow: some View {
         if isTestingAll {
@@ -312,23 +313,32 @@ struct SettingsProviderPane: View {
                 ForEach(testAllOutcomes) { outcome in
                     outcomeRow(outcome)
                 }
-                if testAllCurrent == testAllTotal, testAllTotal > 0 {
-                    HStack {
-                        Spacer()
-                        Button("重新测试全部") { startTestAll() }
-                            .buttonStyle(.link)
-                            .controlSize(.small)
-                            .pointingHandCursor()
-                    }
-                }
             }
         } else {
             HStack {
-                Spacer()
-                Button("测试全部模型") { startTestAll() }
-                    .buttonStyle(.bordered)
-                    .disabled(models.isEmpty)
-                    .pointingHandCursor()
+                if !testAllOutcomes.isEmpty {
+                    let successCount = testAllOutcomes.filter(\.success).count
+                    let failedCount = testAllOutcomes.count - successCount
+                    HStack(spacing: 8) {
+                        Label("\(successCount) 成功", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Label("\(failedCount) 失败", systemImage: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                    }
+                    .font(.caption)
+                    .padding(.vertical, 2)
+                    Spacer()
+                    Button("重新测试全部") { startTestAll() }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                        .pointingHandCursor()
+                } else {
+                    Spacer()
+                    Button("测试全部模型") { startTestAll() }
+                        .buttonStyle(.bordered)
+                        .disabled(models.isEmpty)
+                        .pointingHandCursor()
+                }
             }
         }
     }
@@ -691,11 +701,13 @@ struct SettingsProviderPane: View {
     // MARK: - 测试全部模型（Phase 13 需求 1）
 
     /// 串行测试该供应商全部模型，逐条更新进度与结果。
+    /// 结果同步写入 `modelTestResults`，使每个模型行在测试结束后仍保留成功/失败状态。
     @MainActor
     private func startTestAll() {
         guard let provider = ProviderRegistry.shared.provider(for: providerID) else { return }
         isTestingAll = true
         testAllOutcomes = []
+        modelTestResults.removeAll()
         testAllCurrent = 0
         testAllTotal = 0
         let credential = appState.config.credential(for: providerID)
@@ -713,6 +725,7 @@ struct SettingsProviderPane: View {
                 return
             }
             for (index, model) in models.enumerated() {
+                modelTestResults[model.id] = .testing
                 let outcome: ModelTestOutcome
                 if let result = try? await provider.testModel(model.id, credential: credential) {
                     outcome = ModelTestOutcome(
@@ -729,7 +742,12 @@ struct SettingsProviderPane: View {
                     )
                 }
                 testAllOutcomes.append(outcome)
+                modelTestResults[model.id] = outcome.success ? .ok(outcome.message) : .failed(outcome.message)
                 testAllCurrent = index + 1
+            }
+            // 动态模型与静态列表不一致时，补全模型行以便结果可见
+            for outcome in testAllOutcomes where !models.contains(where: { $0.id == outcome.modelID }) {
+                self.models.append(Model(id: outcome.modelID, name: outcome.modelID))
             }
             isTestingAll = false
         }

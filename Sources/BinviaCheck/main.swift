@@ -1878,6 +1878,28 @@ func qwenCloudIntegrationTests() async throws {
     )
 }
 
+// MARK: - Phase 19: codex / cursor 集成（URLProtocol mock，OpenAI 兼容）
+
+func codexIntegrationTests() async throws {
+    try await runOpenAICompatSuite(
+        providerID: "codex",
+        makeProvider: { CodexProvider() },
+        apiKeyEnv: "CODEX_API_KEY",
+        baseURLEnv: "CODEX_BASE_URL",
+        chatModel: "gpt-5.1-codex-mini"
+    )
+}
+
+func cursorIntegrationTests() async throws {
+    try await runOpenAICompatSuite(
+        providerID: "cursor",
+        makeProvider: { CursorProvider() },
+        apiKeyEnv: "CURSOR_API_KEY",
+        baseURLEnv: "CURSOR_BASE_URL",
+        chatModel: "claude-sonnet-4-5"
+    )
+}
+
 // MARK: - Phase 18: Kimi 用量查询（URLProtocol mock）
 
 func kimiUsageFetcherTests() async throws {
@@ -2024,6 +2046,8 @@ await run("minimax 集成（Anthropic SSE→OpenAI，URLProtocol mock）", minim
 await run("opencode-go 集成（URLProtocol mock）", opencodeGoIntegrationTests)
 await run("xiaomi-mimo 集成（URLProtocol mock）", xiaomiMimoIntegrationTests)
 await run("qwen-cloud 集成（URLProtocol mock）", qwenCloudIntegrationTests)
+await run("codex 集成（URLProtocol mock）", codexIntegrationTests)
+await run("cursor 集成（URLProtocol mock）", cursorIntegrationTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 
 print("")

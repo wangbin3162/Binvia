@@ -32,6 +32,8 @@
 | qwen-cloud | `qwc` | api-key | ✅ 已实现（Phase 18） |
 | zai | `zai` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
 | minimax | `mm` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
+| codex | `cx` | api-key | ✅ 已实现（Phase 19，OpenAI 兼容） |
+| cursor | `cu` | api-key | ✅ 已实现（Phase 19，OpenAI 兼容） |
 
 ## 快速开始
 
@@ -155,7 +157,7 @@ Sources/
 │   ├── Auth/APIKeyAuthenticator.swift
 │   ├── Monitoring/RequestLogger.swift
 │   ├── Server/                      # 本地 HTTP 服务器 + 路由分发
-│   └── Providers/                   # deepseek / codebuddy-cn / antigravity / openai / opencode / kimi / opencode-go / xiaomi-mimo / qwen-cloud / zai / minimax
+│   └── Providers/                   # deepseek / codebuddy-cn / antigravity / openai / opencode / kimi / opencode-go / xiaomi-mimo / qwen-cloud / zai / minimax / codex / cursor
 ├── BinviaServer/             # 服务器入口
 ├── BinviaCLI/                # CLI（含 oauth login）
 └── BinviaApp/                # 菜单栏 GUI（SwiftUI）
