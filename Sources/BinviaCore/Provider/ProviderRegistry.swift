@@ -33,6 +33,26 @@ public final class ProviderRegistry: @unchecked Sendable {
         }
     }
 
+    /// 注销指定 provider：移除描述符/实例/别名/模型反向索引。
+    /// 用于自定义 provider 的编辑/删除（先 unregister 再 register 新版本）。
+    public func unregister(_ providerID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        descriptorsByID.removeValue(forKey: providerID)
+        providersByID.removeValue(forKey: providerID)
+        // 移除指向该 id 的别名
+        aliasMap = aliasMap.filter { $0.value != providerID }
+        // 从模型反向索引中剔除该 id（保留其它拥有者）
+        for (model, owners) in modelToProviders {
+            let filtered = owners.filter { $0 != providerID }
+            if filtered.isEmpty {
+                modelToProviders.removeValue(forKey: model)
+            } else if filtered.count != owners.count {
+                modelToProviders[model] = filtered
+            }
+        }
+    }
+
     public func descriptor(for id: String) -> ProviderDescriptor? {
         lock.lock()
         defer { lock.unlock() }

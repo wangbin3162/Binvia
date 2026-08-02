@@ -28,6 +28,10 @@ struct SettingsProviderPane: View {
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
     @State private var isManualTokenExpanded = false
 
+    /// Cursor IDE 接入检测状态（providerID == "cursor" 时展示）。
+    @State private var cursorDetection: CursorDetection?
+    @State private var checkingCursor = false
+
     /// 模型列表与模型级测试状态。
     @State private var models: [Model] = []
     @State private var loadingModels = false
@@ -41,6 +45,9 @@ struct SettingsProviderPane: View {
     @State private var testAllCurrent = 0
     @State private var testAllTotal = 0
     @State private var testAllOutcomes: [ModelTestOutcome] = []
+
+    /// 自定义 provider 的「添加模型」输入框草稿。
+    @State private var newModelName = ""
 
     /// 单个模型的测试结果状态。
     enum ModelTestResult: Equatable {
@@ -63,20 +70,34 @@ struct SettingsProviderPane: View {
                     infoSection(descriptor)
                 }
 
-                usageSection
+                // 自定义 provider 无用量查询，隐藏用量 Section
+                if !descriptor.isUserDefined {
+                    usageSection
+                }
                 connectionSection(descriptor)
-                testResultSection
+                cursorIDESection
+                // 自定义 provider：可编辑模型列表（替代只读连通性 Section）
+                if descriptor.isUserDefined {
+                    customModelsSection
+                } else {
+                    testResultSection
+                }
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .onAppear {
                 loadDrafts()
-                loadModels()
+                if !descriptor.isUserDefined {
+                    loadModels()
+                }
+                loadCursorDetection()
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
                 // 凭据变更时刷新模型列表与令牌草稿（OAuth 登录后令牌列表即时反映新 token）
                 modelTestResults.removeAll()
-                loadModels()
+                if !descriptor.isUserDefined {
+                    loadModels()
+                }
                 loadDrafts()
             }
         } else {
@@ -148,6 +169,70 @@ struct SettingsProviderPane: View {
             deviceFlowConnectionSection
         case .oauth:
             oauthConnectionSection
+        }
+    }
+
+    // MARK: - Cursor IDE 接入（Phase 20）
+
+    /// Cursor 专属「Cursor IDE 接入」区块：显示 IDE 令牌检测状态，无需 API Key 即可启用。
+    @ViewBuilder
+    private var cursorIDESection: some View {
+        if providerID == "cursor" {
+            Section {
+                if checkingCursor {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("检测中…").foregroundStyle(.secondary)
+                    }
+                } else {
+                    switch cursorDetection {
+                    case .found(let identity):
+                        Label("已检测到 Cursor IDE 登录", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        if let expiresAt = identity.expiresAt {
+                            Text("令牌过期时间：\(expiresAt.formatted(date: .omitted, time: .shortened))（IDE 会自动轮换）")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("machineId: \(identity.machineId ?? "—")")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    case .noInstallation:
+                        Label("未检测到 Cursor IDE", systemImage: "xmark.circle")
+                            .foregroundStyle(.secondary)
+                        Text("未找到 state.vscdb。请先安装并登录 Cursor。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .notSignedIn:
+                        Label("Cursor 已安装但未登录", systemImage: "xmark.circle.fill")
+                            .foregroundStyle(.orange)
+                        Text("请打开 Cursor IDE 登录账号后重新检测。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .unreadable(let message):
+                        Label("无法读取 Cursor 数据库", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    case nil:
+                        Text("尚未检测")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Spacer()
+                        Button("重新检测") { loadCursorDetection() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .pointingHandCursor()
+                    }
+                }
+            } header: {
+                Text("Cursor IDE 接入")
+            } footer: {
+                Text("无需 API Key：请求时自动读取 Cursor IDE 的登录令牌（约 24h 轮换）。也可在下方用 API Key 手动配置作兜底。")
+            }
         }
     }
 
@@ -459,6 +544,107 @@ struct SettingsProviderPane: View {
         }
     }
 
+    // MARK: - 自定义 Provider 模型列表（可编辑）
+
+    /// 自定义 provider 的模型列表（从 config 直接派生，带 `<id>/` 前缀）。响应式，无需 async 加载。
+    private var customModels: [Model] {
+        let def = appState.customProviderDef(for: providerID)
+        return def?.models.map { Model(id: "\(providerID)/\($0)") } ?? []
+    }
+
+    /// 自定义 provider 的「模型列表」Section：顶部添加模型输入 + 模型行（测试 / 删除）+ 供应商级测试。
+    @ViewBuilder
+    private var customModelsSection: some View {
+        Section {
+            // 供应商级测试
+            providerTestRow
+
+            // 添加模型行
+            HStack(spacing: 8) {
+                TextField("模型名", text: $newModelName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
+                    .onSubmit { addCustomModel() }
+                Button("添加") { addCustomModel() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+                    .disabled(newModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            // 模型列表
+            if customModels.isEmpty {
+                Text("暂无模型，请在上方添加")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(customModels) { model in
+                    customModelRow(model)
+                }
+            }
+        } header: {
+            Text("模型列表")
+        } footer: {
+            Text("模型以 \(providerID)/<model> 形式调用。点击「测试」发送最小请求验证连通。")
+        }
+    }
+
+    @ViewBuilder
+    private func customModelRow(_ model: Model) -> some View {
+        let result = modelTestResults[model.id] ?? .idle
+        HStack(alignment: .top, spacing: 6) {
+            Text(model.id)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 200, alignment: .leading)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            switch result {
+            case .testing:
+                ProgressView().controlSize(.small)
+            case .ok(let msg):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.footnote)
+                Text(msg).font(.caption2).foregroundStyle(.secondary)
+            case .failed(let msg):
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+                Text(msg).font(.caption2).foregroundStyle(.red)
+            case .idle:
+                Spacer()
+                Button("测试") { startModelTest(model.id) }
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+            }
+
+            if result != .testing {
+                Button(role: .destructive) {
+                    try? appState.removeCustomModel(providerID: providerID, model: model.id)
+                    modelTestResults.removeValue(forKey: model.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                        .font(.footnote)
+                        .padding(2)
+                }
+                .buttonStyle(.plain)
+                .hoverHighlight(cornerRadius: 4)
+                .help("删除模型")
+            }
+        }
+    }
+
+    private func addCustomModel() {
+        let trimmed = newModelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try? appState.addCustomModel(providerID: providerID, model: trimmed)
+        newModelName = ""
+    }
+
     // MARK: - 基础信息行（与头部同处一个 Section，无独立「信息」标题）
 
     /// 基础信息行：别名 / Base URL / 认证方式 / 已配置，紧跟 logo + 启用开关下方
@@ -480,10 +666,18 @@ struct SettingsProviderPane: View {
                 .foregroundStyle(.secondary)
         }
         LabeledContent("已配置") {
-            let configured = appState.isProviderConfigured(providerID)
+            let configured = isConfigured
             Text(configured ? "是" : "否")
                 .foregroundStyle(configured ? .green : .secondary)
         }
+    }
+
+    /// 已配置判定：cursor 额外把「IDE 检测成功」视为已配置（无需 API Key）。
+    private var isConfigured: Bool {
+        if providerID == "cursor", case .found = cursorDetection {
+            return true
+        }
+        return appState.isProviderConfigured(providerID)
     }
 
     private func authTypeLabel(_ type: ProviderAuthType) -> String {
@@ -747,6 +941,20 @@ struct SettingsProviderPane: View {
 
     private func startTest() {
         Task { await appState.testProvider(providerID) }
+    }
+
+    // MARK: - Cursor IDE 检测
+
+    /// 刷新 Cursor IDE 检测状态（进入面板与「重新检测」按钮共用，顺带预热凭据缓存）。
+    @MainActor
+    private func loadCursorDetection() {
+        guard providerID == "cursor" else { return }
+        checkingCursor = true
+        Task {
+            let detection = await CursorCredentialStore.shared.refresh()
+            cursorDetection = detection
+            checkingCursor = false
+        }
     }
 
     // MARK: - 模型列表 & 模型级测试

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import BinviaCore
 
 /// Provider 品牌图标：优先从 Bundle 加载 SVG 矢量图标（template 模式，16x16），
 /// 无 SVG 时回退到边框 + 首字母（借鉴 CodexBar `ProviderBrandIcon`）。
@@ -50,10 +51,16 @@ struct ProviderBrandIcon: View {
 
     private var initial: String {
         switch providerID {
-        case "deepseek": "D"
-        case "codebuddy-cn": "B"
-        case "antigravity": "A"
-        default: String(providerID.prefix(1)).uppercased()
+        case "deepseek": return "D"
+        case "codebuddy-cn": return "B"
+        case "antigravity": return "A"
+        default:
+            // 自定义 provider：优先用 displayName 首字符（支持中文/Unicode），回退到 id 首字母
+            if let displayName = ProviderRegistry.shared.descriptor(for: providerID)?.displayName,
+               let first = displayName.first {
+                return String(first).uppercased()
+            }
+            return String(providerID.prefix(1)).uppercased()
         }
     }
 }

@@ -66,6 +66,7 @@ final class AppState: ObservableObject {
         let loaded = initialConfig ?? (try? ConfigStore.load(path: resolvedPath)) ?? RouteConfig()
         self.config = loaded
         ProviderCatalog.registerAll()
+        ProviderCatalog.registerCustomProviders(from: loaded)
     }
 
     // MARK: - 服务器生命周期
@@ -73,6 +74,7 @@ final class AppState: ObservableObject {
     func startServer() throws {
         guard server == nil else { return }
         ProviderCatalog.registerAll()
+        ProviderCatalog.registerCustomProviders(from: config)
         do {
             let handler = RouteHandler(config: config)
             let newServer = HTTPServer { request in
@@ -241,6 +243,102 @@ final class AppState: ObservableObject {
         order.move(fromOffsets: fromOffsets, toOffset: toOffset)
         config.providerOrder = order
         try? saveConfig()
+    }
+
+    // MARK: - 自定义兼容 Provider 管理
+
+    /// 查询某个自定义 provider 的定义。
+    func customProviderDef(for id: String) -> CustomProviderDef? {
+        config.customProviderDef(for: id)
+    }
+
+    /// 新增一个自定义 OpenAI 兼容 Provider。
+    /// - 生成唯一 slug id（避免与已注册 provider 冲突）
+    /// - 写入 `customProviderDefs` + `providers[id]`（启用态、空凭据）
+    /// - 注册到 `ProviderRegistry`，保存配置并热更新
+    /// - 返回新建的 def；校验失败（名称空 / URL 非法）返回 nil
+    @discardableResult
+    func addCustomProvider(name: String, baseURL: String) throws -> CustomProviderDef? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, Self.isValidHTTPURL(trimmedURL) else { return nil }
+        let existingIds = Set(ProviderRegistry.shared.allDescriptors().map(\.id))
+        let id = CustomProviderDef.uniqueSlug(for: trimmedName, excluding: existingIds)
+        let def = CustomProviderDef(id: id, displayName: trimmedName, baseURL: trimmedURL, models: [])
+        config.customProviderDefs.append(def)
+        config.providers[id] = ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: [])
+        reregisterCustomProvider(def)
+        try saveConfig()
+        return def
+    }
+
+    /// 编辑自定义 provider 的展示名 / BaseURL（传 nil 表示不修改）。
+    func updateCustomProvider(id: String, displayName: String?, baseURL: String?) throws {
+        guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == id }) else { return }
+        var def = config.customProviderDefs[idx]
+        if let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            def.displayName = name
+        }
+        if let url = baseURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !url.isEmpty, Self.isValidHTTPURL(url) {
+            def.baseURL = url
+        }
+        config.customProviderDefs[idx] = def
+        reregisterCustomProvider(def)
+        try saveConfig()
+    }
+
+    /// 删除自定义 provider：移除定义、凭据、注册表条目。
+    func deleteCustomProvider(id: String) throws {
+        config.customProviderDefs.removeAll { $0.id == id }
+        config.providers.removeValue(forKey: id)
+        ProviderRegistry.shared.unregister(id)
+        try saveConfig()
+    }
+
+    /// 为自定义 provider 追加一个模型（传不带前缀的原始模型名）。
+    func addCustomModel(providerID: String, model: String) throws {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+        guard !config.customProviderDefs[idx].models.contains(trimmed) else { return }
+        config.customProviderDefs[idx].models.append(trimmed)
+        reregisterCustomProvider(config.customProviderDefs[idx])
+        try saveConfig()
+    }
+
+    /// 从自定义 provider 删除一个模型（`model` 参数可带前缀，内部剥前缀后比较）。
+    func removeCustomModel(providerID: String, model: String) throws {
+        guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+        let prefix = "\(providerID)/"
+        let stripped = model.hasPrefix(prefix) ? String(model.dropFirst(prefix.count)) : model
+        guard let modelIdx = config.customProviderDefs[idx].models.firstIndex(of: stripped) else { return }
+        config.customProviderDefs[idx].models.remove(at: modelIdx)
+        reregisterCustomProvider(config.customProviderDefs[idx])
+        try saveConfig()
+    }
+
+    /// （重新）注册单个自定义 provider 到 ProviderRegistry：先 unregister 再 register 新版本。
+    private func reregisterCustomProvider(_ def: CustomProviderDef) {
+        ProviderRegistry.shared.unregister(def.id)
+        guard let baseURL = URL(string: def.baseURL) else { return }
+        let descriptor = ProviderDescriptor(
+            metadata: ProviderMetadata(id: def.id, alias: def.id, displayName: def.displayName, authType: .apiKey),
+            baseURL: baseURL,
+            models: [],
+            supportsStreaming: true,
+            usageFetcherFactory: { nil },
+            isUserDefined: true,
+            makeProvider: { GenericOpenAIProvider(id: def.id, baseURL: baseURL, models: def.models) }
+        )
+        ProviderRegistry.shared.register(descriptor)
+    }
+
+    private static func isValidHTTPURL(_ string: String) -> Bool {
+        guard let url = URL(string: string),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return false }
+        return true
     }
 
     // MARK: - Provider 状态摘要

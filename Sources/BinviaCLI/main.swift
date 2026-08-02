@@ -9,6 +9,7 @@ import AppKit
 //   BinviaCLI providers list
 //   BinviaCLI test <provider>
 //   BinviaCLI oauth login <codebuddy-cn|antigravity>
+//   BinviaCLI cursor status
 //   BinviaCLI config path
 //   BinviaCLI serve [--port N] [--config PATH]
 
@@ -21,6 +22,7 @@ func usage() {
       BinviaCLI providers list
       BinviaCLI test <provider|alias>
       BinviaCLI oauth login <codebuddy-cn|antigravity>
+      BinviaCLI cursor status
       BinviaCLI config path
       BinviaCLI serve [--port N] [--config PATH]
     """)
@@ -153,6 +155,37 @@ case "oauth":
     default:
         print("未知供应商：\(providerName)（支持 codebuddy-cn / antigravity）")
         exit(1)
+    }
+
+case "cursor":
+    guard args.count >= 2, args[1] == "status" else {
+        print("usage: BinviaCLI cursor status")
+        exit(1)
+    }
+    let detection = await CursorCredentialStore.shared.refresh()
+    switch detection {
+    case .found(let identity):
+        print("✅ 已检测到 Cursor IDE 登录")
+        print("accessToken: \(identity.accessToken.prefix(16))•••（长度 \(identity.accessToken.count)）")
+        if let expiresAt = identity.expiresAt {
+            print("过期时间: \(expiresAt.formatted())（IDE 会自动轮换）")
+        } else {
+            print("过期时间: 未知（JWT 不含 exp 或格式异常）")
+        }
+        if let machineId = identity.machineId {
+            print("machineId: \(machineId)")
+        }
+    case .noInstallation:
+        print("❌ 未检测到 Cursor IDE（未找到 state.vscdb）")
+        print("查找路径:")
+        for path in await CursorCredentialStore().candidatePaths() {
+            print("  \(path)")
+        }
+    case .notSignedIn:
+        print("❌ Cursor 已安装但未登录（state.vscdb 中无 cursorAuth/accessToken）")
+        print("请先打开 Cursor IDE 并登录账号。")
+    case .unreadable(let message):
+        print("❌ 无法读取 Cursor 数据库: \(message)")
     }
 
 case "config":

@@ -106,6 +106,54 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
     }
 }
 
+/// 用户自定义的「OpenAI 兼容 Provider」定义。
+///
+/// 与内置 provider 不同：id/displayName/baseURL/模型列表均由用户在 GUI 填写。
+/// - `id`：ASCII slug，由 `displayName` 生成（`CustomProviderDef.uniqueSlug`），如 `unisound`。
+/// - `models`：**不带前缀**的模型 id（如 `glm-5.2`）；路由与展示时由 provider 自动拼接 `<id>/<model>`。
+///
+/// 凭据与启用状态**不**存在这里，而是复用 `RouteConfig.providers[id]`（`ProviderConfig`），
+/// 这样 `credential(for:)`、`apiKeys(for:)` 与设置面板的凭据 UI 全部沿用既有路径。
+public struct CustomProviderDef: Codable, Sendable, Equatable {
+    public var id: String
+    public var displayName: String
+    public var baseURL: String
+    public var models: [String]
+
+    public init(id: String, displayName: String, baseURL: String, models: [String] = []) {
+        self.id = id
+        self.displayName = displayName
+        self.baseURL = baseURL
+        self.models = models
+    }
+
+    /// 由 displayName 生成 ASCII slug：小写 → 非 `[a-z0-9]` 替换为 `-` → 折叠连续 `-` → 去首尾 `-`。
+    /// 全部为非 ASCII 字符时回退为 `custom`。
+    public static func slug(for displayName: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789")
+        var result = ""
+        for ch in displayName.lowercased() {
+            if allowed.contains(ch) {
+                result.append(ch)
+            } else {
+                result.append("-")
+            }
+        }
+        while result.contains("--") { result = result.replacingOccurrences(of: "--", with: "-") }
+        result = result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return result.isEmpty ? "custom" : result
+    }
+
+    /// 在 `existingIds` 中生成不冲突的唯一 slug：`base` → `base-2` → `base-3` …
+    public static func uniqueSlug(for displayName: String, excluding existingIds: Set<String>) -> String {
+        let base = slug(for: displayName)
+        if !existingIds.contains(base) { return base }
+        var i = 2
+        while existingIds.contains("\(base)-\(i)") { i += 1 }
+        return "\(base)-\(i)"
+    }
+}
+
 public struct RouteConfig: Codable, Sendable, Equatable {
     public var version: Int
     public var host: String
@@ -115,6 +163,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     public var providers: [String: ProviderConfig]
     /// 供应商侧栏排序（拖拽自定义）。未列出或为空的 provider 追加在末尾（按 id 字母序）。
     public var providerOrder: [String]
+    /// 用户自定义的 OpenAI 兼容 Provider 定义列表（运行时注册到 ProviderRegistry）。
+    public var customProviderDefs: [CustomProviderDef]
 
     public init(
         version: Int = 2,
@@ -122,7 +172,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         port: Int = 20427,
         apiKeys: [GatewayKeyConfig] = [],
         providers: [String: ProviderConfig] = [:],
-        providerOrder: [String] = []
+        providerOrder: [String] = [],
+        customProviderDefs: [CustomProviderDef] = []
     ) {
         self.version = version
         self.host = host
@@ -130,6 +181,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         self.apiKeys = apiKeys
         self.providers = providers
         self.providerOrder = providerOrder
+        self.customProviderDefs = customProviderDefs
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -139,6 +191,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         case apiKeys
         case providers
         case providerOrder
+        case customProviderDefs
     }
 
     /// v1 → v2 兼容解码：`apiKeys` 既可能是 `[String]`（v1），也可能是 `[{key, enabledModels}]`（v2）。
@@ -154,6 +207,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
             self.apiKeys = try container.decodeIfPresent([GatewayKeyConfig].self, forKey: .apiKeys) ?? []
         }
         self.providerOrder = try container.decodeIfPresent([String].self, forKey: .providerOrder) ?? []
+        self.customProviderDefs = try container.decodeIfPresent([CustomProviderDef].self, forKey: .customProviderDefs) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -164,6 +218,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         try container.encode(apiKeys, forKey: .apiKeys)
         try container.encode(providers, forKey: .providers)
         try container.encodeIfPresent(providerOrder.isEmpty ? nil : providerOrder, forKey: .providerOrder)
+        try container.encodeIfPresent(customProviderDefs.isEmpty ? nil : customProviderDefs, forKey: .customProviderDefs)
     }
 
     /// 全部网关 Key 字符串（鉴权用）。
@@ -230,5 +285,10 @@ public struct RouteConfig: Codable, Sendable, Equatable {
             }
         }
         return nil
+    }
+
+    /// 查询某个自定义 provider 的定义。不存在返回 nil。
+    public func customProviderDef(for id: String) -> CustomProviderDef? {
+        customProviderDefs.first { $0.id == id }
     }
 }

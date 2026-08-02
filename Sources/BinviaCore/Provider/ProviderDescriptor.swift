@@ -60,6 +60,9 @@ public struct ProviderDescriptor: Sendable {
     /// 上游网页用量看板（无公开用量 API 的供应商可在此声明，面板提供「在网页查看」入口）。
     public let usageDashboardURL: URL?
 
+    /// 是否为用户自定义 provider（GUI 运行时注册）。UI 据此切换可编辑模型列表等差异化展示。
+    public let isUserDefined: Bool
+
     public init(
         metadata: ProviderMetadata,
         baseURL: URL?,
@@ -70,6 +73,7 @@ public struct ProviderDescriptor: Sendable {
         usageFetcherFactory: @escaping @Sendable () -> (any ProviderUsageFetcher)? = { nil },
         regions: [ProviderAPIRegion] = [],
         usageDashboardURL: URL? = nil,
+        isUserDefined: Bool = false,
         makeProvider: @escaping @Sendable () -> any Provider
     ) {
         self.metadata = metadata
@@ -81,6 +85,7 @@ public struct ProviderDescriptor: Sendable {
         self.usageFetcherFactory = usageFetcherFactory
         self.regions = regions
         self.usageDashboardURL = usageDashboardURL
+        self.isUserDefined = isUserDefined
         self.makeProvider = makeProvider
     }
 

@@ -37,6 +37,7 @@ if let portStr = value(for: "--port"), let p = Int(portStr) {
 }
 
 ProviderCatalog.registerAll()
+ProviderCatalog.registerCustomProviders(from: config)
 
 let handler = RouteHandler(config: config)
 let server = HTTPServer { request in

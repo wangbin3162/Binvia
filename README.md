@@ -33,7 +33,7 @@
 | zai | `zai` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
 | minimax | `mm` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
 | codex | `cx` | api-key | ✅ 已实现（Phase 19，OpenAI 兼容） |
-| cursor | `cu` | api-key | ✅ 已实现（Phase 19，OpenAI 兼容） |
+| cursor | `cu` | api-key / IDE 接入 | ✅ 已实现（Phase 19/20，OpenAI 兼容；Phase 20 支持从 Cursor IDE 自动读取登录令牌） |
 
 ## 快速开始
 
@@ -65,6 +65,26 @@ swift run BinviaCLI oauth login antigravity
 
 登录凭据自动写入 `~/.config/binvia/config.json`。
 
+### Cursor（IDE 接入）
+
+Cursor 支持两种认证方式，**无需单独购买 Cursor API key**（Pro/Max 订阅即可）：
+
+- **IDE 自动发现（默认）**：Binvia 请求时自动从 Cursor IDE 的本地数据库读取登录令牌
+  （`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`），携带 IDE 头走
+  `https://api2.cursor.sh/v1/chat/completions`。令牌约 24h 轮换，每次请求实时读取（TTL 缓存 4h），
+  无需手动维护。可在设置面板「Cursor IDE 接入」区块查看检测状态/过期时间，或用 CLI 排查：
+
+  ```bash
+  swift run BinviaCLI cursor status   # 检测 IDE 令牌：有无/过期时间/machineId
+  ```
+
+- **API Key 兜底**：设置 `CURSOR_API_KEY`（或 config `providers.cursor.credential.apiKey`）后，
+  走官方公开 REST `https://api.cursor.com/v1`，与 OpenAI 兼容供应商行为一致。
+
+> 说明：Cursor 上游为私有协议（Connect-RPC protobuf，需 HTTP/2），模型走其订阅后端；本实现仅支持 Chat Completions（无工具调用）。
+> **命名模型需要 Cursor Pro/Max 套餐**（免费套餐会被上游拒绝：`Free plans can only use Auto`）。
+> `CURSOR_BASE_URL` 环境变量可覆盖上游端点（测试/镜像场景）。
+
 ### 调用
 
 ```bash
@@ -90,6 +110,7 @@ curl http://localhost:20427/v1/usage
 swift run BinviaCLI providers list            # 列出供应商与模型
 swift run BinviaCLI test deepseek             # 测试供应商可用性
 swift run BinviaCLI oauth login codebuddy-cn  # OAuth 登录
+swift run BinviaCLI cursor status             # Cursor IDE 令牌检测
 swift run BinviaCLI config path               # 配置文件路径
 swift run BinviaCLI serve                     # 启动服务器
 ```
