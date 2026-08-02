@@ -11,8 +11,16 @@ struct OAuthLoginButton: View {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                Text("已连接")
-                    .foregroundStyle(.secondary)
+                // 显示当前登录账号（Antigravity userinfo email；无则仅“已连接”）
+                if let email = appState.config.providers[providerID]?.credential.email, !email.isEmpty {
+                    Text("已连接 · \(email)")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text("已连接")
+                        .foregroundStyle(.secondary)
+                }
                 Button("重新登录") { startLogin() }
                     .buttonStyle(.plain)
                     .help("重新登录")

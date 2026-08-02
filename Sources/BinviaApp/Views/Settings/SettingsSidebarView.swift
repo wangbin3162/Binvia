@@ -11,8 +11,8 @@ struct SettingsSidebarView: View {
         List(selection: selectionBinding) {
             Section {
                 paneRow(.general)
-                paneRow(.test)
                 paneRow(.gatewayKeys)
+                paneRow(.test)
             } header: {
                 Text("通用")
             }

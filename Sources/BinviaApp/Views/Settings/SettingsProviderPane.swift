@@ -114,6 +114,21 @@ struct SettingsProviderPane: View {
             set: { appState.setProviderEnabled($0, for: providerID) })
     }
 
+    /// 描述符声明的 API 区域选项（空 = 无区域选择）。
+    private var regions: [ProviderAPIRegion] {
+        ProviderRegistry.shared.descriptor(for: providerID)?.regions ?? []
+    }
+
+    /// 区域 Picker 绑定：config 值为 nil 时回退到首个区域（描述符默认）。
+    private var regionBinding: Binding<String> {
+        let current = appState.config.providers[providerID]?.region
+        let fallback = regions.first?.id ?? ""
+        return Binding(
+            get: { current ?? fallback },
+            set: { appState.setProviderRegion($0, for: providerID) }
+        )
+    }
+
     // MARK: - 连接 Section（按认证类型）
 
     @ViewBuilder
@@ -129,8 +144,18 @@ struct SettingsProviderPane: View {
     }
 
     /// DeepSeek：API Key 多行输入 + 添加/移除 + 测试/保存。
+    /// z.ai 等带区域选项的供应商在顶部渲染「API 区域」Picker。
     private var apiKeyConnectionSection: some View {
         Section {
+            if !regions.isEmpty {
+                Picker("API 区域", selection: regionBinding) {
+                    ForEach(regions, id: \.id) { region in
+                        Text(region.displayName).tag(region.id)
+                    }
+                }
+                Divider()
+            }
+
             ForEach(Array(draftKeys.indices), id: \.self) { index in
                 HStack(spacing: 6) {
                     APIKeyInputField(

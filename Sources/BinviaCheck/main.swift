@@ -289,6 +289,57 @@ func routeConfigTests() throws {
     let rcData = try JSONEncoder().encode(rc)
     let rcDecoded = try JSONDecoder().decode(RouteConfig.self, from: rcData)
     expectEqual(rcDecoded, rc, "RouteConfig round trip")
+
+    // Phase 20: credential(for:) 把 apiKeys[0] 合并进 credential.apiKey（GUI 单 key 存 apiKeys[]）
+    let cfg5 = RouteConfig(providers: [
+        "opencode": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: ["gui-key"])
+    ])
+    expectEqual(cfg5.credential(for: "opencode").apiKey, "gui-key", "credential(for:) 合并 apiKeys[0]")
+
+    // Phase 20 补充: enabled=false 也应返回已保存凭据（禁用态仍可测试模型）
+    let cfg5b = RouteConfig(providers: [
+        "opencode": ProviderConfig(enabled: false, credential: ProviderCredential(), apiKeys: ["gui-key"])
+    ])
+    expectEqual(cfg5b.credential(for: "opencode").apiKey, "gui-key", "禁用态仍返回合并后的凭据")
+
+    // 已显式配置 credential.apiKey 时不被 apiKeys[] 覆盖
+    let cfg6 = RouteConfig(providers: [
+        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: ["first-rotation"])
+    ])
+    expectEqual(cfg6.credential(for: "deepseek").apiKey, "explicit", "显式 apiKey 优先于 apiKeys[]")
+
+    // Phase 20: credential(for:) 透传 ProviderConfig.region
+    let cfg7 = RouteConfig(providers: [
+        "zai": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: [], region: "global")
+    ])
+    expectEqual(cfg7.credential(for: "zai").region, "global", "credential(for:) 透传 region")
+    let cfg8 = RouteConfig(providers: [
+        "zai": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"))
+    ])
+    expectNil(cfg8.credential(for: "zai").region, "未配置 region 时为 nil")
+
+    // Phase 20: ProviderConfig.region 编解码（含旧配置缺省）
+    let legacyNoRegion = #"{"enabled": true, "credential": {"apiKey": "k"}, "apiKeys": ["a"]}"#
+    let legacyNoRegionDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacyNoRegion.utf8))
+    expectNil(legacyNoRegionDecoded.region, "旧配置缺 region → nil")
+    let regionPC = ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: [], region: "bigmodel-cn")
+    let regionPCData = try JSONEncoder().encode(regionPC)
+    let regionPCDecoded = try JSONDecoder().decode(ProviderConfig.self, from: regionPCData)
+    expectEqual(regionPCDecoded, regionPC, "ProviderConfig region round trip")
+
+    // Phase 20: ProviderCredential 新增字段（email/expiresAt/region）向后兼容编解码
+    let legacyCred = #"{"apiKey": "k", "accessToken": "t", "refreshToken": "r"}"#
+    let legacyCredDecoded = try JSONDecoder().decode(ProviderCredential.self, from: Data(legacyCred.utf8))
+    expectEqual(legacyCredDecoded.apiKey, "k", "legacy credential apiKey")
+    expectNil(legacyCredDecoded.email, "旧凭据缺 email → nil")
+    expectNil(legacyCredDecoded.expiresAt, "旧凭据缺 expiresAt → nil")
+    expectNil(legacyCredDecoded.region, "旧凭据缺 region → nil")
+    let fullCred = ProviderCredential(
+        apiKey: "k", accessToken: "t", refreshToken: "r",
+        email: "user@example.com", expiresAt: Date(timeIntervalSince1970: 1_800_000_000), region: "global")
+    let fullCredData = try JSONEncoder().encode(fullCred)
+    let fullCredDecoded = try JSONDecoder().decode(ProviderCredential.self, from: fullCredData)
+    expectEqual(fullCredDecoded, fullCred, "ProviderCredential 新字段 round trip")
 }
 
 // MARK: - ProviderRegistry 反向索引 + Router 消歧升级（Phase 12）
@@ -297,15 +348,17 @@ func registryReverseIndexTests() {
     ProviderCatalog.registerAll()
     let registry = ProviderRegistry.shared
 
-    // deepseek-v4-pro 同时存在于 deepseek 与 codebuddy-cn 静态目录
+    // deepseek-v4-pro 同时存在于 deepseek / codebuddy-cn / opencode（Phase 20 opencode 静态目录
+    // 同步线上后新增）静态目录
     let owners = registry.providers(forModel: "deepseek-v4-pro")
-    expectEqual(Set(owners), Set(["codebuddy-cn", "deepseek"]), "反向索引: deepseek-v4-pro 归属两家")
+    expectEqual(Set(owners), Set(["codebuddy-cn", "deepseek", "opencode"]), "反向索引: deepseek-v4-pro 归属三家")
 
-    // glm-5.2 同时存在于 codebuddy-cn / zai / opencode-go（Phase 18 新增）静态目录
+    // glm-5.2 同时存在于 codebuddy-cn / zai / opencode-go / opencode（Phase 20 opencode 静态目录
+    // 同步线上后新增）静态目录
     expectEqual(
         Set(registry.providers(forModel: "glm-5.2")),
-        Set(["codebuddy-cn", "zai", "opencode-go"]),
-        "反向索引: glm-5.2 归属 codebuddy-cn、zai、opencode-go"
+        Set(["codebuddy-cn", "zai", "opencode-go", "opencode"]),
+        "反向索引: glm-5.2 归属 codebuddy-cn、zai、opencode-go、opencode"
     )
     expectEqual(registry.providers(forModel: "gemini-3.6-flash-high"), ["antigravity"], "反向索引: gemini 单归属")
     expectEqual(registry.providers(forModel: "nope-model"), [], "反向索引: 未知模型空归属")
@@ -910,6 +963,56 @@ func antigravityIntegrationTests() async throws {
     let failResult = try await AntigravityProvider().testConnection(credential: credential)
     expectFalse(failResult.success, "上游 400 时 testConnection 应失败")
     expectTrue(failResult.message.contains("Unknown name"), "400 消息应提取上游 error.message，实际: \(failResult.message)")
+}
+
+// MARK: - Antigravity token 刷新（URLProtocol mock，Phase 20）
+
+/// 刷新流程：refresh_token 换新 access_token（含旋转）、fetchUserEmail 补邮箱。
+func antigravityTokenRefreshTests() async throws {
+    unsetenv("ANTIGRAVITY_BASE_URL")
+    unsetenv("ANTIGRAVITY_ACCESS_TOKEN")
+    defer {
+        unsetenv("ANTIGRAVITY_BASE_URL")
+        unsetenv("ANTIGRAVITY_ACCESS_TOKEN")
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+
+    URLProtocol.registerClass(URLProtocolMock.self)
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        // token 端点：返回新 access/refresh token
+        if request.url?.path == "/token" {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = #"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600,"scope":"openid"}"#
+            return (response, Data(body.utf8))
+        }
+        // userinfo 端点：返回邮箱
+        if request.url?.host?.contains("googleapis.com") == true {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"email":"me@example.com"}"#.utf8))
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
+        return (response, Data("not found".utf8))
+    }
+
+    let client = AntigravityOAuthClient(config: .live())
+
+    // 1) refresh 返回新 token + 旋转后的 refreshToken
+    let refreshed = try await client.refreshAccessToken(refreshToken: "old-rt")
+    expectEqual(refreshed.accessToken, "new-at", "refresh 返回新 access_token")
+    expectEqual(refreshed.refreshToken, "new-rt", "refresh 旋转 refresh_token")
+    expectEqual(refreshed.expiresIn, 3600, "refresh 返回 expires_in")
+
+    // 2) fetchUserEmail 命中 userinfo
+    let email = await client.fetchUserEmail(accessToken: "new-at")
+    expectEqual(email, "me@example.com", "fetchUserEmail 返回账号邮箱")
 }
 
 // MARK: - OpenAI 集成（本地 HTTPServer 当 mock 上游，Phase 14）
@@ -1771,6 +1874,47 @@ func zaiIntegrationTests() async throws {
         baseURLEnv: "ZAI_BASE_URL",
         chatModel: "glm-5.2"
     )
+
+    // Phase 20: API 区域 → 上游 URL（region 在 credential 中，无 env 覆盖）
+    setenv("ZAI_API_KEY", "mock-key", 1)
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+    let regionReq = ChatRequest(model: "glm-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true)
+
+    func captureURL(_ credential: ProviderCredential?) async -> String {
+        URLProtocolMock.reset()
+        var url = ""
+        URLProtocolMock.requestHandler = { request in
+            url = request.url?.absoluteString ?? ""
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            return (response, Data("".utf8))
+        }
+        let stream = (try? await ZaiProvider().chat(request: regionReq, rawBody: nil, credential: credential)) ?? AsyncThrowingStream { $0.finish() }
+        _ = try? await stream.first(where: { _ in true })
+        return url
+    }
+
+    let globalURL = await captureURL(ProviderCredential(apiKey: "mock-key", region: "global"))
+    expectTrue(
+        globalURL.hasPrefix("https://api.z.ai/api/anthropic/v1/messages?beta=true"),
+        "zai region=global → api.z.ai，实际: \(globalURL)")
+
+    let cnURL = await captureURL(ProviderCredential(apiKey: "mock-key", region: "bigmodel-cn"))
+    expectTrue(
+        cnURL.hasPrefix("https://open.bigmodel.cn/api/anthropic/v1/messages?beta=true"),
+        "zai region=bigmodel-cn → open.bigmodel.cn，实际: \(cnURL)")
+
+    let nilURL = await captureURL(ProviderCredential(apiKey: "mock-key"))
+    expectTrue(
+        nilURL.hasPrefix("https://open.bigmodel.cn/api/anthropic/v1/messages?beta=true"),
+        "zai 缺省 region → 默认 BigModel CN，实际: \(nilURL)")
+    unsetenv("ZAI_API_KEY")
 }
 
 func minimaxIntegrationTests() async throws {
@@ -2033,6 +2177,7 @@ await run("ProviderHTTPClient 重试", httpRetryTests)
 await run("RouteHandler 路由分发", routeHandlerTests)
 await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)
 await run("Antigravity 集成（本地 mock 上游）", antigravityIntegrationTests)
+await run("Antigravity token 刷新（URLProtocol mock）", antigravityTokenRefreshTests)
 await run("OpenAI 集成（本地 mock 上游）", openaiIntegrationTests)
 await run("opencode 集成（本地 mock 上游）", opencodeIntegrationTests)
 await run("Kimi 集成（强制流式 + 聚合）", kimiIntegrationTests)

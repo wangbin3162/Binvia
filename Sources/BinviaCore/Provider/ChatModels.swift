@@ -88,15 +88,35 @@ public struct ChatRequest: Sendable, Codable {
 }
 
 /// Provider 凭据。不同 authType 的供应商使用不同字段。
+///
+/// OAuth 型（Antigravity）额外携带 `email`（当前登录账号）与 `expiresAt`（access token 过期时间，
+/// 供启动/定时刷新判断）；区域型供应商（z.ai）用 `region` 选择 API 区域。均为可选字段，
+/// 自动合成 Codable 对 Optional 用 `decodeIfPresent`，旧配置向后兼容。
 public struct ProviderCredential: Sendable, Codable, Equatable {
     public var apiKey: String?
     public var accessToken: String?
     public var refreshToken: String?
+    /// OAuth 登录账号邮箱（Antigravity userinfo）。
+    public var email: String?
+    /// access token 过期时间（OAuth 刷新用）。
+    public var expiresAt: Date?
+    /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。
+    public var region: String?
 
-    public init(apiKey: String? = nil, accessToken: String? = nil, refreshToken: String? = nil) {
+    public init(
+        apiKey: String? = nil,
+        accessToken: String? = nil,
+        refreshToken: String? = nil,
+        email: String? = nil,
+        expiresAt: Date? = nil,
+        region: String? = nil
+    ) {
         self.apiKey = apiKey
         self.accessToken = accessToken
         self.refreshToken = refreshToken
+        self.email = email
+        self.expiresAt = expiresAt
+        self.region = region
     }
 }
 

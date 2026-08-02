@@ -36,18 +36,22 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
     public var credential: ProviderCredential
     /// 多 api-key 列表（key 轮换）。空数组表示未配置。
     public var apiKeys: [String]
+    /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。nil = 供应商默认区域。
+    public var region: String?
 
-    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [String] = []) {
+    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [String] = [], region: String? = nil) {
         self.enabled = enabled
         self.credential = credential
         self.apiKeys = apiKeys
+        self.region = region
     }
 
-    // 兼容旧配置：`apiKeys` 是新增字段，缺失时回退为空数组。
+    // 兼容旧配置：`apiKeys`/`region` 是新增字段，缺失时回退默认值。
     private enum CodingKeys: String, CodingKey {
         case enabled
         case credential
         case apiKeys
+        case region
     }
 
     public init(from decoder: any Decoder) throws {
@@ -55,6 +59,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         self.credential = try container.decodeIfPresent(ProviderCredential.self, forKey: .credential) ?? ProviderCredential()
         self.apiKeys = try container.decodeIfPresent([String].self, forKey: .apiKeys) ?? []
+        self.region = try container.decodeIfPresent(String.self, forKey: .region)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -62,6 +67,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         try container.encode(enabled, forKey: .enabled)
         try container.encode(credential, forKey: .credential)
         try container.encode(apiKeys, forKey: .apiKeys)
+        try container.encodeIfPresent(region, forKey: .region)
     }
 }
 
@@ -139,9 +145,28 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     /// 返回全部已启用 provider 的凭据。
 
     /// 解析某 provider 的凭据：优先 config，回退到环境变量。
+    ///
+    /// 聚合语义（Phase 20）：
+    /// - `credential.apiKey` 为空但 `apiKeys[]` 非空时，用首个 key 填充（GUI 保存把单 key 存进
+    ///   `apiKeys[]`，OpenCode 等只读 `credential.apiKey` 的供应商由此获得凭据）；
+    /// - 灌入 `ProviderConfig.region`（z.ai 区域选择透传给 provider）；
+    /// - **不依赖 `enabled`**：enabled 只控制路由与模型可见性，设置面板的模型测试等场景
+    ///   即使供应商处于禁用态也应能取到已保存的凭据（修复 opencode 禁用后测试报 Missing credentials）。
     public func credential(for providerID: String) -> ProviderCredential {
-        if let pc = providers[providerID], pc.enabled {
-            return pc.credential
+        if let pc = providers[providerID] {
+            var cred = pc.credential
+            if (cred.apiKey ?? "").isEmpty,
+               let first = pc.apiKeys.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                cred.apiKey = first
+            }
+            cred.region = pc.region
+            // 配置条目存在且带凭据 → 直接返回；完全空的条目回退环境变量（保持旧行为）。
+            let hasCredential = !(cred.apiKey ?? "").isEmpty
+                || !(cred.accessToken ?? "").isEmpty
+                || !(cred.refreshToken ?? "").isEmpty
+            if hasCredential {
+                return cred
+            }
         }
         return ProviderCredential(apiKey: Self.envValue(["\(providerID.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"]))
     }

@@ -54,6 +54,7 @@ final class AppState: ObservableObject {
     private var server: HTTPServer?
     private var refreshTimer: Timer?
     private var usageRefreshTimer: Timer?
+    private var oauthRefreshTimer: Timer?
     private var codeContinuation: CheckedContinuation<String, Error>?
 
     // MARK: - 初始化
@@ -150,6 +151,15 @@ final class AppState: ObservableObject {
         providerConfig.apiKeys = keys
         config.providers[providerID] = providerConfig
         try saveConfig()
+    }
+
+    /// 设置某 provider 的 API 区域（z.ai 等；nil = 供应商默认区域）。
+    func setProviderRegion(_ region: String?, for providerID: String) {
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        providerConfig.region = region
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
     }
 
     /// 设置 deviceFlow 类型 provider 的多 AccessToken（首 token → credential.accessToken，其余 → apiKeys[]）。
@@ -332,11 +342,70 @@ final class AppState: ObservableObject {
             )
             let credential = ProviderCredential(
                 accessToken: credentials.accessToken,
-                refreshToken: credentials.refreshToken
+                refreshToken: credentials.refreshToken,
+                email: credentials.email,
+                expiresAt: credentials.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
             )
             try saveCredential(credential, for: "antigravity")
             oauthStates["antigravity"] = .connected
         } catch {
+            oauthStates["antigravity"] = .failed(error.localizedDescription)
+        }
+    }
+
+    // MARK: - OAuth 状态引导 & token 刷新（Phase 20）
+
+    /// 启动时恢复 OAuth 状态：已配置 accessToken 的 oauth provider 标记为已连接，
+    /// 并主动刷新一次 Antigravity token（避免启动后仍用已过期 token）。
+    func bootstrapOAuth() async {
+        for (providerID, pc) in config.providers
+        where ProviderRegistry.shared.descriptor(for: providerID)?.metadata.authType == .oauth {
+            if !(pc.credential.accessToken ?? "").isEmpty {
+                oauthStates[providerID] = .connected
+            }
+        }
+        await refreshAntigravityToken()
+    }
+
+    /// 启动 Antigravity token 周期刷新（每 25 分钟，token 约 1 小时过期）。
+    /// 与 metrics/usage 轮询并行，随菜单面板出现而启动。
+    func startOAuthRefresh() {
+        guard oauthRefreshTimer == nil else { return }
+        oauthRefreshTimer = Timer.scheduledTimer(withTimeInterval: 25 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshAntigravityToken()
+            }
+        }
+    }
+
+    /// 用 refreshToken 主动刷新 Antigravity access token，并把新 token（含旋转后的
+    /// refreshToken）、过期时间、邮箱（为空时补抓）持久化回 config。刷新失败不覆盖旧凭据。
+    func refreshAntigravityToken() async {
+        guard let pc = config.providers["antigravity"],
+              !(pc.credential.accessToken ?? "").isEmpty,
+              let refresh = pc.credential.refreshToken, !refresh.isEmpty else {
+            return
+        }
+        let client = AntigravityOAuthClient(config: .live())
+        do {
+            let refreshed = try await client.refreshAccessToken(refreshToken: refresh)
+            var credential = pc.credential
+            credential.accessToken = refreshed.accessToken
+            if let rt = refreshed.refreshToken, !rt.isEmpty {
+                credential.refreshToken = rt
+            }
+            if let exp = refreshed.expiresIn {
+                credential.expiresAt = Date().addingTimeInterval(TimeInterval(exp))
+            }
+            if (credential.email ?? "").isEmpty,
+               let email = await client.fetchUserEmail(accessToken: refreshed.accessToken),
+               !email.isEmpty {
+                credential.email = email
+            }
+            try saveCredential(credential, for: "antigravity")
+            oauthStates["antigravity"] = .connected
+        } catch {
+            // invalid_grant / 网络失败：保留旧凭据，状态标为失败以便用户重新登录。
             oauthStates["antigravity"] = .failed(error.localizedDescription)
         }
     }

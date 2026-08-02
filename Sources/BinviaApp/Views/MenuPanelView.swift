@@ -17,6 +17,10 @@ struct MenuPanelView: View {
         .onAppear {
             appState.startMetricsRefresh()
             appState.startUsageRefresh()
+            appState.startOAuthRefresh()
+            Task { @MainActor in
+                await appState.bootstrapOAuth()
+            }
         }
     }
 

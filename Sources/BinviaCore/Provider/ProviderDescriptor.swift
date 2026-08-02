@@ -7,6 +7,18 @@ public enum ProviderAuthType: String, Sendable, Codable {
     case localProbe
 }
 
+/// API 区域选项（设置面板中显示为 Picker，如 z.ai 的 Global / BigModel CN）。
+/// 仅提供展示元数据；区域如何影响 baseURL 由各 Provider 自行实现（读 `ProviderCredential.region`）。
+public struct ProviderAPIRegion: Sendable, Equatable {
+    public let id: String
+    public let displayName: String
+
+    public init(id: String, displayName: String) {
+        self.id = id
+        self.displayName = displayName
+    }
+}
+
 public struct ProviderMetadata: Sendable, Codable, Equatable {
     public let id: String
     public let alias: String?
@@ -41,6 +53,9 @@ public struct ProviderDescriptor: Sendable {
     public let forceStream: Bool
     public let usageFetcherFactory: @Sendable () -> (any ProviderUsageFetcher)?
 
+    /// API 区域选项（空 = 无区域选择，设置面板不渲染 Picker）。首个区域作为默认。
+    public let regions: [ProviderAPIRegion]
+
     public init(
         metadata: ProviderMetadata,
         baseURL: URL?,
@@ -49,6 +64,7 @@ public struct ProviderDescriptor: Sendable {
         modelsURL: URL? = nil,
         forceStream: Bool = false,
         usageFetcherFactory: @escaping @Sendable () -> (any ProviderUsageFetcher)? = { nil },
+        regions: [ProviderAPIRegion] = [],
         makeProvider: @escaping @Sendable () -> any Provider
     ) {
         self.metadata = metadata
@@ -58,6 +74,7 @@ public struct ProviderDescriptor: Sendable {
         self.modelsURL = modelsURL
         self.forceStream = forceStream
         self.usageFetcherFactory = usageFetcherFactory
+        self.regions = regions
         self.makeProvider = makeProvider
     }
 

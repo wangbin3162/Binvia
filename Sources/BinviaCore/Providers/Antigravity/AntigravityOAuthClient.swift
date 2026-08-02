@@ -165,6 +165,11 @@ public struct AntigravityOAuthClient: Sendable {
         )
     }
 
+    /// 取当前账号邮箱（userinfo，best-effort）。供登录后与刷新后补全 `email`。
+    public func fetchUserEmail(accessToken: String) async -> String? {
+        try? await fetchUserInfo(accessToken: accessToken)
+    }
+
     // MARK: - projectId 引导
 
     /// `loadCodeAssist` + `onboardUser` 获取 Google Cloud projectId。
