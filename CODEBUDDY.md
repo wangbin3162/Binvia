@@ -73,9 +73,17 @@ HTTP 客户端 → HTTPServer(POSIX socket) → RouteHandler
 
 ## GUI（BinviaApp）
 
-- `AppState`：`@MainActor` ObservableObject，持有 config、服务器生命周期（start/stop/restart）、OAuth 流程（用 `CheckedContinuation` 桥接 Antigravity 授权码输入 sheet）、网关 key（`sk-tg-` 前缀，SecRandomCopyBytes）、2s 轮询 metrics。
+- `AppState`：`@MainActor` ObservableObject，持有 config、服务器生命周期（start/stop/restart）、OAuth 流程（用 `CheckedContinuation` 桥接 Antigravity 授权码输入 sheet）、网关 key（`sk-bv-` 前缀，SecRandomCopyBytes）、2s 轮询 metrics（`usageSummary` / `recentEntries`）+ 5min 用量快照轮询（`usageSnapshots`）。派生属性：`configuredProviders`（已配置凭据的 provider 列表）、`totalRequests` / `totalErrors` / `activeProviderCount` / token 汇总。
 - 菜单栏：`MenuBarExtra(.window)`。**不注册 SwiftUI Settings 场景**（菜单栏应用中不可靠），设置窗口由 `SettingsWindowController` 自建 NSWindow + NSHostingController。
-- 设置面板：`Views/Settings/`（SettingsPane 枚举 + SettingsSidebarView + General / GatewayKeys / Provider 各 Pane），CodexBar 风格左栏+详情。
+- 主面板（`MenuPanelView`，Phase 23 重构）：TopBar（标题 + 网关密钥 / 设置 / 退出 图标按钮）→ 顶部 SegmentedControl（仅已配置 provider）→ 内容区。`OverviewTabView` = 服务器状态 + Summary（总请求/错误/活跃/token）+ `ProviderHealthRow` 健康度列表；`ProviderTabView` = 头部 + 共享用量卡片 `ProviderUsageCard` + 本地统计 + `RecentRequestsView` 最近请求 + 操作按钮。内容切换用 SegmentedControl + if/switch 驱动（不用 macOS 原生 TabView，避免与 SegmentedControl 重复的 tab strip 及 MenuBarExtra 中高度跳变/闪烁）。
+- 共享组件：`ProviderUsageCard`（Phase 23.1 从 `SettingsProviderPane.usageSection` 抽取，设置面板与主面板共用）、`ProviderHealthRow`（Overview 健康度行）。
+- 设置面板：`Views/Settings/`（SettingsPane 枚举 + SettingsSidebarView + General / GatewayKeys / Provider 各 Pane），CodexBar 风格左栏+详情。网关密钥管理仅保留在此（主面板 TopBar 提供 `key.fill` 入口）。
+
+## Token 用量采集（Phase 22）
+
+- `RequestLogEntry` 新增 `id: UUID`（流结束回填定位）与 `tokens: TokenUsage?`（上游 `usage` 标准化结构）。
+- `TokenUsageExtractor`（`BinviaCore/Networking/`）：`RouteHandler.handleChat` 用「透传 + 旁路解析」包裹上游流——每个 chunk 原样转发同时喂给内部 `SSEParser` 抽取 `usage`，流结束回填 `logger.updateTokens(id:tokens:)`。解析失败静默，绝不影响透传。
+- `ProviderUsage` 新增 `totalPromptTokens` / `totalCompletionTokens` / `totalTokens`，`summary()` 聚合。
 
 # 测试（BinviaCheck）
 

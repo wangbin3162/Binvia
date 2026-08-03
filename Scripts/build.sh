@@ -25,8 +25,28 @@ cp .build/release/BinviaCLI bin/
 make_app_bundle() {
     local APP="$ROOT/bin/Binvia.app"
     rm -rf "$APP"
-    mkdir -p "$APP/Contents/MacOS"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$ROOT/.build/release/BinviaApp" "$APP/Contents/MacOS/BinviaApp"
+    # App 图标：从 assets/logo.png 生成 .icns（缺失时静默跳过，便于开发期容错）
+    local ICON_SRC="$ROOT/assets/logo.png"
+    if [ -f "$ICON_SRC" ]; then
+        local ICONSET="$ROOT/build/AppIcon.iconset"
+        rm -rf "$ICONSET" "$ROOT/build/AppIcon.icns"
+        mkdir -p "$ICONSET"
+        # macOS 11+ 标准图标尺寸（@1x 与 @2x，覆盖 16~1024）
+        sips -z 16 16      "$ICON_SRC" --out "$ICONSET/icon_16x16.png"       >/dev/null
+        sips -z 32 32      "$ICON_SRC" --out "$ICONSET/icon_16x16@2x.png"    >/dev/null
+        sips -z 32 32      "$ICON_SRC" --out "$ICONSET/icon_32x32.png"       >/dev/null
+        sips -z 64 64      "$ICON_SRC" --out "$ICONSET/icon_32x32@2x.png"    >/dev/null
+        sips -z 128 128    "$ICON_SRC" --out "$ICONSET/icon_128x128.png"     >/dev/null
+        sips -z 256 256    "$ICON_SRC" --out "$ICONSET/icon_128x128@2x.png"  >/dev/null
+        sips -z 256 256    "$ICON_SRC" --out "$ICONSET/icon_256x256.png"     >/dev/null
+        sips -z 512 512    "$ICON_SRC" --out "$ICONSET/icon_256x256@2x.png"  >/dev/null
+        sips -z 512 512    "$ICON_SRC" --out "$ICONSET/icon_512x512.png"     >/dev/null
+        sips -z 1024 1024  "$ICON_SRC" --out "$ICONSET/icon_512x512@2x.png"  >/dev/null
+        iconutil -c icns "$ICONSET" -o "$ROOT/build/AppIcon.icns"
+        cp "$ROOT/build/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+    fi
     cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -42,6 +62,10 @@ make_app_bundle() {
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

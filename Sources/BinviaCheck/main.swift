@@ -2672,6 +2672,108 @@ func customProviderConfigCodecTests() throws {
     )
 }
 
+// MARK: - Phase 22: Token 用量提取器与聚合
+
+func tokenUsageExtractorTests() {
+    // 1) 流式带 usage 的 chunk（完整 SSE 事件）
+    let e1 = TokenUsageExtractor()
+    let chunk1 = Data(#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#.utf8)
+    let out1 = e1.process(chunk1)
+    expectEqual(out1, chunk1, "透传 chunk 原样返回（1）")
+    e1.process(Data("\n\ndata: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n".utf8))
+    if let tokens = e1.finish() {
+        expectEqual(tokens.promptTokens, 12, "流式 usage prompt_tokens")
+        expectEqual(tokens.completionTokens, 34, "流式 usage completion_tokens")
+        expectEqual(tokens.totalTokens, 46, "流式 usage total_tokens")
+    } else {
+        failed += 1
+        print("FAIL: 流式带 usage 的 chunk 应提取到 tokens")
+    }
+
+    // 2) 非流式整段 JSON（无 data: 前缀、无 \n\n）
+    let e2 = TokenUsageExtractor()
+    e2.process(Data(#"{"model":"x","usage":{"prompt_tokens":7,"completion_tokens":9,"total_tokens":16}}"#.utf8))
+    if let tokens = e2.finish() {
+        expectEqual(tokens.totalTokens, 16, "非流式整段 JSON usage 提取")
+        expectEqual(tokens.promptTokens, 7, "非流式整段 JSON prompt_tokens")
+    } else {
+        failed += 1
+        print("FAIL: 非流式整段 JSON 应提取到 tokens")
+    }
+
+    // 3) 无 usage 的响应 → nil
+    let e3 = TokenUsageExtractor()
+    e3.process(Data("data: {\"choices\":[]}\n\ndata: [DONE]\n\n".utf8))
+    expectNil(e3.finish(), "无 usage 响应返回 nil")
+
+    // 4) 多 usage chunk 取最后一个
+    let e4 = TokenUsageExtractor()
+    e4.process(Data("data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n".utf8))
+    if let tokens = e4.finish() {
+        expectEqual(tokens.promptTokens, 10, "多 usage 取最后一个 prompt")
+        expectEqual(tokens.totalTokens, 30, "多 usage 取最后一个 total")
+    } else {
+        failed += 1
+        print("FAIL: 多 usage chunk 应取最后一个")
+    }
+
+    // 5) chunk 跨事件边界（事件文本被拆到多个 process 调用）
+    let e5 = TokenUsageExtractor()
+    e5.process(Data("data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6,\"total_tokens\":11}}".utf8))
+    e5.process(Data("\n\n".utf8))
+    if let tokens = e5.finish() {
+        expectEqual(tokens.totalTokens, 11, "跨 chunk 边界 usage 提取")
+    } else {
+        failed += 1
+        print("FAIL: 跨 chunk 边界应提取到 tokens")
+    }
+
+    // 6) total_tokens 缺失时回退 prompt+completion
+    let e6 = TokenUsageExtractor()
+    e6.process(Data("data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\n".utf8))
+    if let tokens = e6.finish() {
+        expectEqual(tokens.totalTokens, 5, "total_tokens 缺失时回退 prompt+completion")
+    } else {
+        failed += 1
+        print("FAIL: total_tokens 缺失时应回退")
+    }
+}
+
+func requestLoggerTokenTests() {
+    let logger = RequestLogger()
+    let now = Date()
+    let entry = RequestLogEntry(
+        timestamp: now, method: "POST", path: "/v1/chat/completions",
+        providerID: "deepseek", model: "deepseek-v4-pro",
+        statusCode: 200, durationMS: 100)
+    let id = entry.id
+    logger.log(entry)
+    // 流结束回填
+    logger.updateTokens(id: id, tokens: TokenUsage(promptTokens: 10, completionTokens: 20, totalTokens: 30))
+    // 无 token 的条目
+    logger.log(RequestLogEntry(
+        timestamp: now, method: "POST", path: "/v1/chat/completions",
+        providerID: "deepseek", model: "deepseek-v4-pro",
+        statusCode: 200, durationMS: 50))
+    expectEqual(logger.allEntries().first?.tokens?.totalTokens, 30, "updateTokens 回填日志条目")
+
+    let summary = logger.summary()
+    let ds = summary.byProvider["deepseek"]
+    expectEqual(ds?.requestCount, 2, "token 聚合后 requestCount 不变")
+    expectEqual(ds?.totalPromptTokens, 10, "summary 聚合 prompt tokens")
+    expectEqual(ds?.totalCompletionTokens, 20, "summary 聚合 completion tokens")
+    expectEqual(ds?.totalTokens, 30, "summary 聚合 total tokens")
+
+    // 找不到 id 时静默忽略，不影响已有回填
+    logger.updateTokens(id: UUID(), tokens: TokenUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    expectEqual(logger.summary().byProvider["deepseek"]?.totalTokens, 30, "未知 id 回填被忽略")
+
+    // 默认 id 自动生成：两条条目 id 不同
+    let a = RequestLogEntry(timestamp: Date(), method: "GET", path: "/", providerID: nil, model: nil, statusCode: 200, durationMS: 1)
+    let b = RequestLogEntry(timestamp: Date(), method: "GET", path: "/", providerID: nil, model: nil, statusCode: 200, durationMS: 1)
+    expectFalse(a.id == b.id, "RequestLogEntry 默认 id 各自唯一")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -2719,6 +2821,8 @@ await run("APIKey 认证", apiKeyAuthenticatorTests)
 await run("RouteConfig 配置", routeConfigTests)
 await run("ModelCache 缓存", modelCacheTests)
 await run("RequestLogger 日志聚合", requestLoggerTests)
+await run("TokenUsageExtractor 提取", tokenUsageExtractorTests)
+await run("RequestLogger token 聚合", requestLoggerTokenTests)
 await run("ProviderHTTPClient 重试", httpRetryTests)
 await run("RouteHandler 路由分发", routeHandlerTests)
 await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)

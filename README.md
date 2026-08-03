@@ -131,17 +131,17 @@ open bin/Binvia.app
 
 菜单栏面板支持：
 
-- **服务器启停**：Start/Stop 一键控制本地代理，状态灯实时显示。
-- **Provider 入口**：点 Provider 行/齿轮直接打开设置窗口对应配置页。
-- **网关 API Key**：生成 `sk-tg-` 开头的 Key，复制/删除，持久化到 `config.json`。
-- **用量监控**：每 2 秒刷新各 Provider 请求/错误统计。
+- **概况 Tab**（默认页）：服务器启停（Start/Stop + 状态灯）、总请求/错误/活跃 provider/总 token 汇总、各已配置 provider 健康度列表（余额 / 配额 / token 一目了然，点击行直达对应 provider Tab）。
+- **Provider Tab**：顶部 SegmentedControl 切换已配置的供应商；每个 Tab 展示头部 + 用量卡片（余额 / 配额窗口 / 模型配额，5min 轮询 + 手动刷新）、本地请求统计、最近请求明细（时间 / 模型 / token / 耗时 / 状态）、测试连接与网页看板入口。
+- **网关密钥**：仅保留在设置面板；主面板右上角 `key.fill` 图标一键跳转。
+- **设置 / 退出**：主面板右上角 `gearshape` / `xmark.rectangle` 图标。
 
 **设置窗口**（点面板底部 Settings 打开）为 CodexBar 风格：左侧栏 + 右侧详情，全部配置均在面板中完成，无需手改文件：
 
 - **服务器**：监听地址固定为本机 localhost（不可修改）；端口默认 20427，可改，保存即热更新（运行中替换 handler，无需重启）。「API 端点」区展示 `http://localhost:<端口>/v1` 并提供一键复制，供 Claude Code / opencode / curl 等配置。
 - **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
 - **用量**：供应商面板自动展示用量——DeepSeek（多 Key 余额）、Kimi（余额）、Antigravity（模型配额 + 周窗口）每 5 分钟轮询 + 手动「刷新用量」；z.ai、opencode、CodeBuddy CN 上游未提供可用的公开用量 API（CodeBuddy CN 官方接口返回 500），面板提供「在网页查看」跳转对应网页看板（智谱 `bigmodel.cn/finance-center/finance/overview`、opencode `opencode.ai/zh/zen`、CodeBuddy `codebuddy.cn/profile/usage`）。
-- **网关密钥**：生成/复制/删除 `sk-tg-` 网关 Key。
+- **网关密钥**：生成/复制/删除 `sk-bv-` 网关 Key。
 
 ## 配置
 
@@ -185,8 +185,8 @@ Sources/
 ├── BinviaCLI/                # CLI（含 oauth login）
 └── BinviaApp/                # 菜单栏 GUI（SwiftUI）
     ├── AppState.swift               # 全局状态：配置/服务器生命周期/OAuth/Key/监控
-    ├── Views/                       # MenuPanelView、ServerStatusView、ProviderListView 等
-    └── Components/                  # StatusBadge、APIKeyInputField、OAuthLoginButton
+    ├── Views/                       # MenuPanelView、OverviewTabView、ProviderTabView、RecentRequestsView、ServerStatusView 等
+    └── Components/                  # StatusBadge、APIKeyInputField、OAuthLoginButton、ProviderUsageCard、ProviderHealthRow
 ```
 
 ## 测试与打包

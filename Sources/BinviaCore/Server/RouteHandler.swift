@@ -212,17 +212,28 @@ public struct RouteHandler: Sendable {
             }
 
             let remaining = firstChunkBox.remaining
+            // Phase 22：透传 + 旁路解析 token 用量。Extractor 为单任务内可变对象（仿 IteratorHandler），
+            // 每个 chunk 原样透传，流结束时用累计的 usage 回填日志条目。
+            let extractor = TokenUsageExtractor()
+            let entryID = UUID()
             let responseStream = AsyncThrowingStream<Data, Error> { continuation in
                 Task.detached {
-                    continuation.yield(firstChunk)
-                    for try await chunk in remaining {
-                        continuation.yield(chunk)
+                    defer {
+                        // 流结束（含中途出错）：冲刷残余 buffer 并回填 token；保证 continuation 必被 finish
+                        if let tokens = extractor.finish() {
+                            logger.updateTokens(id: entryID, tokens: tokens)
+                        }
+                        continuation.finish()
                     }
-                    continuation.finish()
+                    continuation.yield(extractor.process(firstChunk))
+                    for try await chunk in remaining {
+                        continuation.yield(extractor.process(chunk))
+                    }
                 }
             }
 
             logger.log(RequestLogEntry(
+                id: entryID,
                 timestamp: Date(),
                 method: request.method, path: request.path,
                 providerID: resolution.providerID, model: resolution.modelID,

@@ -7,6 +7,8 @@ import BinviaCore
 struct ProviderBrandIcon: View {
     let providerID: String
     var size: CGFloat = 16
+    /// 可选着色（如切换器选中态白色图标）；nil = 默认 `.primary` / `.secondary`。
+    var tint: Color? = nil
 
     var body: some View {
         if let nsImage = Self.loadSVGIcon(for: providerID) {
@@ -14,7 +16,7 @@ struct ProviderBrandIcon: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
-                .foregroundStyle(.primary)
+                .foregroundStyle(tint ?? .primary)
         } else {
             borderFallback
         }
@@ -44,7 +46,7 @@ struct ProviderBrandIcon: View {
             .overlay {
                 Text(initial)
                     .font(.system(size: size * 0.50, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tint ?? .secondary)
             }
             .accessibilityHidden(true)
     }

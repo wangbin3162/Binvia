@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 bin/
+build/
 *.xcodeproj
 .DS_Store
 config.json

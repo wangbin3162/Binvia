@@ -40,6 +40,10 @@ final class AppState: ObservableObject {
 
     @Published var usageSummary = UsageSummary(byProvider: [:])
 
+    /// 最近请求记录（倒序，最近 10 条；随 2s metrics 轮询刷新）。token 在流结束后才回填，
+    /// 故流式请求可能短暂显示「—」，下一轮刷新补上。
+    @Published var recentEntries: [RequestLogEntry] = []
+
     /// 各 provider 的用量快照（Phase 16：余额 / 配额窗口 / 模型配额）。由 5min 轮询或手动刷新填充。
     @Published var usageSnapshots: [String: ProviderUsageSnapshot] = [:]
 
@@ -593,11 +597,18 @@ final class AppState: ObservableObject {
     func startMetricsRefresh() {
         guard refreshTimer == nil else { return }
         usageSummary = RequestLogger.shared.summary()
+        recentEntries = Self.recentEntries()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.usageSummary = RequestLogger.shared.summary()
+                self?.recentEntries = Self.recentEntries()
             }
         }
+    }
+
+    /// 最近请求：内存日志倒序取最近 10 条。
+    private static func recentEntries() -> [RequestLogEntry] {
+        Array(RequestLogger.shared.allEntries().suffix(10).reversed())
     }
 
     func stopMetricsRefresh() {
@@ -659,6 +670,43 @@ final class AppState: ObservableObject {
                 error: error.localizedDescription
             )
         }
+    }
+
+    // MARK: - 概览派生属性（Phase 23.3）
+
+    /// 总请求数（usageSummary 各 provider 累加）。
+    var totalRequests: Int {
+        usageSummary.byProvider.values.reduce(0) { $0 + $1.requestCount }
+    }
+
+    /// 总错误数。
+    var totalErrors: Int {
+        usageSummary.byProvider.values.reduce(0) { $0 + $1.errorCount }
+    }
+
+    /// 活跃（已配置凭据）的 provider 数。
+    var activeProviderCount: Int {
+        orderedProviderDescriptors().filter { isProviderConfigured($0.id) }.count
+    }
+
+    /// 总 prompt token（Phase 22 采集）。
+    var totalPromptTokens: Int {
+        usageSummary.byProvider.values.reduce(0) { $0 + $1.totalPromptTokens }
+    }
+
+    /// 总 completion token。
+    var totalCompletionTokens: Int {
+        usageSummary.byProvider.values.reduce(0) { $0 + $1.totalCompletionTokens }
+    }
+
+    /// 总 token。
+    var totalTokens: Int {
+        usageSummary.byProvider.values.reduce(0) { $0 + $1.totalTokens }
+    }
+
+    /// 已配置凭据的 provider 描述符（按 providerOrder 排序）。主面板 Tab 与健康度列表共用。
+    var configuredProviders: [ProviderDescriptor] {
+        orderedProviderDescriptors().filter { isProviderConfigured($0.id) }
     }
 
     // MARK: - 菜单栏图标
