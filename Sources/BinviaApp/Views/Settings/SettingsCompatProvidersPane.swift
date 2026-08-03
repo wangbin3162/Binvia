@@ -122,27 +122,28 @@ struct SettingsCompatProvidersPane: View {
 
     private func editRow(_ def: CustomProviderDef) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .bottom, spacing: 10) {
-                ProviderBrandIcon(providerID: def.id, size: 24)
-                    .padding(.bottom, 4)
-
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    ProviderBrandIcon(providerID: def.id, size: 24)
                     Text("供应商名称")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(width: 76, alignment: .leading)
                     TextField("", text: $editName, prompt: Text("例如 tokenhub"))
                         .textFieldStyle(.roundedBorder)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
 
-                VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    // 占位图标使第二行输入框与第一行保持同一列。
+                    Color.clear
+                        .frame(width: 24, height: 1)
                     Text("Base URL")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(width: 76, alignment: .leading)
                     TextField("", text: $editBaseURL, prompt: Text("https://api.example.com/v1"))
                         .textFieldStyle(.roundedBorder)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack {
                 Spacer()

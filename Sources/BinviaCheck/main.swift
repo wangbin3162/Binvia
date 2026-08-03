@@ -2632,7 +2632,20 @@ func genericOpenAIProviderTests() async throws {
         _ = try await provider.chat(request: req, rawBody: nil, credential: nil)
     }, "GenericOpenAIProvider 缺 key 抛 missingCredentials")
 
-    // 3) chat 透传 SSE + Bearer 头 + 剥前缀
+    // 3) 不存在模型的 404 不能被当作“收到首个 chunk”而判定成功。
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 404, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data(#"{"error":{"message":"model not found"}}"#.utf8))
+    }
+    await expectThrows({
+        _ = try await provider.testModel("unisound/not-exists", credential: ProviderCredential(apiKey: "sk-test"))
+    }, "GenericOpenAIProvider 不存在模型测试应失败")
+
+    // 4) chat 透传 SSE + Bearer 头 + 剥前缀
     let sse =
         sseChunk(#"{"id":"chatcmpl-mock","model":"glm-5.2","choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#)
         + sseChunk("[DONE]")

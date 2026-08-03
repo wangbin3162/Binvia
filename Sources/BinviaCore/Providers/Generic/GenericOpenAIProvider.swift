@@ -79,16 +79,66 @@ public struct GenericOpenAIProvider: Provider {
         credential: ProviderCredential?
     ) async throws -> AsyncThrowingStream<Data, Error> {
         let key = try resolveKey(credential)
-        let body = try makeBody(request: request, rawBody: rawBody)
+        let upstream = try makeUpstreamRequest(request: request, rawBody: rawBody, key: key)
 
+        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 错误 body 直接透传（反向代理语义）。
+        return ProviderHTTPClient.shared.stream(for: upstream)
+    }
+
+    /// 模型级测试必须使用抛错版流，不能把 404 错误 body 当作“收到首个 chunk”而判定成功。
+    public func testModel(_ modelID: String, credential: ProviderCredential?) async throws -> ConnectionTestResult {
+        let start = Date()
+        let key = try resolveKey(credential)
+        let request = ChatRequest(
+            model: modelID,
+            messages: [ChatMessage(role: .user, content: "ping")],
+            stream: true,
+            maxTokens: 1
+        )
+        let upstream = try makeUpstreamRequest(request: request, rawBody: nil, key: key)
+        let stream = ProviderHTTPClient.shared.streamThrowing(for: upstream)
+        var iterator = stream.makeAsyncIterator()
+        guard let first = try await iterator.next() else {
+            return ConnectionTestResult(
+                success: false,
+                message: "模型 \(modelID) 返回空响应",
+                latencyMS: Date().timeIntervalSince(start) * 1000
+            )
+        }
+        if let message = Self.upstreamErrorMessage(first) {
+            throw ProviderError.upstreamError(statusCode: 400, message: message)
+        }
+        return ConnectionTestResult(
+            success: true,
+            message: "模型 \(modelID) 可用",
+            latencyMS: Date().timeIntervalSince(start) * 1000
+        )
+    }
+
+    private func makeUpstreamRequest(request: ChatRequest, rawBody: Data?, key: String) throws -> URLRequest {
+        let body = try makeBody(request: request, rawBody: rawBody)
         var upstream = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
         upstream.httpMethod = "POST"
         upstream.setValue("application/json", forHTTPHeaderField: "Content-Type")
         upstream.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         upstream.httpBody = body
+        return upstream
+    }
 
-        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 错误 body 直接透传（反向代理语义）。
-        return ProviderHTTPClient.shared.stream(for: upstream)
+    /// 兼容上游以 JSON 或单个 SSE data 事件返回 200 + error envelope 的情况。
+    private static func upstreamErrorMessage(_ data: Data) -> String? {
+        let raw = String(data: data, encoding: .utf8) ?? ""
+        let candidates = [raw, raw.replacingOccurrences(of: "data: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)]
+        for candidate in candidates {
+            guard let jsonData = candidate.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let error = root["error"] else { continue }
+            if let object = error as? [String: Any], let message = object["message"] as? String, !message.isEmpty {
+                return message
+            }
+            if let message = error as? String, !message.isEmpty { return message }
+        }
+        return nil
     }
 
     /// 直接返回构造时注入的不带前缀模型列表。不走 ModelCache / 不拉上游（用户手动维护）。
