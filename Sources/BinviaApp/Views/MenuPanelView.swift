@@ -55,21 +55,18 @@ struct MenuPanelView: View {
         ProviderSwitcherView(providers: appState.configuredProviders, selection: $selectedTab)
     }
 
-    // MARK: - 底部 Footer（对齐 CodexBar meta section：网关密钥 / 设置 / 退出）
+    // MARK: - 底部 Footer（设置在左，退出在右）
 
     private var footer: some View {
         HStack(spacing: 0) {
-            footerButton(systemName: "key.fill", title: "网关密钥") {
-                SettingsWindowController.shared.show(appState: appState, pane: .gatewayKeys)
-            }
             footerButton(systemName: "gearshape", title: "设置") {
                 SettingsWindowController.shared.show(appState: appState, pane: .general)
             }
+            Spacer()
             footerButton(systemName: "xmark.rectangle", title: "退出") {
                 appState.stopServer()
                 NSApp.terminate(nil)
             }
-            Spacer()
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
