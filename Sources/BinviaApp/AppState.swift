@@ -360,22 +360,28 @@ final class AppState: ObservableObject {
         try saveConfig()
     }
 
-    /// 为自定义 provider 追加一个模型（传不带前缀的原始模型名）。
+    /// 为自定义 provider 追加一个模型。
+    /// 输入可带 `<providerID>/` 前缀（用户可能从 `/v1/models` 复制），内部剥前缀后存原始模型名。
     func addCustomModel(providerID: String, model: String) throws {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
+        let prefix = "\(providerID)/"
+        let clean = trimmed.hasPrefix(prefix) ? String(trimmed.dropFirst(prefix.count)) : trimmed
+        guard !clean.isEmpty,
               let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
-        guard !config.customProviderDefs[idx].models.contains(trimmed) else { return }
-        config.customProviderDefs[idx].models.append(trimmed)
+        guard !config.customProviderDefs[idx].models.contains(clean) else { return }
+        config.customProviderDefs[idx].models.append(clean)
         reregisterCustomProvider(config.customProviderDefs[idx])
         try saveConfig()
     }
 
-    /// 从自定义 provider 删除一个模型（`model` 参数可带前缀，内部剥前缀后比较）。
+    /// 从自定义 provider 删除一个模型（`model` 参数可带前缀，内部剥掉全部前缀后比较）。
     func removeCustomModel(providerID: String, model: String) throws {
         guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
         let prefix = "\(providerID)/"
-        let stripped = model.hasPrefix(prefix) ? String(model.dropFirst(prefix.count)) : model
+        var stripped = model
+        while stripped.hasPrefix(prefix) {
+            stripped = String(stripped.dropFirst(prefix.count))
+        }
         guard let modelIdx = config.customProviderDefs[idx].models.firstIndex(of: stripped) else { return }
         config.customProviderDefs[idx].models.remove(at: modelIdx)
         reregisterCustomProvider(config.customProviderDefs[idx])

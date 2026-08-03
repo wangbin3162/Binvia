@@ -19,7 +19,20 @@ public struct GenericOpenAIProvider: Provider {
     public init(id: String, baseURL: URL, models: [String]) {
         self.id = id
         self.baseURL = baseURL
-        self.prefixedModels = models.map { Model(id: "\(id)/\($0)") }
+        // 归一化：模型名去掉可能已存在的 `<id>/` 前缀后再统一加一次，避免 `/v1/models` 输出双重前缀。
+        self.prefixedModels = models.map { raw in
+            Model(id: "\(id)/\(Self.stripRepeatedPrefix(raw, id: id))")
+        }
+    }
+
+    /// 去掉全部 `<id>/` 前缀（若存在）。兼容路由已剥前缀、testModel 传带前缀、以及用户误存双重前缀三种入口。
+    private static func stripRepeatedPrefix(_ modelID: String, id: String) -> String {
+        let prefix = "\(id)/"
+        var result = modelID
+        while result.hasPrefix(prefix) {
+            result = String(result.dropFirst(prefix.count))
+        }
+        return result
     }
 
     private func resolveKey(_ credential: ProviderCredential?) throws -> String {
@@ -30,9 +43,9 @@ public struct GenericOpenAIProvider: Provider {
     }
 
     /// 构建上游请求体：优先透传 rawBody（保留未知字段与客户端 stream 标志），否则编码 ChatRequest。
-    /// 模型字段剥去 `<id>/` 前缀后再转发上游（上游只认原始模型名）。
+    /// 模型字段剥去全部 `<id>/` 前缀后再转发上游（上游只认原始模型名）。
     private func makeBody(request: ChatRequest, rawBody: Data?) throws -> Data {
-        let strippedModel = stripPrefix(request.model)
+        let strippedModel = Self.stripRepeatedPrefix(request.model, id: id)
         if let rawBody {
             guard var json = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any] else {
                 throw ProviderError.invalidResponse("invalid request body")
@@ -43,12 +56,6 @@ public struct GenericOpenAIProvider: Provider {
         var req = request
         req.model = strippedModel
         return try JSONEncoder().encode(req)
-    }
-
-    /// 去掉 `<id>/` 前缀（若存在）。兼容路由已剥前缀与 testModel 传带前缀两种入口。
-    private func stripPrefix(_ modelID: String) -> String {
-        let prefix = "\(id)/"
-        return modelID.hasPrefix(prefix) ? String(modelID.dropFirst(prefix.count)) : modelID
     }
 
     public func chat(

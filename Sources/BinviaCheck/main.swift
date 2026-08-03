@@ -2652,6 +2652,41 @@ func genericOpenAIProviderTests() async throws {
         failed += 1
         print("FAIL: GenericOpenAIProvider rawBody 路径无法解析 model 字段")
     }
+
+    // 5) 双重前缀容错：用户误存 `unisound/glm-5.2` 时，构造归一化 + chat 全部剥掉
+    let dupProvider = GenericOpenAIProvider(
+        id: "unisound",
+        baseURL: URL(string: "https://mock.test/v1")!,
+        models: ["unisound/glm-5.2", "unisound/unisound/glm-5.2-flash"]
+    )
+    let dupModels = try await dupProvider.listModels(credential: nil)
+    expectEqual(
+        dupModels.map(\.id),
+        ["unisound/glm-5.2", "unisound/glm-5.2-flash"],
+        "GenericOpenAIProvider 构造时归一化双重前缀模型名"
+    )
+
+    let captured3 = RequestCapture()
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        captured3.body = readRequestBody(request)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data(sse.utf8))
+    }
+    let dupRequest = ChatRequest(model: "unisound/unisound/glm-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true)
+    let stream3 = try await dupProvider.chat(request: dupRequest, rawBody: nil, credential: ProviderCredential(apiKey: "sk-test"))
+    for try await chunk in stream3 { _ = chunk }
+    if let body = captured3.body,
+       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+       let model = json["model"] as? String {
+        expectEqual(model, "glm-5.2", "GenericOpenAIProvider chat 剥掉全部重复前缀")
+    } else {
+        failed += 1
+        print("FAIL: GenericOpenAIProvider 双重前缀路径无法解析 model 字段")
+    }
 }
 
 /// 读取 URLRequest 的请求体：优先 `httpBody`，回退 `httpBodyStream`。

@@ -54,6 +54,7 @@ enum CursorProtoDecoder {
         let number: Int
         let wire: Int
         let payload: Data
+        let varint: UInt64
     }
 
     static func fields(in data: Data) -> [Field] {
@@ -66,14 +67,15 @@ enum CursorProtoDecoder {
             var cursor = next
             switch wire {
             case 0: // varint
-                guard let (_, after) = decodeVarint(data, from: cursor) else { return result }
+                guard let (value, after) = decodeVarint(data, from: cursor) else { return result }
+                result.append(Field(number: number, wire: wire, payload: Data(), varint: value))
                 cursor = after
             case 2: // length-delimited
                 guard let (len, after) = decodeVarint(data, from: cursor) else { return result }
                 let start = after
                 let end = min(start + Int(len), data.endIndex)
                 guard end <= data.endIndex else { return result }
-                result.append(Field(number: number, wire: wire, payload: data.subdata(in: start..<end)))
+                result.append(Field(number: number, wire: wire, payload: data.subdata(in: start..<end), varint: 0))
                 cursor = end
             case 1: // 64-bit fixed
                 cursor = min(cursor + 8, data.endIndex)

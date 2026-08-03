@@ -2,7 +2,7 @@
 
 > 目标：对齐 OmniRoute 的 Cursor 支持——修正模型目录（补 `cu/auto` 等）、添加账号（手动导入 token+machineId）、修复「密钥面板选不到模型」的判定。
 >
-> 状态：**已完成**（2026-05 快照）
+> 状态：**已完成（含 P2 Agent RPC）**（2026-08 实测快照）
 > 关联文档：`docs/omniroute-analysis.md`（上游实现分析）
 
 ---
@@ -48,6 +48,7 @@ Binvia 的 Cursor 支持停留在 Phase 20 旧实现，对照 OmniRoute（`open-
 | 4 | 添加账号 UI（手动导入 token+machineId，多账号） | `SettingsProviderPane.swift`、`ChatModels.swift`、`AppState.swift` | `make test`；构建 |
 | 5 | CLI 账号命令（`cursor add/list/remove`） | `BinviaCLI/main.swift` | `make test`；手动验证 |
 | 6 | 回归 + 收尾（补测试、清真实配置） | `BinviaCheck/main.swift`、README | `make test` 全绿 |
+| 7 | P2 Agent RPC（`auto` / `composer-*`） | `CursorHTTP2.swift`、`CursorAgentRPC.swift`、`CursorProvider.swift` | `swift build`；`make test`；真实网关 `cu/auto` 非流式/流式调用 |
 
 > P2（不在本次范围）：升级 RPC 到 `agent.v1.AgentService/Run` 使 `auto`/`composer-*` 真正可用。切片 1-5 完成后它们能展示但不能调用。
 
@@ -116,16 +117,59 @@ Binvia 的 Cursor 支持停留在 Phase 20 旧实现，对照 OmniRoute（`open-
 
 ## 8. 剩余风险 / 未验证项
 
-1. **P2（未做）**：升级 RPC 到 `agent.v1.AgentService/Run`（HTTP/2 双向流）使 `auto`/`composer-*` 真正可用。当前旧端点会拒绝这两个模型——**它们可展示但调用会失败**。
+1. ~~**P2（未做）**：升级 RPC 到 `agent.v1.AgentService/Run`（HTTP/2 双向流）使 `auto`/`composer-*` 真正可用。当前旧端点会拒绝这两个模型——**它们可展示但调用会失败**。~~
 2. **`GetDefaultModelNudgeData` 动态拉取未实现**：OmniRoute 也未实际调用（靠 `cursor-agent --list-models` 同步）；本机无 cursor-agent，采用静态目录方案。装了 cursor-agent 后可补动态同步。
 3. **GUI 未实机运行验证**：`swift build` 通过但未启动 App 肉眼看界面（无显示器环境）；逻辑与现有面板模式一致。
 4. **旧配置模型 ID 兼容**：旧目录多数 ID 在新目录仍存在，Router 解析未破坏。
 
 ---
 
-## 9. 后续建议（P2 独立立项）
+## 10. P2 实测诊断（2026-08 复现）
 
-- 逆向 `agent.v1.AgentService/Run` protobuf schema（参考 OmniRoute `utils/cursorAgentProtobuf.ts`）
-- Binvia 侧实现 HTTP/2 双向流（当前 `URLSession` 仅 HTTP/1.1 + 单向流）
-- 支持 `auto` / `composer-*` 请求与响应帧
-- 迁移后旧 `StreamUnifiedChatWithTools` 路径可保留作 fallback
+> 用户报告「cursor 发送测试后提示 error」。经网关实测复现 + 上游逐帧调试确认根因，并已通过 `agent.v1.AgentService/Run` 端点实验验证修复路径。
+
+### 10.1 实测复现（旧端点 `StreamUnifiedChatWithTools`）
+
+`curl POST /v1/chat/completions`（model=`cu/auto`）→ HTTP 200，但响应 content=`"Error"`。开启 `CURSOR_DEBUG=1` 后上游返回 JSON 错误帧：
+
+```json
+{"error":{"code":"not_found","message":"Error","details":[{"debug":{"error":"ERROR_BAD_MODEL_NAME","details":{"title":"AI Model Not Found","detail":"Model name is not valid: \"auto\""}}}]}}
+```
+
+命名模型（`claude-4.5-sonnet` / `gpt-5.2` / `gpt-5.5-low` 等）返回：
+
+```json
+{"error":{"code":"resource_exhausted","message":"Error","details":[{"debug":{"error":"ERROR_RATE_LIMITED_CHANGEABLE","details":{"title":"Named models unavailable","detail":"Free plans can only use Auto."}}}]}}
+```
+
+**根因**：账号为免费套餐 → 只能用 `auto`；但旧端点 `StreamUnifiedChatWithTools` **不认识 `auto`**（`ERROR_BAD_MODEL_NAME`）。死循环 → 无任何模型可用。
+
+### 10.2 新端点实验验证（`agent.v1.AgentService/Run`）
+
+用 Node `node:http2` 直接调用 `https://agentn.global.api5.cursor.sh/agent.v1.AgentService/Run`（Connect-RPC 双向流）：
+
+| 发现 | 细节 |
+|---|---|
+| **`auto` 免费可用** | model `auto` → 需翻译为 `default`（`RequestedModel.model_id="default"`）；免费套餐正常返回 `PONG` |
+| **命名模型正确拒绝** | `claude-4.5-sonnet` → `Free plans can only use Auto`（错误信息清晰） |
+| **版本头必须用 CLI 格式** | `x-cursor-client-version: cli-2026.07.08-0c04a8a`（OmniRoute 同步的最新 CLI build）；IDE 格式 `1.1.3`/`3.2.14` → `Update Required` 拒绝 |
+| **双向握手硬性要求** | 服务器发 `request_context`（ExecServerMessage variant 10）后**挂起等 ack**；必须同流回 `ExecClientMessage.request_context_result`。单向 `END_STREAM` 不行（12s 无响应） |
+| **KV 通道** | 服务器发 `kv_server_message` 保存对话（`set_blob`），无需应答；只有发 system-prompt blob 时才有 `get_blob` |
+| **请求头集** | 无 `x-cursor-checksum` / `machineId` / `x-amzn-trace-id`（与旧端点不同）；需要 `traceparent` / `backend-traceparent` / `x-request-id` / `x-original-request-id` |
+| **文本帧结构** | `AgentServerMessage.interaction_update(1)` → `InteractionUpdate.text_delta(1)` → `TextDeltaUpdate.text(1)`；thinking 在 field 4；`turn_ended`=14 |
+| **结束信号** | Connect-RPC `{}` JSON 帧（flags 0x02/0x03） |
+
+**关键差异 vs 旧端点**：新端点不接受 `auto` 字面量，需翻译为 `default`；模型 ID 带 effort 后缀（`claude-opus-4-8-high`）需拆成 `RequestedModel{model_id: "claude-opus-4-8", parameters: [{id:"effort", value:"high"}]}`。
+
+### 10.3 实现与验证（Swift 侧）
+
+新端点**必须双向 HTTP/2**（同流回 ack）。Binvia 现有能力盘点：
+
+| 方案 | 可行性 |
+|---|---|
+| `URLSession` | ✗ 仅 HTTP/1.1，无双向流；无法暴露 h2 |
+| `Network.framework`（NWConnection） | ✅ 可用：TLS/ALPN 由 `NWConnection` 自动协商 h2，HTTP/2 帧层由 Binvia 自实现 |
+| 系统 `libcurl` | ⚠️ dylib 存在但无 Swift module；h2 双向流 API 不友好 |
+| **NWConnection + 最小 HTTP/2 帧层** | ✅ 零依赖；实现连接前奏、SETTINGS、HEADERS、DATA、PING、WINDOW_UPDATE，HPACK 请求头使用静态表 |
+
+**实现状态**：已完成。新增 `CursorHTTP2.swift` + `CursorAgentRPC.swift`；`NWConnection` 负责 TLS 双向传输，Binvia 负责 HTTP/2/Connect-RPC 帧和 request_context/KV 回写。默认 IDE 模式切换至 `agent.v1.AgentService/Run`；`CURSOR_BASE_URL` 存在时保留旧 URLSession 协议，仅用于 URLProtocol mock/镜像兼容。

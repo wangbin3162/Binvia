@@ -21,17 +21,17 @@ public enum CursorProviderDescriptor {
 ///
 /// - **API Key 模式**：有 `CURSOR_API_KEY` 或 config `credential.apiKey` 时，按 OpenAI 兼容端点
 ///   `https://api.cursor.com/v1` 接入（官方公开 REST，需单独购买 Cursor API key）。
-/// - **IDE 模式（Phase 20 新增）**：无显式 key 时，自动读取 Cursor IDE 的登录令牌
-///   （`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`），按当前 Cursor
-///   后端私有协议（Connect-RPC protobuf 单向流，HTTP/2，schema 参考 `zhengui666/cursor-api-gui`）
-///   调用 `https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`。
-///   上游二进制帧在 provider 内转换成 OpenAI SSE（客户端 `stream=true` 透传；`stream=false`
-///   由 `SSEJSONAggregator` 聚合成 JSON）。令牌约 24h 轮换，由 `CursorCredentialStore` 实时读取。
+/// - **IDE 模式**：无显式 key 时，自动读取 Cursor IDE 的登录令牌
+///   （`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`），默认调用
+///   `agent.v1.AgentService/Run`（HTTP/2 双向 Connect-RPC），支持 `auto` / `composer-*`；
+///   `CURSOR_BASE_URL` 存在时保留旧协议路径，供 mock/镜像测试兼容。上游帧在 provider 内
+///   转换成 OpenAI SSE（客户端 `stream=true` 透传；`stream=false` 由 `SSEJSONAggregator`
+///   聚合成 JSON）。令牌约 24h 轮换，由 `CursorCredentialStore` 实时读取。
 ///   模型目录为 Cursor 实际模型 ID（同步 OmniRoute cursor 注册表，见 `CursorModels`）；命名模型需 Pro/Max 套餐，
 ///   免费套餐上游会拒绝。设置 `CURSOR_DEBUG=1` 可输出上游帧调试日志到 stderr。
 ///
 /// 认证解析顺序：`credential.apiKey` → `CURSOR_API_KEY` → Cursor IDE 自动发现。
-/// `CURSOR_BASE_URL` 环境变量可覆盖两种模式的 baseURL（测试/镜像场景）。
+/// `CURSOR_BASE_URL` 环境变量用于旧 URLSession 协议的 mock/镜像测试；默认 Agent RPC 使用固定官方 host。
 /// `listModels` 走协议默认实现（IDE 模式无 key 时自动回退静态目录）。
 public struct CursorProvider: Provider {
     public let id = "cursor"
@@ -39,13 +39,13 @@ public struct CursorProvider: Provider {
     public init() {}
 
     private enum Endpoint {
-        /// 显式环境覆盖（测试/镜像场景）：同时影响 API key 与 IDE 两种模式。
+        /// 显式环境覆盖。存在时启用旧 URLSession 协议，供测试/镜像兼容；默认 IDE 模式走 Agent RPC。
         static var overrideBase: String? { RouteConfig.envValue(["CURSOR_BASE_URL"]) }
         /// API Key 模式：官方公开 REST 端点（base 已含 `/v1`）。
         static var publicChat: URL {
             URL(string: "\(overrideBase ?? "https://api.cursor.com/v1")/chat/completions")!
         }
-        /// IDE 模式：Cursor 私有 Connect-RPC 聊天端点（单向流，需 HTTP/2）。
+        /// 旧 IDE 模式：仅用于 CURSOR_BASE_URL mock/镜像兼容。生产默认路径见 CursorAgentRPC。
         static var ideChat: URL {
             URL(string: "\(overrideBase ?? "https://api2.cursor.sh")/aiserver.v1.ChatService/StreamUnifiedChatWithTools")!
         }
@@ -81,12 +81,21 @@ public struct CursorProvider: Provider {
     ) async throws -> AsyncThrowingStream<Data, Error> {
         // 1. 手动导入账号（GUI「Cursor 账号」保存的 token + machineId）优先。
         if let token = credential?.accessToken, !token.isEmpty {
-            let machineId = credential?.machineId
-            let identity = CursorIDEIdentity(accessToken: token, machineId: machineId, expiresAt: nil)
+            let identity = CursorIDEIdentity(
+                accessToken: token,
+                machineId: credential?.machineId,
+                expiresAt: nil
+            )
             let messages = extractMessages(request: request, rawBody: rawBody)
-            let rpcBody = CursorChatRequestEncoder.makeBody(messages: messages, model: request.model)
-            let upstream = makeIDERequest(body: rpcBody, identity: identity)
-            let sseStream = Self.rpcSSEStream(for: upstream, model: request.model)
+            let sseStream: AsyncThrowingStream<Data, Error>
+            if Endpoint.overrideBase != nil {
+                // 测试/镜像仍走旧 URLSession 协议，保持 URLProtocol mock 兼容。
+                let rpcBody = CursorChatRequestEncoder.makeBody(messages: messages, model: request.model)
+                let upstream = makeIDERequest(body: rpcBody, identity: identity)
+                sseStream = Self.rpcSSEStream(for: upstream, model: request.model)
+            } else {
+                sseStream = CursorAgentRPC.stream(messages: messages, model: request.model, identity: identity)
+            }
             return Self.aggregateIfNeeded(request: request, sseStream: sseStream)
         }
 
@@ -103,25 +112,16 @@ public struct CursorProvider: Provider {
             )
         }
         let messages = extractMessages(request: request, rawBody: rawBody)
-        let rpcBody = CursorChatRequestEncoder.makeBody(messages: messages, model: request.model)
-        let upstream = makeIDERequest(body: rpcBody, identity: identity)
-        let sseStream = Self.rpcSSEStream(for: upstream, model: request.model)
-
-        // 非流式客户端：把 SSE 聚合成 OpenAI 单 JSON（复用 CodeBuddy/Kimi 的聚合器）。
-        if request.stream == false {
-            return AsyncThrowingStream { continuation in
-                Task {
-                    do {
-                        let json = try await SSEJSONAggregator.aggregateChatCompletion(sseStream)
-                        continuation.yield(json)
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-            }
+        let sseStream: AsyncThrowingStream<Data, Error>
+        if Endpoint.overrideBase != nil {
+            // 测试/镜像仍走旧 URLSession 协议，保持 URLProtocol mock 兼容。
+            let rpcBody = CursorChatRequestEncoder.makeBody(messages: messages, model: request.model)
+            let upstream = makeIDERequest(body: rpcBody, identity: identity)
+            sseStream = Self.rpcSSEStream(for: upstream, model: request.model)
+        } else {
+            sseStream = CursorAgentRPC.stream(messages: messages, model: request.model, identity: identity)
         }
-        return sseStream
+        return Self.aggregateIfNeeded(request: request, sseStream: sseStream)
     }
 
     /// 非流式客户端把 SSE 聚合成 OpenAI 单 JSON（手动导入账号分支复用 IDE 的聚合逻辑）。

@@ -615,9 +615,17 @@ struct SettingsProviderPane: View {
     // MARK: - 自定义 Provider 模型列表（可编辑）
 
     /// 自定义 provider 的模型列表（从 config 直接派生，带 `<id>/` 前缀）。响应式，无需 async 加载。
+    /// 归一化：config 中的模型名若已带前缀（历史/误输入），先剥掉再统一加一次，避免双重前缀。
     private var customModels: [Model] {
         let def = appState.customProviderDef(for: providerID)
-        return def?.models.map { Model(id: "\(providerID)/\($0)") } ?? []
+        let prefix = "\(providerID)/"
+        return def?.models.map { raw in
+            var clean = raw
+            while clean.hasPrefix(prefix) {
+                clean = String(clean.dropFirst(prefix.count))
+            }
+            return Model(id: "\(providerID)/\(clean)")
+        } ?? []
     }
 
     /// 自定义 provider 的「模型列表」Section：顶部添加模型输入 + 模型行（测试 / 删除）+ 供应商级测试。
@@ -668,6 +676,9 @@ struct SettingsProviderPane: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
+            // 模型名后直接放弹性空白：状态区与删除按钮固定靠右，测试后删除按钮也始终在最右侧。
+            Spacer(minLength: 8)
+
             switch result {
             case .testing:
                 ProgressView().controlSize(.small)
@@ -682,7 +693,6 @@ struct SettingsProviderPane: View {
                     .font(.footnote)
                 Text(msg).font(.caption2).foregroundStyle(.red)
             case .idle:
-                Spacer()
                 Button("测试") { startModelTest(model.id) }
                     .buttonStyle(.link)
                     .controlSize(.small)
