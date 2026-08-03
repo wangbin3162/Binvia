@@ -64,10 +64,10 @@ public actor CursorCredentialStore {
     public static let shared = CursorCredentialStore()
 
     /// 缓存有效期（秒）。IDE 令牌 24h 轮换，4h 缓存足够新。
-    public var cacheTTL: TimeInterval = 4 * 3600
+    public nonisolated(unsafe) var cacheTTL: TimeInterval = 4 * 3600
 
-    private var cached: CursorIDEIdentity?
-    private var cachedAt: Date?
+    private nonisolated(unsafe) var cached: CursorIDEIdentity?
+    private nonisolated(unsafe) var cachedAt: Date?
 
     public init() {}
 
@@ -91,6 +91,16 @@ public actor CursorCredentialStore {
             return identity
         }
         return nil
+    }
+
+    /// 仅读缓存（不探测）：返回缓存中的身份，无缓存/过期返回 nil。
+    /// 供 GUI 的 `isProviderConfigured` 等同步判定使用，避免在视图 body 里做 IO。
+    /// `nonisolated`：只读 `cached`/`cachedAt`，不触碰 actor 隔离的写路径，无数据竞争。
+    nonisolated public func peekCachedIdentity() -> CursorIDEIdentity? {
+        guard let cached, let cachedAt, Date().timeIntervalSince(cachedAt) < cacheTTL else {
+            return nil
+        }
+        return cached
     }
 
     /// 强制重新探测（更新缓存，忽略已有缓存）。返回详细状态供 GUI/CLI 展示。
@@ -179,7 +189,7 @@ public actor CursorCredentialStore {
         let query = "SELECT value FROM itemTable WHERE key = ?1"
         guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return nil }
         key.withCString { cstr in
-            sqlite3_bind_text(stmt, 1, cstr, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            _ = sqlite3_bind_text(stmt, 1, cstr, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         }
         var values: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {

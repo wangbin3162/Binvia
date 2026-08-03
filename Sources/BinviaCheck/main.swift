@@ -2238,6 +2238,26 @@ func cursorCredentialStoreTests() async throws {
     expectEqual(refreshed?.accessToken, "tok-b", "缓存过期后重新探测")
 }
 
+/// Cursor 官方模型目录静态断言（防回归：auto 存在、无重复、数量与 OmniRoute 同步）。
+func cursorModelsCatalogTests() async throws {
+    let models = CursorModels.all
+    let ids = models.map(\.id)
+    // 1. 关键模型存在（用户报告缺失的）
+    for required in ["auto", "composer-2.5", "composer-2", "gpt-5.5-extra-high", "gpt-5.2-xhigh", "claude-opus-4-8-thinking-max", "claude-sonnet-5-thinking-max", "grok-4.5-xhigh", "kimi-k2.5"] {
+        expectTrue(ids.contains(required), "Cursor 目录应含 \(required)")
+    }
+    // 2. auto 排最前
+    expectEqual(ids.first, "auto", "auto 应排在最前")
+    // 3. 无重复 id
+    expectEqual(Set(ids).count, ids.count, "Cursor 目录无重复模型 id")
+    // 4. 数量与 OmniRoute 官方目录一致（2026-05 快照 123 个）
+    expectEqual(ids.count, 123, "Cursor 目录共 123 个模型（对齐 OmniRoute）")
+    // 5. 每个模型都有非空展示名
+    for m in models {
+        expectTrue(!(m.name ?? "").isEmpty, "模型 \(m.id) 应有展示名")
+    }
+}
+
 func cursorIDEModeTests() async throws {
     // IDE 模式：无 API key，走 CursorCredentialStore（CURSOR_TOKEN 注入）+ protobuf RPC 端点
     unsetenv("CURSOR_API_KEY")
@@ -2343,6 +2363,50 @@ func cursorIDEModeTests() async throws {
     } catch {
         expectTrue(error is ProviderError, "抛 ProviderError")
     }
+
+    // 5) 手动导入账号优先：credential.accessToken + machineId → IDE 请求（不走 CursorCredentialStore）
+    setenv("CURSOR_BASE_URL", "https://mock.test", 1)
+    setenv("CURSOR_STATE_DB_PATH", "/nonexistent/state.vscdb", 1)  // 确保 IDE 自动发现不可用
+    await CursorCredentialStore.shared.clearCache()
+    defer {
+        unsetenv("CURSOR_BASE_URL")
+        unsetenv("CURSOR_STATE_DB_PATH")
+    }
+    let manualCred = ProviderCredential(accessToken: "manual-account-token", machineId: "manual-mid-123")
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer manual-account-token",
+                "手动账号 Bearer 用 credential.accessToken")
+            expectEqual(request.value(forHTTPHeaderField: "x-cursor-checksum"),
+                       CursorChecksum.generate(machineId: "manual-mid-123"),
+                       "手动账号 machineId 生成 checksum")
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/connect+proto"]
+            )!
+            return (response, cursorTextFrame("manual ok") + cursorEndFrame())
+        }
+        let stream = try await provider.chat(
+            request: ChatRequest(model: "gpt-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true),
+            rawBody: nil,
+            credential: manualCred)
+        var text = ""
+        for try await chunk in stream { text += String(data: chunk, encoding: .utf8) ?? "" }
+        expectTrue(text.contains("manual ok"), "手动账号模式 SSE 透传，实际: \(text)")
+    }
+
+    // 6) listModels：IDE 模式（无 API key）返回官方静态目录，含 auto / composer-*
+    unsetenv("CURSOR_API_KEY")
+    let models = try await provider.listModels(credential: nil)
+    let ids = models.map(\.id)
+    expectTrue(ids.contains("auto"), "listModels 含 auto")
+    expectTrue(ids.contains("composer-2.5"), "listModels 含 composer-2.5")
+    expectTrue(ids.contains("claude-opus-4-8-thinking-max"), "listModels 含 effort 变体")
+    expectEqual(models.count, CursorModels.all.count, "listModels 返回完整官方目录")
+    expectEqual(ids.first, "auto", "auto 排在最前")
 }
 
 // MARK: - Cursor IDE 测试辅助（手搓 Cursor 响应帧）
@@ -2892,6 +2956,7 @@ await run("qwen-cloud 集成（URLProtocol mock）", qwenCloudIntegrationTests)
 await run("codex 集成（URLProtocol mock）", codexIntegrationTests)
 await run("cursor 集成（URLProtocol mock）", cursorIntegrationTests)
 await run("Cursor IDE 凭据发现", cursorCredentialStoreTests)
+await run("Cursor 官方模型目录", cursorModelsCatalogTests)
 await run("cursor IDE 模式（URLProtocol mock）", cursorIDEModeTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)

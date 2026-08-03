@@ -205,6 +205,66 @@ final class AppState: ObservableObject {
         return result.filter { seen.insert($0).inserted }
     }
 
+    // MARK: - Cursor 多账号（token + machineId）
+
+    /// Cursor 账号 = (label, accessToken, machineId)。主账号来自 `credential`，
+    /// 其余来自 `apiKeys[]`（machineId 存于标签，格式 `mid:<machineId>`）。
+    struct CursorAccount: Equatable {
+        var label: String
+        var accessToken: String
+        var machineId: String?
+    }
+
+    /// 读取全部 Cursor 账号（主 + 轮换）。无账号返回空数组。
+    func cursorAccounts(for providerID: String = "cursor") -> [CursorAccount] {
+        guard let pc = config.providers[providerID] else { return [] }
+        var result: [CursorAccount] = []
+        if let access = pc.credential.accessToken, !access.isEmpty {
+            result.append(CursorAccount(
+                label: "主账号",
+                accessToken: access,
+                machineId: pc.credential.machineId
+            ))
+        }
+        for token in pc.apiKeys {
+            guard !token.value.isEmpty else { continue }
+            // machineId 编码在标签前缀 `mid:` 中（KeyedToken 只有 label+value 两字段）。
+            var machineId: String?
+            var label = token.label
+            if label.hasPrefix("mid:") {
+                machineId = String(label.dropFirst(4))
+                label = "账号"
+            }
+            result.append(CursorAccount(label: label, accessToken: token.value, machineId: machineId))
+        }
+        return result
+    }
+
+    /// 保存全部 Cursor 账号：首账号 → `credential.accessToken/machineId`，其余 → `apiKeys[]`。
+    func setCursorAccounts(_ accounts: [CursorAccount], for providerID: String = "cursor") throws {
+        let cleaned = accounts
+            .map { CursorAccount(label: $0.label, accessToken: $0.accessToken.trimmingCharacters(in: .whitespacesAndNewlines), machineId: $0.machineId) }
+            .filter { !$0.accessToken.isEmpty }
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        var credential = providerConfig.credential
+        if let primary = cleaned.first {
+            credential.accessToken = primary.accessToken
+            credential.machineId = primary.machineId
+        } else {
+            credential.accessToken = nil
+            credential.machineId = nil
+        }
+        // 其余账号：machineId 编码进标签前缀 `mid:`。
+        providerConfig.credential = credential
+        providerConfig.apiKeys = Array(cleaned.dropFirst()).map {
+            let label = $0.machineId.map { "mid:\($0)" } ?? $0.label
+            return KeyedToken(label: label, value: $0.accessToken)
+        }
+        config.providers[providerID] = providerConfig
+        try saveConfig()
+    }
+
     /// 保存手动粘贴的 token 凭据（CodeBuddy / Antigravity 的“手动配置 Token”）。
     func saveManualToken(accessToken: String, refreshToken: String?, for providerID: String) throws {
         let trimmedAccess = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -348,8 +408,28 @@ final class AppState: ObservableObject {
     // MARK: - Provider 状态摘要
 
     /// 某 provider 是否已配置凭据（按认证类型判断）。
+    /// cursor 特判：IDE 检测成功（`CursorCredentialStore` 缓存命中）即视为已配置，无需 API Key。
     func isProviderConfigured(_ providerID: String) -> Bool {
         guard let descriptor = ProviderRegistry.shared.descriptor(for: providerID) else { return false }
+        if providerID == "cursor" {
+            // 缓存命中（IDE 登录令牌）→ 已配置；未探测过时返回 false（由 refresh 后重算）。
+            if let identity = CursorCredentialStore.shared.peekCachedIdentity() {
+                return !identity.accessToken.isEmpty
+            }
+            // 缓存未命中：若配置里显式存过 token（手动导入账号），也算已配置。
+            if let pc = config.providers["cursor"] {
+                let hasToken = !(pc.credential.accessToken ?? "").isEmpty
+                    || !(pc.apiKeys ?? []).isEmpty
+                if hasToken { return true }
+            }
+            // 未探测过 → 异步刷新缓存后再判定（避免首次打开密钥面板看不到 cursor）。
+            Task { @MainActor in
+                if case .found = await CursorCredentialStore.shared.refresh() {
+                    self.objectWillChange.send()
+                }
+            }
+            return false
+        }
         let pc = config.providers[providerID]
         switch descriptor.metadata.authType {
         case .apiKey, .localProbe:

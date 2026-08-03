@@ -102,6 +102,9 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
     public var expiresAt: Date?
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。
     public var region: String?
+    /// Cursor 专用：IDE 登录 / 手动导入账号的 machineId（`x-cursor-checksum` 用）。
+    /// 缺省 nil，旧配置向后兼容。
+    public var machineId: String?
 
     public init(
         apiKey: String? = nil,
@@ -109,7 +112,8 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         refreshToken: String? = nil,
         email: String? = nil,
         expiresAt: Date? = nil,
-        region: String? = nil
+        region: String? = nil,
+        machineId: String? = nil
     ) {
         self.apiKey = apiKey
         self.accessToken = accessToken
@@ -117,6 +121,7 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         self.email = email
         self.expiresAt = expiresAt
         self.region = region
+        self.machineId = machineId
     }
 }
 

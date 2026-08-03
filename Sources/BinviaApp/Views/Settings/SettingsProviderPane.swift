@@ -32,6 +32,11 @@ struct SettingsProviderPane: View {
     @State private var cursorDetection: CursorDetection?
     @State private var checkingCursor = false
 
+    /// Cursor 手动导入账号草稿（token + machineId）与账号列表。
+    @State private var cursorAccounts: [AppState.CursorAccount] = []
+    @State private var newCursorToken = ""
+    @State private var newCursorMachineID = ""
+
     /// 模型列表与模型级测试状态。
     @State private var models: [Model] = []
     @State private var loadingModels = false
@@ -75,6 +80,7 @@ struct SettingsProviderPane: View {
                     usageSection
                 }
                 connectionSection(descriptor)
+                cursorAccountsSection
                 cursorIDESection
                 // 自定义 provider：可编辑模型列表（替代只读连通性 Section）
                 if descriptor.isUserDefined {
@@ -91,6 +97,7 @@ struct SettingsProviderPane: View {
                     loadModels()
                 }
                 loadCursorDetection()
+                loadCursorAccounts()
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
                 // 凭据变更时刷新模型列表与令牌草稿（OAuth 登录后令牌列表即时反映新 token）
@@ -173,6 +180,68 @@ struct SettingsProviderPane: View {
     }
 
     // MARK: - Cursor IDE 接入（Phase 20）
+
+    /// Cursor 手动导入账号区块（多账号，token + machineId）。
+    /// 对齐 OmniRoute `CursorAuthModal`：IDE 自动探测之外，支持手动粘贴 token（+ 可选 machineId）
+    /// 保存为独立账号；请求时优先使用手动导入账号，其次 IDE 自动发现。
+    @ViewBuilder
+    private var cursorAccountsSection: some View {
+        if providerID == "cursor" {
+            Section {
+                if cursorAccounts.isEmpty {
+                    Text("暂无手动导入账号")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(cursorAccounts.enumerated()), id: \.offset) { index, account in
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.crop.circle")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(account.label)
+                                    .font(.footnote.weight(.medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(account.machineId.map { "machineId: \($0)" } ?? "无 machineId")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer(minLength: 8)
+                            Button("移除") {
+                                cursorAccounts.remove(at: index)
+                                persistCursorAccounts()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("", text: $newCursorToken, prompt: Text("粘贴 Cursor Access Token"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                    TextField("", text: $newCursorMachineID, prompt: Text("machineId（可选）"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .frame(maxWidth: 180)
+                    Button("添加账号") { addCursorAccount() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(newCursorToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            } header: {
+                Text("手动导入账号")
+            } footer: {
+                Text("从 Cursor IDE 的 state.vscdb 读取 accessToken 与 machineId（或直接粘贴）；多账号时请求优先用第一个。token 约 24h 轮换，手动导入需自行更新。")
+            }
+        }
+    }
 
     /// Cursor 专属「Cursor IDE 接入」区块：显示 IDE 令牌检测状态，无需 API Key 即可启用。
     @ViewBuilder
@@ -804,6 +873,44 @@ struct SettingsProviderPane: View {
             let detection = await CursorCredentialStore.shared.refresh()
             cursorDetection = detection
             checkingCursor = false
+        }
+    }
+
+    // MARK: - Cursor 手动账号
+
+    /// 加载已保存的 Cursor 账号列表。
+    @MainActor
+    private func loadCursorAccounts() {
+        guard providerID == "cursor" else { return }
+        cursorAccounts = appState.cursorAccounts(for: "cursor")
+    }
+
+    /// 从添加行取 token + machineId 构造账号，并清空添加行。
+    private func makeCursorAccountFromAddRow() -> AppState.CursorAccount? {
+        let token = newCursorToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let machineId = newCursorMachineID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return nil }
+        newCursorToken = ""
+        newCursorMachineID = ""
+        return AppState.CursorAccount(
+            label: KeyedToken.defaultLabel(for: token),
+            accessToken: token,
+            machineId: machineId.isEmpty ? nil : machineId
+        )
+    }
+
+    private func addCursorAccount() {
+        guard let account = makeCursorAccountFromAddRow() else { return }
+        cursorAccounts.append(account)
+        persistCursorAccounts()
+    }
+
+    private func persistCursorAccounts() {
+        do {
+            try appState.setCursorAccounts(cursorAccounts, for: "cursor")
+            tokenSaveMessage = cursorAccounts.isEmpty ? nil : "已保存 \(cursorAccounts.count) 个 Cursor 账号"
+        } catch {
+            tokenSaveMessage = "保存失败: \(error.localizedDescription)"
         }
     }
 

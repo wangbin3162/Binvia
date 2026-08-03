@@ -9,24 +9,7 @@ public enum CursorProviderDescriptor {
             authType: .apiKey
         ),
         baseURL: URL(string: "https://api.cursor.com/v1"),
-        models: [
-            Model(id: "claude-4.5-sonnet", name: "Claude 4.5 Sonnet", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-4.5-sonnet-thinking", name: "Claude 4.5 Sonnet Thinking", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-sonnet-5-medium", name: "Claude Sonnet 5 Medium", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-sonnet-5-high", name: "Claude Sonnet 5 High", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-opus-4-8-medium", name: "Claude Opus 4.8 Medium", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-opus-4-8-high", name: "Claude Opus 4.8 High", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "claude-opus-4-8-max", name: "Claude Opus 4.8 Max", contextLength: 200_000, supportsReasoning: true),
-            Model(id: "gpt-5.2", name: "GPT 5.2", contextLength: 400_000, supportsReasoning: true),
-            Model(id: "gpt-5.4-medium", name: "GPT 5.4 Medium", contextLength: 400_000, supportsReasoning: true),
-            Model(id: "gpt-5.4-high", name: "GPT 5.4 High", contextLength: 400_000, supportsReasoning: true),
-            Model(id: "gpt-5.5-medium", name: "GPT 5.5 Medium", contextLength: 400_000, supportsReasoning: true),
-            Model(id: "gpt-5.5-high", name: "GPT 5.5 High", contextLength: 400_000, supportsReasoning: true),
-            Model(id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", contextLength: 1_000_000, supportsReasoning: true),
-            Model(id: "gemini-3-flash", name: "Gemini 3 Flash", contextLength: 1_000_000, supportsReasoning: true),
-            Model(id: "grok-4.3", name: "Grok 4.3", contextLength: 1_000_000, supportsReasoning: true),
-            Model(id: "kimi-k2.5", name: "Kimi K2.5", contextLength: 200_000, supportsReasoning: true),
-        ],
+        models: CursorModels.all,
         supportsStreaming: true,
         modelsURL: URL(string: "https://api.cursor.com/v1/models"),
         forceStream: false,
@@ -44,7 +27,7 @@ public enum CursorProviderDescriptor {
 ///   调用 `https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`。
 ///   上游二进制帧在 provider 内转换成 OpenAI SSE（客户端 `stream=true` 透传；`stream=false`
 ///   由 `SSEJSONAggregator` 聚合成 JSON）。令牌约 24h 轮换，由 `CursorCredentialStore` 实时读取。
-///   模型目录为 Cursor 实际模型 ID（参考 OmniRoute cursor 注册表）；命名模型需 Pro/Max 套餐，
+///   模型目录为 Cursor 实际模型 ID（同步 OmniRoute cursor 注册表，见 `CursorModels`）；命名模型需 Pro/Max 套餐，
 ///   免费套餐上游会拒绝。设置 `CURSOR_DEBUG=1` 可输出上游帧调试日志到 stderr。
 ///
 /// 认证解析顺序：`credential.apiKey` → `CURSOR_API_KEY` → Cursor IDE 自动发现。
@@ -96,12 +79,24 @@ public struct CursorProvider: Provider {
         rawBody: Data?,
         credential: ProviderCredential?
     ) async throws -> AsyncThrowingStream<Data, Error> {
+        // 1. 手动导入账号（GUI「Cursor 账号」保存的 token + machineId）优先。
+        if let token = credential?.accessToken, !token.isEmpty {
+            let machineId = credential?.machineId
+            let identity = CursorIDEIdentity(accessToken: token, machineId: machineId, expiresAt: nil)
+            let messages = extractMessages(request: request, rawBody: rawBody)
+            let rpcBody = CursorChatRequestEncoder.makeBody(messages: messages, model: request.model)
+            let upstream = makeIDERequest(body: rpcBody, identity: identity)
+            let sseStream = Self.rpcSSEStream(for: upstream, model: request.model)
+            return Self.aggregateIfNeeded(request: request, sseStream: sseStream)
+        }
+
+        // 2. API Key 模式（官方公开 REST）。
         if let key = resolveAPIKey(credential) {
             let body = try makeBody(request: request, rawBody: rawBody)
             return ProviderHTTPClient.shared.stream(for: makePublicRequest(key: key, body: body))
         }
 
-        // IDE 模式：读 Cursor IDE 令牌 → 私有 protobuf RPC → SSE
+        // 3. IDE 模式：读 Cursor IDE 令牌 → 私有 protobuf RPC → SSE
         guard let identity = await CursorCredentialStore.shared.identity() else {
             throw ProviderError.missingCredentials(
                 "Cursor：未配置 CURSOR_API_KEY，且未检测到 Cursor IDE 登录（请先登录 Cursor IDE，或设置 CURSOR_API_KEY）"
@@ -127,6 +122,49 @@ public struct CursorProvider: Provider {
             }
         }
         return sseStream
+    }
+
+    /// 非流式客户端把 SSE 聚合成 OpenAI 单 JSON（手动导入账号分支复用 IDE 的聚合逻辑）。
+    private static func aggregateIfNeeded(request: ChatRequest, sseStream: AsyncThrowingStream<Data, Error>) -> AsyncThrowingStream<Data, Error> {
+        if request.stream == false {
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let json = try await SSEJSONAggregator.aggregateChatCompletion(sseStream)
+                        continuation.yield(json)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+        return sseStream
+    }
+
+    // MARK: - listModels
+
+    /// 模型列表：API Key 模式走 OpenAI 兼容 `/v1/models` 动态获取（失败回退静态目录）；
+    /// IDE 模式直接返回官方静态目录（`CursorModels.all`，含 `auto`/`composer-*`）。
+    ///
+    /// 说明：Cursor 的模型目录是账号套餐相关的（Pro/Max 决定可用模型），且 IDE 私有端点
+    /// 没有公开的 `/v1/models`。OmniRoute 用 `cursor-agent --list-models` 同步静态目录；
+    /// 本机不一定装 cursor-agent，因此 IDE 模式以 `CursorModels.all` 为唯一来源，
+    /// 保证 `/v1/models` 与网关密钥白名单能看到完整模型（含 `cu/auto`）。
+    public func listModels(credential: ProviderCredential?) async throws -> [Model] {
+        if let key = resolveAPIKey(credential) {
+            let staticModels = CursorModels.all
+            guard let modelsURL = CursorProviderDescriptor.descriptor.modelsURL else {
+                return staticModels
+            }
+            return await Self.fetchDynamicModels(
+                id: id,
+                modelsURL: modelsURL,
+                staticModels: staticModels,
+                credential: ProviderCredential(apiKey: key)
+            )
+        }
+        return CursorModels.all
     }
 
     /// API Key 模式请求：与 OpenAIProvider 一致（Bearer + application/json）。
