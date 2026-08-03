@@ -27,9 +27,10 @@ struct MenuPanelView: View {
                 tabPicker
             }
             tabContent
-                // 限制内容区高度：MenuBarExtra 窗口会按内容理想尺寸撑高，
-                // 不设上限时 ScrollView 会把全部内容铺开导致窗口超出屏幕。
-                .frame(maxHeight: 480)
+                // 固定内容区高度：MenuBarExtra 窗口按内容理想尺寸撑窗口，
+                // ScrollView 的理想高度在 MenuBarExtra 中会被算成 0（maxHeight 只设上限不设下限，
+                // 会被压成 0），故用固定高度强制撑开，内容超出则内部滚动。
+                .frame(height: 440)
             Divider()
             footer
         }
@@ -49,18 +50,18 @@ struct MenuPanelView: View {
         }
     }
 
-    // MARK: - 顶部条（仅标题；操作按钮统一放底部 Footer）
+    // MARK: - 顶部条（Logo + 文字上下排列；操作按钮统一放底部 Footer）
 
     private var topBar: some View {
-        HStack(spacing: 6) {
+        VStack(spacing: 4) {
             Image(systemName: "bolt.shield")
+                .font(.system(size: 24, weight: .medium))
                 .foregroundStyle(.tint)
             Text("Binvia")
                 .font(.headline)
-            Spacer()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
     }
 
     // MARK: - 顶部 Provider 切换器（CodexBar 风格，超宽自动折行）
