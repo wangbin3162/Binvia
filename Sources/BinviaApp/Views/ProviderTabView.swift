@@ -26,7 +26,11 @@ struct ProviderTabView: View {
                     Divider()
                     actionSection(descriptor)
                 }
+                // 上报内容完整自然高度（放在 ScrollView 内容内部，取完整高度而非可视区）
+                .reportContentHeight()
             }
+            // 内容超出可滚动，但隐藏滚动条（含 AppKit 兜底，兼容 MenuBarExtra 窗口）
+            .hiddenScrollIndicators()
         }
     }
 

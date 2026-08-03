@@ -23,7 +23,7 @@ struct BinviaApp: App {
         MenuBarExtra("Binvia", systemImage: appState.statusIconName) {
             MenuPanelView()
                 .environmentObject(appState)
-                .frame(width: 340)
+                .frame(width: 320)
         }
         .menuBarExtraStyle(.window)
 

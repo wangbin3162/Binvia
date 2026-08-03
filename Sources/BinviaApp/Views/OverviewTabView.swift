@@ -17,10 +17,12 @@ struct OverviewTabView: View {
                 summaryCard
                 Divider()
                 providerHealthList
-                Divider()
-                gatewayKeysHint
             }
+            // 上报内容完整自然高度（放在 ScrollView 内容内部，取完整高度而非可视区）
+            .reportContentHeight()
         }
+        // 内容超出可滚动，但隐藏滚动条（含 AppKit 兜底，兼容 MenuBarExtra 窗口）
+        .hiddenScrollIndicators()
     }
 
     // MARK: - Summary 卡片
@@ -92,30 +94,7 @@ struct OverviewTabView: View {
         }
     }
 
-    // MARK: - 网关密钥提示（Phase 6.6：移除主面板 APIKeyManagerView 后的替代入口）
-
-    private var gatewayKeysHint: some View {
-        HStack(spacing: 6) {
-            Text("\(appState.config.apiKeys.count) 个网关密钥已配置")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Button("管理") {
-                openSettings(pane: .gatewayKeys)
-            }
-            .buttonStyle(.link)
-            .controlSize(.small)
-            .pointingHandCursor()
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
     private func openSettings(providerID: String) {
         SettingsWindowController.shared.show(appState: appState, pane: .provider(providerID))
-    }
-
-    private func openSettings(pane: SettingsPane) {
-        SettingsWindowController.shared.show(appState: appState, pane: pane)
     }
 }

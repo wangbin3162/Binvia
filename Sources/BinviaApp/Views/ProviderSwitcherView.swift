@@ -3,12 +3,12 @@ import BinviaCore
 
 /// 主面板顶部供应商切换器（对齐 CodexBar `ProviderSwitcherView`）：
 /// - 每个 segment = 品牌图标 + 名称，按自然宽度排布；
-/// - 超出面板宽度自动折行（`LazyVGrid` adaptive 列），替代会被压缩的 `Picker(.segmented)`；
+/// - 一排最多 4 个（`LazyVGrid` 固定 4 列，超出自动折行，末行不足靠左），替代会被压缩的 `Picker(.segmented)`；
 /// - 选中态 = accent 背景 + 白字，悬停态 = 淡灰背景（CodexBar 同款配色）。
 ///
 /// 实现说明：早期版本用自定义 `FlowLayout`（`Layout` 协议），在 `ImageRenderer` 中可正常折行，
 /// 但在 `MenuBarExtra` 真实窗口里 `ForEach` 子视图不会被 `placeSubviews` 放置（SwiftUI 已知 quirks）。
-/// 改用标准 `LazyVGrid` + adaptive 列，行为一致且兼容真实窗口。
+/// 改用标准 `LazyVGrid` + 固定 4 列，行为一致且兼容真实窗口。
 struct ProviderSwitcherView: View {
     let providers: [ProviderDescriptor]
     @Binding var selection: String
@@ -17,7 +17,8 @@ struct ProviderSwitcherView: View {
 
     var body: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 56, maximum: 110), spacing: 4, alignment: .center)],
+            // 一排最多 4 个：固定 4 列，超出自动折行
+            columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 4),
             alignment: .leading,
             spacing: 4
         ) {
@@ -29,9 +30,8 @@ struct ProviderSwitcherView: View {
                     label: descriptor.displayName)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
+        // Tab 页签左右无额外内边距（贴齐整体面板内边距），仅保留下边距与分割线拉开
+        .padding(.bottom, 6)
     }
 
     /// 「概况」segment 图标：CodexBar 的 Overview 用网格图标，这里用 SF Symbol 对齐。
@@ -56,7 +56,7 @@ struct ProviderSwitcherView: View {
             VStack(spacing: 2) {
                 icon()
                 Text(label)
-                    .font(.system(size: 10))
+                    .font(.system(size: 9))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
