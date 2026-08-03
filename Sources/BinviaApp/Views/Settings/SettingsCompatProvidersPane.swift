@@ -122,12 +122,27 @@ struct SettingsCompatProvidersPane: View {
 
     private func editRow(_ def: CustomProviderDef) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
+            HStack(alignment: .bottom, spacing: 10) {
                 ProviderBrandIcon(providerID: def.id, size: 24)
-                TextField("名称", text: $editName)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Base URL", text: $editBaseURL)
-                    .textFieldStyle(.roundedBorder)
+                    .padding(.bottom, 4)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("供应商名称")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("", text: $editName, prompt: Text("例如 tokenhub"))
+                        .textFieldStyle(.roundedBorder)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Base URL")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("", text: $editBaseURL, prompt: Text("https://api.example.com/v1"))
+                        .textFieldStyle(.roundedBorder)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack {
                 Spacer()

@@ -2258,6 +2258,50 @@ func cursorModelsCatalogTests() async throws {
     }
 }
 
+func cursorUsageFetcherTests() async throws {
+    let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMyJ9.sig"
+    setenv("CURSOR_USAGE_URL", "https://mock.test/api/dashboard/get-current-period-usage", 1)
+    setenv("CURSOR_TOKEN", token, 1)
+    defer {
+        unsetenv("CURSOR_USAGE_URL")
+        unsetenv("CURSOR_TOKEN")
+    }
+
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(
+                request.url?.absoluteString,
+                "https://mock.test/api/dashboard/get-current-period-usage",
+                "Cursor 用量请求 URL")
+            expectEqual(
+                request.value(forHTTPHeaderField: "Cookie"),
+                "WorkosCursorSessionToken=user-123::\(token)",
+                "Cursor 用量 WorkOS Cookie")
+            expectEqual(request.value(forHTTPHeaderField: "Origin"), "https://cursor.com", "Cursor 用量 Origin")
+            expectEqual(request.value(forHTTPHeaderField: "Referer"), "https://cursor.com/dashboard/spending", "Cursor 用量 Referer")
+            expectEqual(requestBodyString(request), "{}", "Cursor 用量 POST body")
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = #"{"planUsage":{"totalPercentUsed":46.5,"autoPercentUsed":93,"apiPercentUsed":0,"totalSpend":93},"billingCycleEnd":1893456000000}"#
+            return (response, Data(body.utf8))
+        }
+
+        let snapshot = try await CursorUsageFetcher().fetchUsage(credential: ProviderCredential())
+        expectEqual(snapshot.providerID, "cursor", "Cursor 用量快照 providerID")
+        expectEqual(snapshot.quotaWindows.count, 3, "Cursor 用量含三个窗口")
+        expectEqual(snapshot.quotaWindows[0].label, "总用量", "Cursor 总用量窗口")
+        expectEqual(snapshot.quotaWindows[1].label, "Auto + Composer", "Cursor Auto + Composer 窗口")
+        expectEqual(snapshot.quotaWindows[2].label, "API", "Cursor API 窗口")
+        expectEqual(snapshot.quotaWindows[0].remainingFraction, 0.535, "Cursor 总用量剩余比例")
+        expectEqual(snapshot.quotaWindows[1].remainingFraction, 0.07, "Cursor Auto + Composer 剩余比例")
+        expectEqual(snapshot.quotaWindows[2].remainingFraction, 1.0, "Cursor API 剩余比例")
+        expectEqual(snapshot.quotaWindows[0].resetAt, Date(timeIntervalSince1970: 1_893_456_000), "Cursor 计费周期重置时间")
+    }
+}
+
 func cursorIDEModeTests() async throws {
     // IDE 模式：无 API key，走 CursorCredentialStore（CURSOR_TOKEN 注入）+ protobuf RPC 端点
     unsetenv("CURSOR_API_KEY")
@@ -2562,7 +2606,7 @@ func kimiUsageFetcherTests() async throws {
 // MARK: - 通用 OpenAI 兼容 Provider（自定义 provider，URLProtocol mock）
 
 /// `GenericOpenAIProvider` 集成测试：
-/// - listModels 返回带 `<id>/` 前缀的模型
+/// - listModels 返回不带 `<id>/` 前缀的模型，外层统一拼接
 /// - chat 透传 SSE、设置 Bearer 头、剥前缀后转发上游
 /// - 缺 key 抛 missingCredentials
 func genericOpenAIProviderTests() async throws {
@@ -2578,9 +2622,9 @@ func genericOpenAIProviderTests() async throws {
         models: ["glm-5.2"]
     )
 
-    // 1) listModels 返回带前缀的模型
+    // 1) listModels 返回不带前缀的模型，避免外层拼接成双重前缀
     let models = try await provider.listModels(credential: nil)
-    expectEqual(models.map(\.id), ["unisound/glm-5.2"], "GenericOpenAIProvider listModels 带前缀")
+    expectEqual(models.map(\.id), ["glm-5.2"], "GenericOpenAIProvider listModels 不带前缀")
 
     // 2) chat 缺 key 抛 missingCredentials
     await expectThrows({
@@ -2619,6 +2663,26 @@ func genericOpenAIProviderTests() async throws {
 
     // URL 应为 <baseURL>/chat/completions
     expectEqual(captured.url?.absoluteString, "https://mock.test/v1/chat/completions", "GenericOpenAIProvider chat URL")
+
+    // 兼容用户误填完整 `/chat/completions` 的 Base URL，不应追加第二次。
+    let fullPathProvider = GenericOpenAIProvider(
+        id: "unisound",
+        baseURL: URL(string: "https://mock.test/v1/chat/completions")!,
+        models: ["glm-5.2"]
+    )
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        captured.url = request.url
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data(sse.utf8))
+    }
+    let fullPathStream = try await fullPathProvider.chat(
+        request: request, rawBody: nil, credential: ProviderCredential(apiKey: "sk-test"))
+    for try await chunk in fullPathStream { _ = chunk }
+    expectEqual(captured.url?.absoluteString, "https://mock.test/v1/chat/completions", "完整 chat URL 兼容归一化")
 
     // 请求体里 model 应剥前缀（glm-5.2，不带 unisound/）
     if let body = captured.body,
@@ -2662,7 +2726,7 @@ func genericOpenAIProviderTests() async throws {
     let dupModels = try await dupProvider.listModels(credential: nil)
     expectEqual(
         dupModels.map(\.id),
-        ["unisound/glm-5.2", "unisound/glm-5.2-flash"],
+        ["glm-5.2", "glm-5.2-flash"],
         "GenericOpenAIProvider 构造时归一化双重前缀模型名"
     )
 
@@ -2795,18 +2859,26 @@ func customProviderConfigCodecTests() throws {
     expectEqual(decoded.customProviderDef(for: "unisound")?.baseURL, "https://api.unisound.com/v1", "编解码后 baseURL 保留")
     expectEqual(decoded.customProviderDef(for: "unisound")?.models, ["glm-5.2", "glm-5.2-flash"], "编解码后 models 保留")
 
-    // 2) 旧配置（无 customProviderDefs 字段）解码后回退空数组
+    // 2) 真实 ConfigStore snake_case 持久化：base_url 不能因 acronym 解码失败而丢失整个配置。
+    let configPath = NSTemporaryDirectory() + "binvia-config-codec-\(UUID().uuidString).json"
+    defer { try? FileManager.default.removeItem(atPath: configPath) }
+    try ConfigStore.save(config, to: configPath)
+    let persisted = try ConfigStore.load(path: configPath)
+    expectEqual(persisted.customProviderDef(for: "unisound")?.baseURL, "https://api.unisound.com/v1", "ConfigStore base_url 解码")
+    expectEqual(persisted.customProviderDef(for: "unisound")?.models, ["glm-5.2", "glm-5.2-flash"], "ConfigStore models 保留")
+
+    // 3) 旧配置（无 customProviderDefs 字段）解码后回退空数组
     let legacyJSON = Data(#"{"version":2,"host":"localhost","port":20427,"apiKeys":[],"providers":{}}"#.utf8)
     let legacy = try JSONDecoder().decode(RouteConfig.self, from: legacyJSON)
     expectEqual(legacy.customProviderDefs, [], "旧配置无 customProviderDefs 字段时回退空数组")
 
-    // 3) slug 生成
+    // 4) slug 生成
     expectEqual(CustomProviderDef.slug(for: "Unisound"), "unisound", "slug 基本生成")
     expectEqual(CustomProviderDef.slug(for: "My Provider!"), "my-provider", "slug 非字母数字替换为连字符")
     expectEqual(CustomProviderDef.slug(for: "我的API"), "api", "slug 非 ASCII 字母被剔除")
     expectEqual(CustomProviderDef.slug(for: "==="), "custom", "slug 全空回退 custom")
 
-    // 4) uniqueSlug 冲突追加序号
+    // 5) uniqueSlug 冲突追加序号
     expectEqual(
         CustomProviderDef.uniqueSlug(for: "openai", excluding: ["openai", "openai-2"]),
         "openai-3",
@@ -2992,6 +3064,7 @@ await run("codex 集成（URLProtocol mock）", codexIntegrationTests)
 await run("cursor 集成（URLProtocol mock）", cursorIntegrationTests)
 await run("Cursor IDE 凭据发现", cursorCredentialStoreTests)
 await run("Cursor 官方模型目录", cursorModelsCatalogTests)
+await run("Cursor 用量查询（URLProtocol mock）", cursorUsageFetcherTests)
 await run("cursor IDE 模式（URLProtocol mock）", cursorIDEModeTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)

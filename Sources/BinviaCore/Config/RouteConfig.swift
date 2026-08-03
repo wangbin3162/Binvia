@@ -127,6 +127,36 @@ public struct CustomProviderDef: Codable, Sendable, Equatable {
         self.models = models
     }
 
+    /// `baseURL` 是 acronym 字段：Swift 的 convertFromSnakeCase 会把 `base_url`
+    /// 转成 `baseUrl`，不能依赖默认 CodingKeys 的 `baseURL` 匹配。
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case baseURL = "baseUrl"
+        case legacyBaseURL = "baseURL"
+        case models
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        if let value = try container.decodeIfPresent(String.self, forKey: .baseURL) {
+            baseURL = value
+        } else {
+            baseURL = try container.decode(String.self, forKey: .legacyBaseURL)
+        }
+        models = try container.decodeIfPresent([String].self, forKey: .models) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(models, forKey: .models)
+    }
+
     /// 由 displayName 生成 ASCII slug：小写 → 非 `[a-z0-9]` 替换为 `-` → 折叠连续 `-` → 去首尾 `-`。
     /// 全部为非 ASCII 字符时回退为 `custom`。
     public static func slug(for displayName: String) -> String {

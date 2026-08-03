@@ -60,15 +60,46 @@ final class AppState: ObservableObject {
     private var usageRefreshTimer: Timer?
     private var oauthRefreshTimer: Timer?
     private var codeContinuation: CheckedContinuation<String, Error>?
+    /// 配置读取失败时保留错误状态，禁止后续用空配置覆盖磁盘原配置。
+    private let configLoadError: String?
+
+    private enum ConfigurationError: Error, LocalizedError {
+        case loadFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .loadFailed(let message): return message
+            }
+        }
+    }
 
     // MARK: - 初始化
 
     init(initialConfig: RouteConfig? = nil, configPath: String? = nil) {
         let resolvedPath = configPath ?? ConfigStore.defaultPath()
         self.configPath = resolvedPath
-        // 注意：`try?` 是 autoclosure，不能引用 self（config 尚未初始化），故先取局部变量
-        let loaded = initialConfig ?? (try? ConfigStore.load(path: resolvedPath)) ?? RouteConfig()
+
+        let loaded: RouteConfig
+        let loadError: String?
+        if let initialConfig {
+            loaded = initialConfig
+            loadError = nil
+        } else {
+            do {
+                loaded = try ConfigStore.load(path: resolvedPath)
+                loadError = nil
+            } catch {
+                // 不再静默吞掉错误后使用空配置：空配置一旦保存，会覆盖用户原有模型/凭据。
+                loaded = RouteConfig()
+                loadError = error.localizedDescription
+                print("[Binvia] 配置加载失败，已阻止保存空配置：\(error.localizedDescription)")
+            }
+        }
         self.config = loaded
+        self.configLoadError = loadError
+        if let loadError {
+            self.serverError = "配置加载失败，未覆盖原配置：\(loadError)"
+        }
         ProviderCatalog.registerAll()
         ProviderCatalog.registerCustomProviders(from: loaded)
     }
@@ -77,6 +108,7 @@ final class AppState: ObservableObject {
 
     func startServer() throws {
         guard server == nil else { return }
+        try ensureConfigurationLoaded()
         ProviderCatalog.registerAll()
         ProviderCatalog.registerCustomProviders(from: config)
         do {
@@ -128,9 +160,18 @@ final class AppState: ObservableObject {
     // MARK: - 配置保存与热更新
 
     /// 保存配置到磁盘，并在服务器运行中即时替换 handler（无需重启）。
+    /// 配置初始加载失败时禁止保存，避免空配置覆盖用户原文件。
     func saveConfig() throws {
+        try ensureConfigurationLoaded()
         try ConfigStore.save(config, to: configPath)
         applyConfigHotReload()
+    }
+
+    private func ensureConfigurationLoaded() throws {
+        guard let configLoadError else { return }
+        throw ConfigurationError.loadFailed(
+            "配置文件加载失败，已阻止覆盖原配置：\(configLoadError)"
+        )
     }
 
     func applyConfigHotReload() {
@@ -365,7 +406,10 @@ final class AppState: ObservableObject {
     func addCustomModel(providerID: String, model: String) throws {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = "\(providerID)/"
-        let clean = trimmed.hasPrefix(prefix) ? String(trimmed.dropFirst(prefix.count)) : trimmed
+        var clean = trimmed
+        while clean.hasPrefix(prefix) {
+            clean = String(clean.dropFirst(prefix.count))
+        }
         guard !clean.isEmpty,
               let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
         guard !config.customProviderDefs[idx].models.contains(clean) else { return }

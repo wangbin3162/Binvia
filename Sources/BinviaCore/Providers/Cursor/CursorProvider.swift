@@ -13,6 +13,7 @@ public enum CursorProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://api.cursor.com/v1/models"),
         forceStream: false,
+        usageFetcherFactory: { CursorUsageFetcher() },
         makeProvider: { CursorProvider() }
     )
 }

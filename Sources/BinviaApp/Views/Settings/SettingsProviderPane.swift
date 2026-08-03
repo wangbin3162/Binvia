@@ -169,13 +169,18 @@ struct SettingsProviderPane: View {
 
     @ViewBuilder
     private func connectionSection(_ descriptor: ProviderDescriptor) -> some View {
-        switch descriptor.metadata.authType {
-        case .apiKey, .localProbe:
-            apiKeyConnectionSection
-        case .deviceFlow:
-            deviceFlowConnectionSection
-        case .oauth:
-            oauthConnectionSection
+        if providerID == "cursor" {
+            // Cursor 使用 IDE 登录态 / 手动导入账号，不在这里展示容易误导的 API 令牌输入区。
+            EmptyView()
+        } else {
+            switch descriptor.metadata.authType {
+            case .apiKey, .localProbe:
+                apiKeyConnectionSection
+            case .deviceFlow:
+                deviceFlowConnectionSection
+            case .oauth:
+                oauthConnectionSection
+            }
         }
     }
 
@@ -300,7 +305,7 @@ struct SettingsProviderPane: View {
             } header: {
                 Text("Cursor IDE 接入")
             } footer: {
-                Text("无需 API Key：请求时自动读取 Cursor IDE 的登录令牌（约 24h 轮换）。也可在下方用 API Key 手动配置作兜底。")
+                Text("请求时自动读取 Cursor IDE 的登录令牌（约 24h 轮换）；也可在上方手动导入 Cursor 账号。")
             }
         }
     }
@@ -614,8 +619,8 @@ struct SettingsProviderPane: View {
 
     // MARK: - 自定义 Provider 模型列表（可编辑）
 
-    /// 自定义 provider 的模型列表（从 config 直接派生，带 `<id>/` 前缀）。响应式，无需 async 加载。
-    /// 归一化：config 中的模型名若已带前缀（历史/误输入），先剥掉再统一加一次，避免双重前缀。
+    /// 自定义 provider 的模型列表（从 config 直接派生，只显示原始模型名）。响应式，无需 async 加载。
+    /// 归一化：config 中的模型名若已带前缀（历史/误输入），先剥掉全部前缀。
     private var customModels: [Model] {
         let def = appState.customProviderDef(for: providerID)
         let prefix = "\(providerID)/"
@@ -624,7 +629,7 @@ struct SettingsProviderPane: View {
             while clean.hasPrefix(prefix) {
                 clean = String(clean.dropFirst(prefix.count))
             }
-            return Model(id: "\(providerID)/\(clean)")
+            return Model(id: clean)
         } ?? []
     }
 
@@ -637,7 +642,7 @@ struct SettingsProviderPane: View {
 
             // 添加模型行
             HStack(spacing: 8) {
-                TextField("模型名", text: $newModelName)
+                TextField("模型名（不含 provider/ 前缀）", text: $newModelName)
                     .textFieldStyle(.roundedBorder)
                     .font(.footnote)
                     .onSubmit { addCustomModel() }
@@ -661,7 +666,7 @@ struct SettingsProviderPane: View {
         } header: {
             Text("模型列表")
         } footer: {
-            Text("模型以 \(providerID)/<model> 形式调用。点击「测试」发送最小请求验证连通。")
+            Text("这里只填写原始模型名，例如 glm-5.2，不要填写 \(providerID)/glm-5.2；调用时系统会自动补上 provider 前缀。")
         }
     }
 
@@ -693,7 +698,7 @@ struct SettingsProviderPane: View {
                     .font(.footnote)
                 Text(msg).font(.caption2).foregroundStyle(.red)
             case .idle:
-                Button("测试") { startModelTest(model.id) }
+                Button("测试") { startModelTest("\(providerID)/\(model.id)", resultKey: model.id) }
                     .buttonStyle(.link)
                     .controlSize(.small)
                     .pointingHandCursor()
@@ -740,7 +745,7 @@ struct SettingsProviderPane: View {
                 .truncationMode(.middle)
         }
         LabeledContent("认证方式") {
-            Text(authTypeLabel(descriptor.metadata.authType))
+            Text(providerID == "cursor" ? "Cursor IDE 登录" : authTypeLabel(descriptor.metadata.authType))
                 .foregroundStyle(.secondary)
         }
         LabeledContent("已配置") {
@@ -947,15 +952,16 @@ struct SettingsProviderPane: View {
         }
     }
 
-    private func startModelTest(_ modelID: String) {
-        modelTestResults[modelID] = .testing
+    private func startModelTest(_ modelID: String, resultKey: String? = nil) {
+        let key = resultKey ?? modelID
+        modelTestResults[key] = .testing
         Task {
             await appState.testModel(modelID, for: providerID)
             // appState.testModel 把结果写到 testStates，我们同步一份到本地
             if let state = appState.testStates[providerID] {
                 switch state {
-                case .ok(let msg): modelTestResults[modelID] = .ok(msg)
-                case .failed(let msg): modelTestResults[modelID] = .failed(msg)
+                case .ok(let msg): modelTestResults[key] = .ok(msg)
+                case .failed(let msg): modelTestResults[key] = .failed(msg)
                 default: break
                 }
             }

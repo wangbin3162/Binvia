@@ -4,25 +4,40 @@ import Foundation
 ///
 /// 与内置 `OpenAIProvider` 的差异：
 /// - `baseURL`/`models` 在构造时由 config 注入（不读 env、不读静态目录）；
-/// - 模型 id 在 `listModels` 输出时**带 provider 前缀**（`unisound/glm-5.2`），
-///   便于客户端复制 `/v1/models` 结果直接调用；`chat` 内部剥前缀后转发上游；
+/// - `listModels` 返回**不带 provider 前缀**的模型 id；前缀由 `/v1/models`、模型白名单和 UI 统一拼接，避免重复；
+/// - `chat` 兼容接收带前缀或重复前缀的模型名，并在转发上游前剥除；
 /// - 单 key（无轮换）；`Authorization: Bearer <key>`。
 ///
 /// 路由：客户端发送 `<id>/<model>` → Router Stage 1 解析为 `(providerID: <id>, modelID: <model>)`
 /// → `RouteHandler` 调本 provider 的 `chat`，`makeBody` 再保险地剥一次前缀后转发上游。
-/// `testModel` 传带前缀的 model id，`chat` 同样剥前缀，故两条入口统一处理。
+/// `testModel` 可能传带前缀的 model id，`chat` 同样剥前缀，故两条入口统一处理。
 public struct GenericOpenAIProvider: Provider {
     public let id: String
     private let baseURL: URL
-    private let prefixedModels: [Model]
+    private let models: [Model]
 
     public init(id: String, baseURL: URL, models: [String]) {
         self.id = id
-        self.baseURL = baseURL
-        // 归一化：模型名去掉可能已存在的 `<id>/` 前缀后再统一加一次，避免 `/v1/models` 输出双重前缀。
-        self.prefixedModels = models.map { raw in
-            Model(id: "\(id)/\(Self.stripRepeatedPrefix(raw, id: id))")
+        self.baseURL = Self.normalizeBaseURL(baseURL)
+        // 归一化：配置只保存原始模型名；兼容历史配置中已经带有一个或多个前缀的情况。
+        self.models = models.map { raw in
+            Model(id: Self.stripRepeatedPrefix(raw, id: id))
         }
+    }
+
+    /// 兼容用户把完整 `/chat/completions` 地址填进 Base URL 的历史配置。
+    /// Provider 内部始终以 `/chat/completions` 作为统一追加路径。
+    private static func normalizeBaseURL(_ url: URL) -> URL {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let suffix = "/chat/completions"
+        if var path = components?.path {
+            while path.hasSuffix("/") { path.removeLast() }
+            if path.hasSuffix(suffix) {
+                path.removeLast(suffix.count)
+                components?.path = path.isEmpty ? "/" : path
+            }
+        }
+        return components?.url ?? url
     }
 
     /// 去掉全部 `<id>/` 前缀（若存在）。兼容路由已剥前缀、testModel 传带前缀、以及用户误存双重前缀三种入口。
@@ -76,8 +91,9 @@ public struct GenericOpenAIProvider: Provider {
         return ProviderHTTPClient.shared.stream(for: upstream)
     }
 
-    /// 直接返回构造时注入的带前缀模型列表。不走 ModelCache / 不拉上游（用户手动维护）。
+    /// 直接返回构造时注入的不带前缀模型列表。不走 ModelCache / 不拉上游（用户手动维护）。
+    /// 外层统一拼接 `<provider>/<model>`，因此这里不能返回带 provider 前缀的 id。
     public func listModels(credential: ProviderCredential?) async throws -> [Model] {
-        prefixedModels
+        models
     }
 }
