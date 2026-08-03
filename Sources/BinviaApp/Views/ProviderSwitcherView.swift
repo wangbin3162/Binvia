@@ -17,7 +17,7 @@ struct ProviderSwitcherView: View {
 
     var body: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 72, maximum: 160), spacing: 4, alignment: .leading)],
+            columns: [GridItem(.adaptive(minimum: 64, maximum: 120), spacing: 4, alignment: .center)],
             alignment: .leading,
             spacing: 4
         ) {
@@ -25,7 +25,7 @@ struct ProviderSwitcherView: View {
             ForEach(providers, id: \.id) { descriptor in
                 switchButton(
                     id: descriptor.id,
-                    icon: { ProviderBrandIcon(providerID: descriptor.id, size: 14, tint: tint(for: descriptor.id)) },
+                    icon: { ProviderBrandIcon(providerID: descriptor.id, size: 18, tint: tint(for: descriptor.id)) },
                     label: descriptor.displayName)
             }
         }
@@ -36,8 +36,8 @@ struct ProviderSwitcherView: View {
     /// 「概况」segment 图标：CodexBar 的 Overview 用网格图标，这里用 SF Symbol 对齐。
     private var overviewIcon: some View {
         Image(systemName: "square.grid.2x2")
-            .font(.system(size: 12, weight: .medium))
-            .frame(width: 14, height: 14)
+            .font(.system(size: 16, weight: .medium))
+            .frame(width: 18, height: 18)
             .foregroundStyle(tint(for: "overview") ?? .secondary)
     }
 
@@ -51,16 +51,17 @@ struct ProviderSwitcherView: View {
         return Button {
             selection = id
         } label: {
-            HStack(spacing: 5) {
+            // 图标在上、文字在下（CodexBar stacked icon 风格）
+            VStack(spacing: 3) {
                 icon()
                 Text(label)
-                    .font(.caption)
+                    .font(.caption2)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(background(isSelected: isSelected, isHovered: hoveredID == id))

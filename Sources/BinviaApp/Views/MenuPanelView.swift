@@ -3,8 +3,8 @@ import SwiftUI
 
 /// 菜单栏弹出面板主视图（Phase 23.5 重构 + 本期主面板调整）。
 ///
-/// 信息架构：TopBar（标题）→ 顶部 ProviderSwitcherView（概况 + 已配置 provider，
-/// 对齐 CodexBar 多行换行切换器）→ 内容区（Overview 概况 Tab + 每个已配置 provider 的详情 Tab）
+/// 信息架构：顶部 ProviderSwitcherView（概况 + 已配置 provider，对齐 CodexBar 多行换行切换器）
+/// → 内容区（Overview 概况 Tab + 每个已配置 provider 的详情 Tab）
 /// → 底部 Footer（网关密钥 / 设置 / 退出，对齐 CodexBar meta section）。
 ///
 /// 注意：`MenuBarExtra(.window)` 中不能可靠使用 `SettingsLink`（窗口打不开）与 `.sheet`
@@ -22,7 +22,6 @@ struct MenuPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
             if !appState.configuredProviders.isEmpty {
                 tabPicker
             }
@@ -48,20 +47,6 @@ struct MenuPanelView: View {
                 selectedTab = "overview"
             }
         }
-    }
-
-    // MARK: - 顶部条（Logo + 文字上下排列；操作按钮统一放底部 Footer）
-
-    private var topBar: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "bolt.shield")
-                .font(.system(size: 24, weight: .medium))
-                .foregroundStyle(.tint)
-            Text("Binvia")
-                .font(.headline)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
     }
 
     // MARK: - 顶部 Provider 切换器（CodexBar 风格，超宽自动折行）
