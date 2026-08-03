@@ -25,7 +25,7 @@ struct ServerStatusView: View {
                 // 服务地址 + 复制按钮
                 HStack(spacing: 6) {
                     Text(appState.isServerRunning ? address : "服务已停止")
-                        .font(.system(.body, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .monospaced()
                         .foregroundStyle(appState.isServerRunning ? .primary : .secondary)
                     if appState.isServerRunning {
