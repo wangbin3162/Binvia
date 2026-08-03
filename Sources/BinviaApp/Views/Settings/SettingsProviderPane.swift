@@ -247,7 +247,6 @@ struct SettingsProviderPane: View {
                         Text(region.displayName).tag(region.id)
                     }
                 }
-                Divider()
             }
 
             if draftKeys.isEmpty {

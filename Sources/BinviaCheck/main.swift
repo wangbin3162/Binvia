@@ -1536,6 +1536,56 @@ func deepSeekUsageFetcherTests() async throws {
     await expectThrows({
         _ = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential())
     }, "DeepSeek 无凭据抛 missingCredentials")
+
+    // 4) 带标签令牌：余额展示用户配置的标签而非掩码（用量卡更直观）
+    try await withGlobalURLProtocolMock {
+        setenv("DEEPSEEK_BASE_URL", "https://mock.test/v1", 1)
+        let labeled = RouteConfig(
+            providers: [
+                "deepseek": ProviderConfig(
+                    enabled: true,
+                    credential: ProviderCredential(),
+                    apiKeys: [
+                        KeyedToken(label: "主 Key", value: "sk-label-key"),
+                        KeyedToken(label: "备用 Key", value: "sk-backup-key"),
+                    ]
+                ),
+            ]
+        )
+        try ConfigStore.save(labeled)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"12.34"}]}"#.utf8))
+        }
+        let snapshot = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential())
+        expectEqual(snapshot.balances.count, 2, "带标签令牌逐 Key 展示余额")
+        let labels = snapshot.balances.map(\.label)
+        expectEqual(labels, ["主 Key", "备用 Key"], "用量卡展示用户配置的令牌标签")
+        expectEqual(snapshot.balances.first?.balance, Decimal(string: "12.34"), "标签令牌余额解析")
+
+        // 5) 真实链路：AppState 会把 config 首个 apiKey 填充进 credential.apiKey，
+        //    同 value 时必须优先展示配置标签而非掩码（用户反馈 sk-ed65... 未显示标签的回归）
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"5.67"}]}"#.utf8))
+        }
+        let snapshot2 = try await DeepSeekUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "sk-label-key"))
+        // AppState 用 config.credential(for:) 取凭据：会把 config 首个 apiKey 填充进 credential.apiKey。
+        // 同 value 时按值去重，展示配置标签（主 Key / 备用 Key），而不是掩码。
+        expectEqual(snapshot2.balances.count, 2, "config 两令牌均展示（credential 同 value 去重）")
+        expectEqual(snapshot2.balances.first?.label, "主 Key", "credential 与 config 同 value 时展示配置标签而非掩码")
+        expectEqual(snapshot2.balances.last?.label, "备用 Key", "第二个令牌标签保留")
+        // 清理：删掉临时 config，避免影响后续测试
+        try? FileManager.default.removeItem(atPath: ConfigStore.defaultPath())
+    }
 }
 
 func antigravityUsageFetcherTests() async throws {
@@ -1575,7 +1625,8 @@ func antigravityUsageFetcherTests() async throws {
                 return (response, Data(#"{"buckets":[{"modelId":"gemini-3.6-flash-high","remainingFraction":0.6,"resetTime":"2026-08-01T00:00:00Z"},{"modelId":"claude-sonnet-4-6"}]}"#.utf8))
             }
             if path == "/v1internal:retrieveUserQuotaSummary" {
-                return (response, Data(#"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"weekly","displayName":"Weekly","remainingFraction":0.4,"resetTime":"2026-08-07T00:00:00Z"}]}]}"#.utf8))
+                // 两组周窗口 + 一个 5h 窗口：只应保留 Gemini / Claude+GPT 两个周用量
+                return (response, Data(#"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"weekly","displayName":"Weekly","remainingFraction":0.4,"resetTime":"2026-08-07T00:00:00Z"}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"weekly","displayName":"Weekly","remainingFraction":0.7,"resetTime":"2026-08-07T00:00:00Z"}]},{"displayName":"OpenRouter 5h","buckets":[{"bucketId":"5h","displayName":"5h","remainingFraction":0.5}]}]}"#.utf8))
             }
             return (response, Data("not found".utf8))
         }
@@ -1585,23 +1636,21 @@ func antigravityUsageFetcherTests() async throws {
         expectEqual(snapshot.balance, nil, "Antigravity 无余额字段")
         expectNil(snapshot.error, "Antigravity 成功快照无 error")
 
-        // modelQuotas
-        expectEqual(snapshot.modelQuotas.count, 1, "retrieveUserQuota 只解析带 remainingFraction 的 bucket")
-        if let quota = snapshot.modelQuotas.first {
-            expectEqual(quota.modelID, "gemini-3.6-flash-high", "ModelQuota modelID")
-            expectEqual(quota.remainingFraction, 0.6, "ModelQuota remainingFraction")
-            expectFalse(quota.unlimited, "有 resetTime 时非 unlimited")
-            expectEqual(quota.remainingPercentage, 60, "ModelQuota remainingPercentage")
+        // 用量展示只保留两个核心周用量（Gemini / Claude+GPT），per-model 配额不再展示
+        expectEqual(snapshot.modelQuotas.count, 0, "Antigravity 不再展示 per-model 配额")
+        expectEqual(snapshot.quotaWindows.count, 2, "只保留两个核心周用量窗口")
+        if let gemini = snapshot.quotaWindows.first(where: { $0.label == "Gemini Models Weekly" }) {
+            expectEqual(gemini.remainingFraction, 0.4, "Gemini Models Weekly remainingFraction")
+            expectEqual(gemini.total, 1000, "Gemini Models Weekly 归一化 total=1000")
+            expectEqual(gemini.used, 600, "Gemini Models Weekly 归一化 used=600")
+            expectEqual(gemini.remainingPercentage, 40, "Gemini Models Weekly remainingPercentage")
+        } else {
+            expectTrue(false, "缺失 Gemini Models Weekly 窗口")
         }
-
-        // quotaWindows
-        expectEqual(snapshot.quotaWindows.count, 1, "retrieveUserQuotaSummary 解析出 weekly 窗口")
-        if let window = snapshot.quotaWindows.first {
-            expectEqual(window.label, "Gemini Models Weekly", "QuotaWindow label")
-            expectEqual(window.remainingFraction, 0.4, "QuotaWindow remainingFraction")
-            expectEqual(window.total, 1000, "QuotaWindow 归一化 total=1000")
-            expectEqual(window.used, 600, "QuotaWindow 归一化 used=600")
-            expectEqual(window.remainingPercentage, 40, "QuotaWindow remainingPercentage")
+        if let claude = snapshot.quotaWindows.first(where: { $0.label == "Claude and GPT models Weekly" }) {
+            expectEqual(claude.remainingFraction, 0.7, "Claude and GPT models Weekly remainingFraction")
+        } else {
+            expectTrue(false, "缺失 Claude and GPT models Weekly 窗口")
         }
     }
 
@@ -1634,8 +1683,7 @@ func antigravityUsageFetcherTests() async throws {
         }
         let snapshot = try await AntigravityUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "mock-token"))
         expectEqual(snapshot.quotaWindows, [], "RPC 2 失败时 quotaWindows 为空")
-        expectEqual(snapshot.modelQuotas.count, 1, "RPC 2 失败不影响 modelQuotas")
-        expectTrue(snapshot.modelQuotas[0].unlimited, "resetTime null + fraction>=1 视为 unlimited")
+        expectEqual(snapshot.modelQuotas.count, 0, "RPC 2 失败时 modelQuotas 仍不展示")
     }
 }
 

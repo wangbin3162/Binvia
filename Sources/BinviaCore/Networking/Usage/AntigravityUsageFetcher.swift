@@ -79,15 +79,17 @@ public struct AntigravityUsageFetcher: ProviderUsageFetcher {
             quotaWindows = Self.parseQuotaWindows(from: summaryJSON)
         }
 
-        // 5. 组装快照：rawJSON 合并两个 RPC 的原始文本
+        // 5. 组装快照：rawJSON 合并两个 RPC 的原始文本。
+        //    用量展示只保留两个核心周用量（Gemini / Claude+GPT），其余窗口与 per-model 配额不展示。
+        let keptWindows = Self.filterCoreWeeklyWindows(quotaWindows)
         var raw = quotaText
         if !summaryText.isEmpty {
             raw = raw.isEmpty ? summaryText : "\(raw)\n\n\(summaryText)"
         }
         return ProviderUsageSnapshot(
             providerID: "antigravity",
-            quotaWindows: quotaWindows,
-            modelQuotas: modelQuotas,
+            quotaWindows: keptWindows,
+            modelQuotas: [],
             rawJSON: raw.isEmpty ? nil : raw,
             fetchedAt: .now
         )
@@ -211,6 +213,15 @@ public struct AntigravityUsageFetcher: ProviderUsageFetcher {
             ))
         }
         return windows
+    }
+
+    /// 只保留两个核心周用量窗口（展示用）：Gemini Models Weekly 与 Claude and GPT models Weekly。
+    /// 其余窗口（如 5h 等）与 per-model 配额一律不展示，避免用量卡信息过载。
+    private static func filterCoreWeeklyWindows(_ windows: [QuotaWindow]) -> [QuotaWindow] {
+        let coreLabels = ["gemini models weekly", "claude and gpt models weekly"]
+        return windows.filter { window in
+            coreLabels.contains(window.label.lowercased())
+        }
     }
 
     /// 提取 `groups[]`：容忍顶层或嵌套于 `quotaSummary.groups` 两种响应包。

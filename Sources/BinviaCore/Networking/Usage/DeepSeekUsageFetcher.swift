@@ -27,7 +27,7 @@ public struct DeepSeekUsageFetcher: ProviderUsageFetcher {
     }
 
     public func fetchUsage(credential: ProviderCredential) async throws -> ProviderUsageSnapshot {
-        // 1. 解析全部 api key（多 Key 余额查询）：config apiKeys 数组 + 环境变量，去重。
+        // 1. 解析全部 api key（多 Key 余额查询）：config apiKeys 数组（带标签） + 环境变量，去重。
         let keys = resolveAllKeys(credential: credential)
         guard !keys.isEmpty else {
             throw ProviderError.missingCredentials(
@@ -39,10 +39,10 @@ public struct DeepSeekUsageFetcher: ProviderUsageFetcher {
         let results = await withTaskGroup(of: (String, DeepSeekBalanceResult?).self) { group in
             for key in keys {
                 group.addTask {
-                    if let balance = try? await Self.fetchBalance(forKey: key) {
-                        return (key, balance)
+                    if let balance = try? await Self.fetchBalance(forKey: key.value) {
+                        return (key.value, balance)
                     }
-                    return (key, nil)
+                    return (key.value, nil)
                 }
             }
             var collected: [(String, DeepSeekBalanceResult?)] = []
@@ -50,7 +50,7 @@ public struct DeepSeekUsageFetcher: ProviderUsageFetcher {
                 collected.append(item)
             }
             // 保持 keys 原始顺序
-            return keys.compactMap { k in collected.first { $0.0 == k } }
+            return keys.compactMap { k in collected.first { $0.0 == k.value } }
         }
 
         var balances: [KeyedBalance] = []
@@ -58,8 +58,10 @@ public struct DeepSeekUsageFetcher: ProviderUsageFetcher {
         var firstCurrency: String?
         var lastError: String?
         var rawFirst: String?
-        for (key, result) in results {
-            let label = Self.maskedKey(key)
+        for (keyValue, result) in results {
+            // 展示标签：优先用户配置的标签；环境变量/未配置标签回退掩码。
+            let label = keys.first { $0.value == keyValue }?.label
+                ?? Self.maskedKey(keyValue)
             if let result {
                 balances.append(KeyedBalance(label: label, balance: result.totalBalance, currency: result.currency))
                 if firstBalance == nil {
@@ -90,22 +92,30 @@ public struct DeepSeekUsageFetcher: ProviderUsageFetcher {
         )
     }
 
-    /// 解析全部可用 api key：credential.apiKey（主）+ config apiKeys 数组 + 环境变量。去重。
-    private func resolveAllKeys(credential: ProviderCredential) -> [String] {
-        var keys: [String] = []
-        if let apiKey = credential.apiKey, !apiKey.isEmpty {
-            keys.append(apiKey)
-        }
-        if let config = try? ConfigStore.load() {
-            keys.append(contentsOf: config.apiKeys(for: "deepseek"))
-        }
-        if let env = RouteConfig.envValue(["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"]), !env.isEmpty {
-            keys.append(env)
-        }
+    /// 解析全部可用 api key：config apiKeys 数组（带标签）优先 + credential.apiKey + 环境变量。
+    /// 去重、过滤空值；返回带展示标签的令牌（无标签回退掩码）。
+    /// 注意：AppState 会用 config 首个 apiKey 填充 `credential.apiKey`，因此 config 必须
+    /// 先于 credential 处理，保证同 value 时展示用户配置的标签而非掩码。
+    private func resolveAllKeys(credential: ProviderCredential) -> [KeyedToken] {
+        var tokens: [KeyedToken] = []
         var seen = Set<String>()
-        return keys
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        // 1. config 优先：带用户标签的令牌（含 env 兜底掩码）
+        if let config = try? ConfigStore.load() {
+            for token in config.keyedTokens(for: "deepseek") {
+                let value = token.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = token.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty, seen.insert(value).inserted else { continue }
+                tokens.append(KeyedToken(label: label, value: value))
+            }
+        }
+        // 2. credential.apiKey 兜底（掩码标签）：已出现在 config 中的 value 不再重复添加
+        if let apiKey = credential.apiKey, !apiKey.isEmpty {
+            let value = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty, seen.insert(value).inserted {
+                tokens.append(KeyedToken(value: value))
+            }
+        }
+        return tokens
     }
 
     /// 掩码 Key：前 6 位 + •••• + 后 4 位。

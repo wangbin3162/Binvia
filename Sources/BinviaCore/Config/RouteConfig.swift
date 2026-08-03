@@ -264,18 +264,32 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     /// 某 provider 的全部 api-key（用于轮换）：config 的 `apiKeys` 数组 + 环境变量 key
     /// （如 `DEEPSEEK_API_KEY`）。去重、过滤空值。
     public func apiKeys(for providerID: String) -> [String] {
-        var keys: [String] = []
+        keyedTokens(for: providerID).map(\.value)
+    }
+
+    /// 某 provider 的全部带标签令牌（用于用量展示）：config 的 `apiKeys`（优先用户标签）+
+    /// 环境变量 key（无标签 → 掩码标签）。按值去重、过滤空值。
+    /// DeepSeek 用量卡按此展示令牌标签（无自定义标签时回退掩码）。
+    public func keyedTokens(for providerID: String) -> [KeyedToken] {
+        var tokens: [KeyedToken] = []
         if let pc = providers[providerID] {
-            keys.append(contentsOf: pc.apiKeyValues)
+            tokens.append(contentsOf: pc.apiKeys)
         }
         let envName = "\(providerID.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"
         if let env = Self.envValue([envName]), !env.isEmpty {
-            keys.append(env)
+            tokens.append(KeyedToken(value: env))
         }
         var seen = Set<String>()
-        return keys
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        return tokens
+            .map { token in
+                let value = token.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = token.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                return KeyedToken(
+                    label: label.isEmpty ? KeyedToken.defaultLabel(for: value) : label,
+                    value: value
+                )
+            }
+            .filter { !$0.value.isEmpty && seen.insert($0.value).inserted }
     }
 
     public static func envValue(_ names: [String]) -> String? {
