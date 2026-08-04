@@ -32,7 +32,7 @@
 | qwen-cloud | `qwc` | api-key | ✅ 已实现（Phase 18） |
 | zai | `zai` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
 | minimax | `mm` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
-| codex | `cx` | api-key | ✅ 已实现（Phase 19，OpenAI 兼容） |
+| codex | `cx` | OpenAI OAuth PKCE | ✅ 已实现（Phase 24，ChatGPT 订阅账号；Responses API 翻译 + 用量展示） |
 | cursor | `cu` | api-key / IDE 接入 | ✅ 已实现（Phase 19/20，OpenAI 兼容；Phase 20 支持从 Cursor IDE 自动读取登录令牌） |
 
 ## 快速开始
@@ -61,6 +61,9 @@ swift run BinviaCLI oauth login codebuddy-cn
 
 # Google Antigravity（PKCE：打开浏览器授权后把重定向地址/code 粘贴回终端）
 swift run BinviaCLI oauth login antigravity
+
+# OpenAI Codex（ChatGPT 订阅账号，PKCE：打开浏览器授权后把重定向地址/code 粘贴回终端）
+swift run BinviaCLI oauth login codex
 ```
 
 登录凭据自动写入 `~/.config/binvia/config.json`。
@@ -139,8 +142,8 @@ open bin/Binvia.app
 **设置窗口**（点面板底部 Settings 打开）为 CodexBar 风格：左侧栏 + 右侧详情，全部配置均在面板中完成，无需手改文件：
 
 - **服务器**：监听地址固定为本机 localhost（不可修改）；端口默认 20427，可改，保存即热更新（运行中替换 handler，无需重启）。「API 端点」区展示 `http://localhost:<端口>/v1` 并提供一键复制，供 Claude Code / opencode / curl 等配置。
-- **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
-- **用量**：供应商面板自动展示用量——DeepSeek（多 Key 余额）、Kimi（余额）、Antigravity（模型配额 + 周窗口）每 5 分钟轮询 + 手动「刷新用量」；z.ai、opencode、CodeBuddy CN 上游未提供可用的公开用量 API（CodeBuddy CN 官方接口返回 500），面板提供「在网页查看」跳转对应网页看板（智谱 `bigmodel.cn/finance-center/finance/overview`、opencode `opencode.ai/zh/zen`、CodeBuddy `codebuddy.cn/profile/usage`）。
+- **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity / Codex 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
+- **用量**：供应商面板自动展示用量——DeepSeek（多 Key 余额）、Kimi（余额）、Antigravity（模型配额 + 周窗口）、Codex（5h / 7d 双配额窗口）每 5 分钟轮询 + 手动「刷新用量」；z.ai、opencode、CodeBuddy CN 上游未提供可用的公开用量 API（CodeBuddy CN 官方接口返回 500），面板提供「在网页查看」跳转对应网页看板（智谱 `bigmodel.cn/finance-center/finance/overview`、opencode `opencode.ai/zh/zen`、CodeBuddy `codebuddy.cn/profile/usage`）。
 - **网关密钥**：生成/复制/删除 `sk-bv-` 网关 Key。
 
 ## 配置

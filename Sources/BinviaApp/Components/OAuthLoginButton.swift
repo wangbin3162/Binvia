@@ -66,6 +66,8 @@ struct OAuthLoginButton: View {
             Task { await appState.loginCodeBuddy() }
         } else if providerID == "antigravity" {
             Task { await appState.loginAntigravity() }
+        } else if providerID == "codex" {
+            Task { await appState.loginCodex() }
         }
     }
 }

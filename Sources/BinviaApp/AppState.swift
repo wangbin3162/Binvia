@@ -52,7 +52,7 @@ final class AppState: ObservableObject {
     /// 各 provider 的 OAuth 登录状态。
     @Published var oauthStates: [String: OAuthFlowState] = [:]
 
-    /// Antigravity PKCE 授权码输入（由 sheet 触发）。
+    /// OAuth 授权码输入（由 sheet 触发，PKCE 粘贴授权码；Antigravity / Codex）。
     @Published var isShowingCodeInput = false
 
     private var server: HTTPServer?
@@ -60,6 +60,8 @@ final class AppState: ObservableObject {
     private var usageRefreshTimer: Timer?
     private var oauthRefreshTimer: Timer?
     private var codeContinuation: CheckedContinuation<String, Error>?
+    /// 正在等待授权码的 provider id（cancel 时恢复其 oauth 状态）。
+    private var codeInputProviderID: String?
     /// 配置读取失败时保留错误状态，禁止后续用空配置覆盖磁盘原配置。
     private let configLoadError: String?
 
@@ -572,7 +574,7 @@ final class AppState: ObservableObject {
                     }
                 },
                 codeProvider: { _ in
-                    try await self.waitForAuthCode()
+                    try await self.waitForAuthCode(for: "antigravity")
                 }
             )
             let credential = ProviderCredential(
@@ -588,10 +590,40 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Codex PKCE 流登录（ChatGPT 订阅账号）。自动打开浏览器，等待用户在 GUI 粘贴授权码。
+    func loginCodex() async {
+        oauthStates["codex"] = .requestingCode
+        do {
+            let client = CodexOAuthClient(config: .live())
+            let credentials = try await client.login(
+                openURL: { url in
+                    Task { @MainActor in
+                        NSWorkspace.shared.open(url)
+                        self.oauthStates["codex"] = .waitingForAuth
+                    }
+                },
+                codeProvider: { _ in
+                    try await self.waitForAuthCode(for: "codex")
+                }
+            )
+            let credential = ProviderCredential(
+                accessToken: credentials.accessToken,
+                refreshToken: credentials.refreshToken,
+                email: credentials.email,
+                expiresAt: credentials.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
+                workspaceId: credentials.workspaceId
+            )
+            try saveCredential(credential, for: "codex")
+            oauthStates["codex"] = .connected
+        } catch {
+            oauthStates["codex"] = .failed(error.localizedDescription)
+        }
+    }
+
     // MARK: - OAuth 状态引导 & token 刷新（Phase 20）
 
     /// 启动时恢复 OAuth 状态：已配置 accessToken 的 oauth provider 标记为已连接，
-    /// 并主动刷新一次 Antigravity token（避免启动后仍用已过期 token）。
+    /// 并主动刷新一次 Antigravity / Codex token（避免启动后仍用已过期 token）。
     func bootstrapOAuth() async {
         for (providerID, pc) in config.providers
         where ProviderRegistry.shared.descriptor(for: providerID)?.metadata.authType == .oauth {
@@ -600,15 +632,17 @@ final class AppState: ObservableObject {
             }
         }
         await refreshAntigravityToken()
+        await refreshCodexToken()
     }
 
-    /// 启动 Antigravity token 周期刷新（每 25 分钟，token 约 1 小时过期）。
+    /// 启动 OAuth token 周期刷新（每 25 分钟，token 约 1 小时过期）。
     /// 与 metrics/usage 轮询并行，随菜单面板出现而启动。
     func startOAuthRefresh() {
         guard oauthRefreshTimer == nil else { return }
         oauthRefreshTimer = Timer.scheduledTimer(withTimeInterval: 25 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.refreshAntigravityToken()
+                await self?.refreshCodexToken()
             }
         }
     }
@@ -645,17 +679,50 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// 用 refreshToken 主动刷新 Codex access token，并把旋转后的新 token（含新 refreshToken）、
+    /// 过期时间、邮箱（为空时补抓）持久化回 config。刷新失败不覆盖旧凭据。
+    /// Codex 的 refresh token 是一次性的（旋转），必须持久化新值，否则下次刷新会 invalid_grant。
+    func refreshCodexToken() async {
+        guard let pc = config.providers["codex"],
+              !(pc.credential.accessToken ?? "").isEmpty,
+              let refresh = pc.credential.refreshToken, !refresh.isEmpty else {
+            return
+        }
+        let client = CodexOAuthClient(config: .live())
+        do {
+            let refreshed = try await client.refreshAccessToken(refreshToken: refresh)
+            var credential = pc.credential
+            credential.accessToken = refreshed.accessToken
+            if let rt = refreshed.refreshToken, !rt.isEmpty {
+                credential.refreshToken = rt
+            }
+            if let exp = refreshed.expiresIn {
+                credential.expiresAt = Date().addingTimeInterval(TimeInterval(exp))
+            }
+            if (credential.email ?? "").isEmpty, let email = refreshed.email, !email.isEmpty {
+                credential.email = email
+            }
+            try saveCredential(credential, for: "codex")
+            oauthStates["codex"] = .connected
+        } catch {
+            // reauthRequired / 网络失败：保留旧凭据，状态标为失败以便用户重新登录。
+            oauthStates["codex"] = .failed(error.localizedDescription)
+        }
+    }
+
     func resetOAuthState(_ providerID: String) {
         oauthStates[providerID] = .idle
     }
 
-    // MARK: - Antigravity 授权码输入（CheckedContinuation 桥接）
+    // MARK: - OAuth 授权码输入（CheckedContinuation 桥接）
 
-    private func waitForAuthCode() async throws -> String {
-        oauthStates["antigravity"] = .waitingForCodeInput
+    private func waitForAuthCode(for providerID: String) async throws -> String {
+        oauthStates[providerID] = .waitingForCodeInput
+        codeInputProviderID = providerID
         isShowingCodeInput = true
         defer {
             isShowingCodeInput = false
+            codeInputProviderID = nil
         }
         return try await withCheckedThrowingContinuation { continuation in
             codeContinuation = continuation
@@ -675,7 +742,9 @@ final class AppState: ObservableObject {
         codeContinuation?.resume(throwing: CancellationError())
         codeContinuation = nil
         isShowingCodeInput = false
-        oauthStates["antigravity"] = .idle
+        if let providerID = codeInputProviderID {
+            oauthStates[providerID] = .idle
+        }
     }
 
     private func extractAuthorizationCode(from input: String) -> String {

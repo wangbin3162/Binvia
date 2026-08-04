@@ -2108,17 +2108,7 @@ func qwenCloudIntegrationTests() async throws {
     )
 }
 
-// MARK: - Phase 19: codex / cursor 集成（URLProtocol mock，OpenAI 兼容）
-
-func codexIntegrationTests() async throws {
-    try await runOpenAICompatSuite(
-        providerID: "codex",
-        makeProvider: { CodexProvider() },
-        apiKeyEnv: "CODEX_API_KEY",
-        baseURLEnv: "CODEX_BASE_URL",
-        chatModel: "gpt-5.1-codex-mini"
-    )
-}
+// MARK: - Phase 19: cursor 集成（URLProtocol mock，OpenAI 兼容）
 
 func cursorIntegrationTests() async throws {
     try await runOpenAICompatSuite(
@@ -2128,6 +2118,466 @@ func cursorIntegrationTests() async throws {
         baseURLEnv: "CURSOR_BASE_URL",
         chatModel: "claude-sonnet-4-5"
     )
+}
+
+// MARK: - Phase 24: Codex OAuth（chatgpt.com 后端，Responses API）
+
+/// 构造 JWT id_token（header.payload.signature，payload 为 JSON）。
+func codexJWT(_ payload: [String: Any]) -> String {
+    let header = "eyJhbGciOiJub25lIn0" // {"alg":"none"}
+    let payloadData = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+    let b64 = payloadData.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return "\(header).\(b64).sig"
+}
+
+/// Codex OAuth 客户端：exchangeCode / refresh（旋转 token）/ 不可恢复刷新错误 / id_token 解析。
+func codexOAuthClientTests() async throws {
+    unsetenv("CODEX_OAUTH_CLIENT_ID")
+    unsetenv("CODEX_TOKEN_URL")
+    unsetenv("CODEX_AUTHORIZE_URL")
+    defer {
+        unsetenv("CODEX_OAUTH_CLIENT_ID")
+        unsetenv("CODEX_TOKEN_URL")
+        unsetenv("CODEX_AUTHORIZE_URL")
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+    setenv("CODEX_TOKEN_URL", "https://mock.test/oauth/token", 1)
+
+    URLProtocol.registerClass(URLProtocolMock.self)
+    URLProtocolMock.reset()
+
+    // 1) id_token 解析（纯单测）：team org 非 default 且 plan free → 用 team org id
+    let teamPayload: [String: Any] = [
+        "email": "me@example.com",
+        "https://api.openai.com/auth": [
+            "chatgpt_account_id": "acct_personal",
+            "chatgpt_plan_type": "free",
+            "organizations": [
+                ["id": "org_team", "is_default": false, "title": "Team X", "role": "member"],
+                ["id": "org_default", "is_default": true, "title": "Personal", "role": "owner"],
+            ],
+        ],
+    ]
+    let teamInfo = CodexOAuthClient.parseIdToken(codexJWT(teamPayload))
+    expectEqual(teamInfo?.email, "me@example.com", "id_token 解析 email")
+    expectEqual(teamInfo?.workspaceId, "org_team", "free plan + team org 时用 team workspace")
+    expectEqual(teamInfo?.planType, "free", "id_token 解析 plan type")
+
+    // team plan → 保持 chatgpt_account_id
+    let teamPlanPayload: [String: Any] = [
+        "https://api.openai.com/auth": [
+            "chatgpt_account_id": "acct_team1",
+            "chatgpt_plan_type": "chatgptteam",
+            "organizations": [
+                ["id": "org_a", "is_default": false, "title": "Team A", "role": "member"],
+            ],
+        ],
+    ]
+    let teamPlanInfo = CodexOAuthClient.parseIdToken(codexJWT(teamPlanPayload))
+    expectEqual(teamPlanInfo?.workspaceId, "acct_team1", "team plan 保持 chatgpt_account_id")
+
+    // 2) exchangeCode：返回 token + id_token → workspace 绑定
+    URLProtocolMock.requestHandler = { request in
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        let body = #"""
+        {"access_token":"at-1","refresh_token":"rt-1","expires_in":3600,
+         "id_token":"\#(codexJWT(teamPayload))"}
+        """#
+        return (response, Data(body.utf8))
+    }
+    let client = CodexOAuthClient(config: .live())
+    let exchanged = try await client.exchangeCode(code: "auth-code", verifier: "verifier-43chars", redirectURI: "http://localhost:1455/auth/callback")
+    expectEqual(exchanged.accessToken, "at-1", "exchangeCode 返回 access_token")
+    expectEqual(exchanged.refreshToken, "rt-1", "exchangeCode 返回 refresh_token")
+    expectEqual(exchanged.workspaceId, "org_team", "exchangeCode 解析 workspace")
+    expectEqual(exchanged.email, "me@example.com", "exchangeCode 解析 email")
+
+    // 3) refresh：请求体无 scope；返回旋转后的 refresh_token
+    var refreshBody = ""
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        if let body = requestBodyString(request) { refreshBody = body }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data(#"{"access_token":"at-2","refresh_token":"rt-2","expires_in":3600}"#.utf8))
+    }
+    let refreshed = try await client.refreshAccessToken(refreshToken: "rt-1")
+    expectEqual(refreshed.accessToken, "at-2", "refresh 返回新 access_token")
+    expectEqual(refreshed.refreshToken, "rt-2", "refresh 旋转 refresh_token")
+    expectFalse(refreshBody.contains("scope"), "refresh 请求体不含 scope（避免 Auth0 re-scope）")
+    expectTrue(refreshBody.contains("grant_type=refresh_token"), "refresh 请求体含 grant_type")
+    expectTrue(refreshBody.contains("client_id="), "refresh 请求体含 client_id")
+
+    // 4) 不可恢复错误（invalid_grant）→ reauthRequired
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { _ in
+        let response = HTTPURLResponse(
+            url: URL(string: "https://mock.test/oauth/token")!, statusCode: 400, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data(#"{"error":"invalid_grant","error_description":"token already used"}"#.utf8))
+    }
+    var threwReauth = false
+    do {
+        _ = try await client.refreshAccessToken(refreshToken: "rt-consumed")
+    } catch CodexOAuthError.reauthRequired {
+        threwReauth = true
+    } catch {}
+    expectTrue(threwReauth, "invalid_grant 刷新抛 reauthRequired")
+
+    // 5) 401 → reauthRequired（瞬时 5xx 仍抛 httpStatus）
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { _ in
+        let response = HTTPURLResponse(
+            url: URL(string: "https://mock.test/oauth/token")!, statusCode: 401, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data("unauthorized".utf8))
+    }
+    var threwReauth401 = false
+    do {
+        _ = try await client.refreshAccessToken(refreshToken: "rt-x")
+    } catch CodexOAuthError.reauthRequired {
+        threwReauth401 = true
+    } catch {}
+    expectTrue(threwReauth401, "401 刷新抛 reauthRequired")
+}
+
+/// Codex 双向翻译器（纯单测）。
+func codexTranslatorTests() async throws {
+    /// 解析 translatedChunk 产出的 SSE 块（`data:` 行）为 JSON。
+    func chunkJSON(_ chunk: Data?) -> [String: Any]? {
+        guard let chunk, let text = String(data: chunk, encoding: .utf8),
+              let value = SSEEvent.dataValue(from: text),
+              let json = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    // 1) 请求翻译：system→developer、effort 后缀剥离、tools 透传、白名单过滤
+    let rawBody: [String: Any] = [
+        "model": "gpt-5.6-sol-high",
+        "messages": [
+            ["role": "system", "content": "You are a coding agent."],
+            ["role": "user", "content": "hi"],
+            ["role": "tool", "tool_call_id": "call_1", "content": "ok"],
+        ],
+        "tools": [["type": "function", "name": "shell", "parameters": ["type": "object"]]],
+        "temperature": 0.7,
+        "max_tokens": 100,
+        "stream": true,
+    ]
+    let bodyData = try JSONSerialization.data(withJSONObject: rawBody)
+    let highRequest = ChatRequest(
+        model: "gpt-5.6-sol-high",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let requestData = try CodexResponsesTranslator.makeRequestBody(request: highRequest, rawBody: bodyData)
+    let requestJSON = (try JSONSerialization.jsonObject(with: requestData) as? [String: Any]) ?? [:]
+
+    expectEqual(requestJSON["model"] as? String, "gpt-5.6-sol", "effort 后缀剥离后 model 为基础名")
+    let reasoning = requestJSON["reasoning"] as? [String: Any]
+    expectEqual(reasoning?["effort"] as? String, "high", "effort 写入 reasoning.effort")
+    expectEqual(requestJSON["stream"] as? Bool, true, "强制 stream=true")
+    expectEqual(requestJSON["store"] as? Bool, false, "store=false")
+    expectNil(requestJSON["temperature"], "temperature 被白名单过滤")
+    expectNil(requestJSON["max_tokens"], "max_tokens 被白名单过滤")
+
+    let input = requestJSON["input"] as? [[String: Any]] ?? []
+    expectEqual(input.count, 3, "3 条消息 → 3 个 input item")
+    let developer = input[0]
+    expectEqual(developer["role"] as? String, "developer", "system → developer")
+    let toolOutput = input[2]
+    expectEqual(toolOutput["type"] as? String, "function_call_output", "tool → function_call_output")
+    expectEqual(toolOutput["call_id"] as? String, "call_1", "function_call_output 带 call_id")
+    let tools = requestJSON["tools"] as? [[String: Any]] ?? []
+    expectEqual(tools.count, 1, "tools 透传")
+
+    // rawBody 为 nil 时回退编码 ChatRequest（testModel 默认实现走此路径）
+    let fallbackData = try CodexResponsesTranslator.makeRequestBody(
+        request: highRequest,
+        rawBody: nil
+    )
+    let fallbackJSON = (try JSONSerialization.jsonObject(with: fallbackData) as? [String: Any]) ?? [:]
+    expectEqual(fallbackJSON["model"] as? String, "gpt-5.6-sol", "nil rawBody 回退编码 ChatRequest 后剥离 effort")
+    let fallbackInput = fallbackJSON["input"] as? [[String: Any]] ?? []
+    expectEqual((fallbackInput.first?["content"] as? [[String: Any]])?.first?["text"] as? String, "hi", "nil rawBody 回退保留消息内容")
+
+    // 无 effort 后缀模型
+    let plainBody: [String: Any] = [
+        "model": "gpt-5.5",
+        "messages": [["role": "user", "content": "hi"]],
+    ]
+    let plainRequest = ChatRequest(
+        model: "gpt-5.5",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let plainData = try CodexResponsesTranslator.makeRequestBody(
+        request: plainRequest,
+        rawBody: try JSONSerialization.data(withJSONObject: plainBody)
+    )
+    let plainJSON = (try JSONSerialization.jsonObject(with: plainData) as? [String: Any]) ?? [:]
+    expectEqual(plainJSON["model"] as? String, "gpt-5.5", "无后缀模型保持原样")
+    expectNil((plainJSON["reasoning"] as? [String: Any])?["effort"], "无后缀模型不带 effort")
+
+    // 2) 响应翻译：output_text.delta → content chunk
+    var state = CodexResponsesTranslator.CodexResponseState(model: "gpt-5.6-sol")
+    let deltaBlock = """
+    event: response.output_text.delta
+    data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}
+
+    """
+    let deltaJSON = chunkJSON(CodexResponsesTranslator.translatedChunk(Data(deltaBlock.utf8), state: &state))
+    let deltaChoices = deltaJSON?["choices"] as? [[String: Any]] ?? []
+    let deltaObj = deltaChoices.first?["delta"] as? [String: Any] ?? [:]
+    expectEqual(deltaObj["content"] as? String, "Hello", "output_text.delta → delta.content")
+    expectEqual(deltaObj["role"] as? String, "assistant", "首个 content delta 带 role")
+
+    // function_call added → tool_calls chunk
+    let toolBlock = """
+    event: response.output_item.added
+    data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_2","name":"shell","arguments":""}}
+
+    """
+    let toolJSON = chunkJSON(CodexResponsesTranslator.translatedChunk(Data(toolBlock.utf8), state: &state))
+    let toolChoices = toolJSON?["choices"] as? [[String: Any]] ?? []
+    let toolCalls = (toolChoices.first?["delta"] as? [String: Any])?["tool_calls"] as? [[String: Any]] ?? []
+    expectEqual(toolCalls.first?["id"] as? String, "call_2", "function_call 首 chunk 带 call_id")
+    expectEqual((toolCalls.first?["function"] as? [String: Any])?["name"] as? String, "shell", "function_call 带 name")
+
+    // completed + usage → 最终 chunk
+    let completedBlock = """
+    event: response.completed
+    data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}
+
+    """
+    let finalJSON = chunkJSON(CodexResponsesTranslator.translatedChunk(Data(completedBlock.utf8), state: &state))
+    let finalChoices = finalJSON?["choices"] as? [[String: Any]] ?? []
+    expectEqual(finalChoices.first?["finish_reason"] as? String, "tool_calls", "有 tool_calls 时 finish_reason=tool_calls")
+    let usage = finalJSON?["usage"] as? [String: Any] ?? [:]
+    expectEqual(usage["prompt_tokens"] as? Int, 10, "input_tokens → prompt_tokens")
+    expectEqual(usage["completion_tokens"] as? Int, 5, "output_tokens → completion_tokens")
+    expectEqual(usage["total_tokens"] as? Int, 15, "total_tokens 透传")
+}
+
+/// Codex Provider 集成（URLProtocol mock 当上游 + token 刷新）：翻译 + 401 refresh 重试。
+func codexProviderIntegrationTests() async throws {
+    unsetenv("CODEX_BASE_URL")
+    unsetenv("CODEX_TOKEN_URL")
+    unsetenv("CODEX_ACCESS_TOKEN")
+    defer {
+        unsetenv("CODEX_BASE_URL")
+        unsetenv("CODEX_TOKEN_URL")
+        unsetenv("CODEX_ACCESS_TOKEN")
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+    setenv("CODEX_BASE_URL", "https://mock.test", 1)
+    setenv("CODEX_TOKEN_URL", "https://mock.test/oauth/token", 1)
+    await ModelCache.shared.invalidate("codex")
+
+    // 记录每次 responses 请求的 Authorization 与请求体，供断言。
+    nonisolated(unsafe) var upstreamAuthorizations: [String] = []
+    nonisolated(unsafe) var capturedRequestBody = ""
+    nonisolated(unsafe) var capturedAccountID = ""
+
+    URLProtocol.registerClass(URLProtocolMock.self)
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        let url = request.url!
+        // token 刷新端点：返回新 access + 旋转 refresh
+        if url.path == "/oauth/token" {
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"access_token":"refreshed-at","refresh_token":"refreshed-rt","expires_in":3600}"#.utf8))
+        }
+        // 上游 responses 端点：首次 401 触发刷新，重试后返回 SSE
+        if url.path == "/backend-api/codex/responses" {
+            upstreamAuthorizations.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            if let body = requestBodyString(request) { capturedRequestBody = body }
+            capturedAccountID = request.value(forHTTPHeaderField: "chatgpt-account-id") ?? ""
+            if upstreamAuthorizations.count == 1 {
+                let err = HTTPURLResponse(
+                    url: url, statusCode: 401, httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (err, Data(#"{"error":{"message":"token expired"}}"#.utf8))
+            }
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            let sse = """
+            event: response.output_text.delta
+            data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}
+
+            event: response.completed
+            data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
+
+            """
+            return (response, Data(sse.utf8))
+        }
+        let notFound = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+        return (notFound, Data("not found".utf8))
+    }
+
+    let request = ChatRequest(
+        model: "gpt-5.6-sol",
+        messages: [ChatMessage(role: .user, content: "hi")],
+        stream: true
+    )
+    let rawBody = try JSONEncoder().encode(request)
+    let credential = ProviderCredential(
+        accessToken: "expired-at",
+        refreshToken: "rt-1",
+        workspaceId: "ws-1"
+    )
+    let stream = try await CodexProvider().chat(request: request, rawBody: rawBody, credential: credential)
+    var collected = Data()
+    for try await chunk in stream { collected.append(chunk) }
+    let text = String(data: collected, encoding: .utf8) ?? ""
+
+    // 1) 401 刷新重试：首次用旧 token，重试用刷新后的 token
+    expectEqual(upstreamAuthorizations.count, 2, "401 后重试一次")
+    expectEqual(upstreamAuthorizations.first, "Bearer expired-at", "首次请求用旧 access token")
+    expectEqual(upstreamAuthorizations.last, "Bearer refreshed-at", "重试用刷新后的 access token")
+    expectEqual(capturedAccountID, "ws-1", "chatgpt-account-id 头带 workspaceId")
+    expectTrue(capturedRequestBody.contains("\"stream\":true"), "上游请求体 stream=true")
+    expectTrue(capturedRequestBody.contains("\"model\":\"gpt-5.6-sol\""), "上游请求体 model")
+
+    // 2) 翻译输出：内容 + 最终 chunk usage + [DONE]
+    expectTrue(text.contains(#""content":"Hello""#), "翻译后的 SSE 包含内容，实际: \(text)")
+    expectTrue(text.contains(#""prompt_tokens":7"#), "最终 chunk 含 usage.prompt_tokens")
+    expectTrue(text.contains(#""completion_tokens":3"#), "最终 chunk 含 usage.completion_tokens")
+    expectTrue(text.contains("[DONE]"), "流结束含 [DONE]")
+
+    // 3) 无凭据抛 missingCredentials
+    await expectThrows({
+        _ = try await CodexProvider().chat(
+            request: request, rawBody: rawBody, credential: nil
+        )
+    }, "Codex 无凭据 chat 抛 missingCredentials")
+
+    // 4) testModel（默认实现 rawBody=nil）：回退编码 ChatRequest，正常拿首个 chunk
+    upstreamAuthorizations = []
+    let testResult = try await CodexProvider().testModel("gpt-5.6-sol", credential: credential)
+    expectTrue(testResult.success, "testModel 应成功（nil rawBody 回退编码），实际: \(testResult.message)")
+}
+
+/// Codex 用量查询（URLProtocol mock）：5h/7d 双窗口 + code_review + 401 刷新重试。
+func codexUsageFetcherTests() async throws {
+    // 1) 标准双窗口解析（used_percent 为 0-100 量纲）+ code_review 窗口 + latent 窗口跳过
+    try await withGlobalURLProtocolMock {
+        setenv("CODEX_BASE_URL", "https://mock.test", 1)
+        defer { unsetenv("CODEX_BASE_URL") }
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = """
+            {"plan_type":"chatgptteam","rate_limit":{"primary_window":{"used_percent":40,"reset_at":2000000000},"secondary_window":{"used_percent":80,"reset_after_seconds":3600},"limit_reached":false},"code_review_rate_limit":{"primary_window":{"used_percent":25,"reset_after_seconds":45},"secondary_window":{"used_percent":55,"reset_after_seconds":6000}},"additional_rate_limits":[{"limit_name":"Spark","metered_feature":"spark","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":18000}}}]}
+            """
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await CodexUsageFetcher().fetchUsage(
+            credential: ProviderCredential(accessToken: "at", workspaceId: "ws-1")
+        )
+        expectNil(snapshot.error, "Codex 成功快照无 error")
+        expectEqual(snapshot.quotaWindows.count, 4, "5h + Weekly + Code Review + Code Review Weekly 四个窗口")
+        if let fiveHour = snapshot.quotaWindows.first(where: { $0.label == "5h" }) {
+            expectEqual(fiveHour.remainingFraction, 0.6, "5h 窗口 remainingFraction = 1 - 40/100")
+            expectEqual(fiveHour.used, 40, "5h 窗口 used=40")
+            expectEqual(fiveHour.total, 100, "5h 窗口 total=100")
+            expectEqual(fiveHour.remainingPercentage, 60, "5h 窗口 remainingPercentage")
+            expectEqual(fiveHour.resetAt, Date(timeIntervalSince1970: 2000000000), "5h 窗口 reset_at 解析")
+        } else {
+            expectTrue(false, "缺失 5h 窗口")
+        }
+        if let weekly = snapshot.quotaWindows.first(where: { $0.label == "Weekly" }) {
+            expectEqual(weekly.remainingFraction, 0.2, "Weekly 窗口 remainingFraction = 1 - 80/100")
+            expectTrue(weekly.resetAt != nil, "Weekly 窗口 reset_after_seconds 解析")
+        } else {
+            expectTrue(false, "缺失 Weekly 窗口")
+        }
+        if let review = snapshot.quotaWindows.first(where: { $0.label == "Code Review" }) {
+            expectEqual(review.remainingFraction, 0.75, "Code Review 窗口 remainingFraction = 1 - 25/100")
+        } else {
+            expectTrue(false, "缺失 Code Review 窗口")
+        }
+        if let reviewWeekly = snapshot.quotaWindows.first(where: { $0.label == "Code Review Weekly" }) {
+            expectEqual(reviewWeekly.remainingFraction, 0.45, "Code Review Weekly 窗口 remainingFraction = 1 - 55/100")
+        } else {
+            expectTrue(false, "缺失 Code Review Weekly 窗口")
+        }
+        // latent（从未使用的 spark 隐性上限）窗口不渲染
+        expectFalse(snapshot.quotaWindows.contains { $0.label.contains("Spark") }, "latent spark 窗口跳过")
+    }
+
+    // 2) 401 刷新重试
+    try await withGlobalURLProtocolMock {
+        setenv("CODEX_BASE_URL", "https://mock.test", 1)
+        setenv("CODEX_TOKEN_URL", "https://mock.test/oauth/token", 1)
+        defer {
+            unsetenv("CODEX_BASE_URL")
+            unsetenv("CODEX_TOKEN_URL")
+        }
+        nonisolated(unsafe) var usageCalls = 0
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let url = request.url!
+            if url.path == "/oauth/token" {
+                let response = HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data(#"{"access_token":"refreshed-at","refresh_token":"new-rt","expires_in":3600}"#.utf8))
+            }
+            if url.path == "/backend-api/wham/usage" {
+                usageCalls += 1
+                if usageCalls == 1 {
+                    let err = HTTPURLResponse(
+                        url: url, statusCode: 401, httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )!
+                    return (err, Data("expired".utf8))
+                }
+                let response = HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                let body = #"{"rate_limit":{"primary_window":{"used_percent":10,"reset_at":2000000000},"secondary_window":{"used_percent":20,"reset_at":2000000000}}}"#
+                return (response, Data(body.utf8))
+            }
+            let notFound = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (notFound, Data("not found".utf8))
+        }
+        let snapshot = try await CodexUsageFetcher().fetchUsage(
+            credential: ProviderCredential(accessToken: "expired-at", refreshToken: "rt-1", workspaceId: "ws-1")
+        )
+        expectEqual(usageCalls, 2, "401 后用量请求重试一次")
+        expectEqual(snapshot.quotaWindows.count, 2, "刷新重试后仍解析两个窗口")
+    }
+
+    // 3) 无 token 抛 missingCredentials
+    await expectThrows({
+        _ = try await CodexUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "Codex 无 token 抛 missingCredentials")
 }
 
 // MARK: - Phase 20: Cursor IDE 接入（凭据发现 + IDE 模式 Provider）
@@ -3042,6 +3492,12 @@ unsetenv("XIAOMI_MIMO_BASE_URL")
 unsetenv("QWEN_CLOUD_API_KEY")
 unsetenv("QWEN_CLOUD_BASE_URL")
 unsetenv("DASHSCOPE_API_KEY")
+unsetenv("CODEX_ACCESS_TOKEN")
+unsetenv("CODEX_BASE_URL")
+unsetenv("CODEX_OAUTH_CLIENT_ID")
+unsetenv("CODEX_TOKEN_URL")
+unsetenv("CODEX_AUTHORIZE_URL")
+unsetenv("CODEX_REDIRECT_URI")
 
 await run("Router 路由解析与消歧", routerTests)
 await run("ProviderRegistry 反向索引", registryReverseIndexTests)
@@ -3073,7 +3529,10 @@ await run("minimax 集成（Anthropic SSE→OpenAI，URLProtocol mock）", minim
 await run("opencode-go 集成（URLProtocol mock）", opencodeGoIntegrationTests)
 await run("xiaomi-mimo 集成（URLProtocol mock）", xiaomiMimoIntegrationTests)
 await run("qwen-cloud 集成（URLProtocol mock）", qwenCloudIntegrationTests)
-await run("codex 集成（URLProtocol mock）", codexIntegrationTests)
+await run("codex OAuth 客户端（URLProtocol mock）", codexOAuthClientTests)
+await run("codex 翻译器（纯单测）", codexTranslatorTests)
+await run("codex Provider 集成（URLProtocol mock + 401 刷新）", codexProviderIntegrationTests)
+await run("codex 用量查询（URLProtocol mock）", codexUsageFetcherTests)
 await run("cursor 集成（URLProtocol mock）", cursorIntegrationTests)
 await run("Cursor IDE 凭据发现", cursorCredentialStoreTests)
 await run("Cursor 官方模型目录", cursorModelsCatalogTests)
