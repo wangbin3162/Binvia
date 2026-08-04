@@ -187,13 +187,13 @@ struct SettingsTestPane: View {
         return enabledFlag && appState.isProviderConfigured(descriptor.id)
     }
 
-    /// 仅静态目录 → `<alias>/<modelID>` 列表。
+    /// 仅静态目录 → `<alias>/<modelID>` 列表（排除已禁用模型）。
     private func staticModelList(_ descriptors: [ProviderDescriptor]) -> [String] {
         var models: [String] = []
         var seen = Set<String>()
         for descriptor in descriptors {
             let alias = descriptor.alias ?? descriptor.id
-            for model in descriptor.models {
+            for model in descriptor.models where !appState.isModelDisabled(model.id, for: descriptor.id) {
                 let normalized = "\(alias)/\(model.id)"
                 if seen.insert(normalized).inserted {
                     models.append(normalized)
@@ -203,7 +203,7 @@ struct SettingsTestPane: View {
         return models.sorted()
     }
 
-    /// 静态目录 + 各供应商动态模型合并（动态获取成功且非空时优先用动态结果）。
+    /// 静态目录 + 各供应商动态模型合并（动态获取成功且非空时优先用动态结果；排除已禁用模型）。
     @MainActor
     private func mergedDynamicModelList(_ descriptors: [ProviderDescriptor]) async -> [String] {
         var models: [String] = []
@@ -217,7 +217,7 @@ struct SettingsTestPane: View {
                     list = fetched
                 }
             }
-            for model in list {
+            for model in list where !appState.isModelDisabled(model.id, for: descriptor.id) {
                 let normalized = "\(alias)/\(model.id)"
                 if seen.insert(normalized).inserted {
                     models.append(normalized)

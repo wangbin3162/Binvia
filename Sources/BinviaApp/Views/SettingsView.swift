@@ -12,7 +12,8 @@ struct SettingsView: View {
             SettingsSidebarView(selectionModel: selectionModel)
                 .frame(width: SettingsWindowMetrics.sidebarWidth)
                 .background {
-                    SettingsSidebarMaterial()
+                    // 侧栏保持 sidebar 材质（参考原 CodexBar 风格）
+                    AppBackgroundMaterial()
                         .ignoresSafeArea()
                 }
 
@@ -21,6 +22,11 @@ struct SettingsView: View {
 
             detailView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 详情区背景为浅白色（标准窗口背景色），与侧栏材质区分
+                .background {
+                    Color(nsColor: .windowBackgroundColor)
+                        .ignoresSafeArea()
+                }
         }
         .frame(
             minWidth: SettingsWindowMetrics.windowMinWidth,
@@ -42,24 +48,5 @@ struct SettingsView: View {
             SettingsProviderPane(providerID: id)
                 .id(id)
         }
-    }
-}
-
-/// 侧栏材质（借鉴 CodexBar `SettingsSidebarMaterial`）：edge-to-edge 的 sidebar 材质。
-private struct SettingsSidebarMaterial: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        configure(view)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        configure(nsView)
-    }
-
-    private func configure(_ view: NSVisualEffectView) {
-        view.material = .sidebar
-        view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
     }
 }

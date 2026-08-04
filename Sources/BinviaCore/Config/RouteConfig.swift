@@ -63,17 +63,26 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
     public var apiKeys: [KeyedToken]
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。nil = 供应商默认区域。
     public var region: String?
+    /// 禁用模型列表（设置面板模型行的启用/禁用开关）：禁用模型视为不存在——
+    /// `/v1/models` 不展示、网关白名单不可选、请求返回 404。原始模型名（不含 provider 前缀）。
+    public var disabledModels: [String]
 
-    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil) {
+    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil, disabledModels: [String] = []) {
         self.enabled = enabled
         self.credential = credential
         self.apiKeys = apiKeys
         self.region = region
+        self.disabledModels = disabledModels
     }
 
     /// 全部令牌值（provider / 路由层用，忽略标签）。
     public var apiKeyValues: [String] {
         apiKeys.map(\.value)
+    }
+
+    /// 某模型是否被禁用（设置面板「禁用」开关）。
+    public func isModelDisabled(_ modelID: String) -> Bool {
+        disabledModels.contains(modelID)
     }
 
     // 兼容旧配置：`apiKeys`/`region` 是新增字段，缺失时回退默认值。
@@ -82,6 +91,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         case credential
         case apiKeys
         case region
+        case disabledModels
     }
 
     public init(from decoder: any Decoder) throws {
@@ -95,6 +105,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
             self.apiKeys = try container.decodeIfPresent([KeyedToken].self, forKey: .apiKeys) ?? []
         }
         self.region = try container.decodeIfPresent(String.self, forKey: .region)
+        self.disabledModels = try container.decodeIfPresent([String].self, forKey: .disabledModels) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -103,6 +114,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         try container.encode(credential, forKey: .credential)
         try container.encode(apiKeys, forKey: .apiKeys)
         try container.encodeIfPresent(region, forKey: .region)
+        try container.encodeIfPresent(disabledModels.isEmpty ? nil : disabledModels, forKey: .disabledModels)
     }
 }
 

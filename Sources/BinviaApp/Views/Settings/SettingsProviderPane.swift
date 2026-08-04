@@ -444,8 +444,18 @@ struct SettingsProviderPane: View {
             OAuthLoginButton(providerID: providerID)
 
             DisclosureGroup("手动配置 Token", isExpanded: $isManualTokenExpanded) {
-                APIKeyInputField(title: "Access Token", text: $manualToken)
-                APIKeyInputField(title: "Refresh Token", text: $manualRefreshToken)
+                // 每个 Token 一行：左侧固定标签 + 右侧输入框（LabeledContent 保证行间距，
+                // 避免两个输入框贴在一起；标签明确 Access / Refresh 用途）。
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("Access Token") {
+                        APIKeyInputField(title: "粘贴 Access Token", text: $manualToken)
+                    }
+                    LabeledContent("Refresh Token") {
+                        APIKeyInputField(title: "粘贴 Refresh Token（可选）", text: $manualRefreshToken)
+                    }
+                }
+                .padding(.vertical, 4)
+
                 HStack {
                     if let msg = tokenSaveMessage {
                         Text(msg)
@@ -457,6 +467,7 @@ struct SettingsProviderPane: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(manualToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                .padding(.top, 2)
             }
             .disclosurePointingHand(isExpanded: isManualTokenExpanded)
 
@@ -501,6 +512,8 @@ struct SettingsProviderPane: View {
             }
         } header: {
             Text("连通性")
+        } footer: {
+            Text("勾选 = 启用；取消勾选 = 禁用该模型（从 /v1/models、网关白名单与测试列表隐藏，仍可在本列表重新启用）。")
         }
     }
 
@@ -519,7 +532,10 @@ struct SettingsProviderPane: View {
                 }
             }
         } else {
-            HStack {
+            HStack(spacing: 8) {
+                // 最前方：全部启用/禁用勾选（一键批量，避免逐行勾掉不需要的模型）
+                allModelsToggle
+
                 if !testAllOutcomes.isEmpty {
                     let successCount = testAllOutcomes.filter(\.success).count
                     let failedCount = testAllOutcomes.count - successCount
@@ -545,6 +561,31 @@ struct SettingsProviderPane: View {
                 }
             }
         }
+    }
+
+    /// 「全部启用/禁用」勾选：勾选 = 启用该供应商全部模型；取消勾选 = 全部禁用。
+    /// 勾选态取当前模型列表的「无任何禁用」，任一模型被禁用即变为未勾选。
+    private var allModelsToggle: some View {
+        let allEnabled = models.allSatisfy { !appState.isModelDisabled($0.id, for: providerID) }
+        return HStack(spacing: 4) {
+            Toggle("", isOn: Binding(
+                get: { allEnabled },
+                set: { enableAll in
+                    // 批量操作，一次持久化（避免逐模型保存/热更新）
+                    appState.setModelsDisabled(!enableAll, modelIDs: models.map(\.id), for: providerID)
+                    modelTestResults.removeAll()
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .controlSize(.mini)
+            Text("全部启用")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .help(allEnabled ? "取消勾选 = 禁用该供应商全部模型" : "勾选 = 启用该供应商全部模型")
+        .disabled(models.isEmpty)
+        .pointingHandCursor()
     }
 
     @ViewBuilder
@@ -586,35 +627,67 @@ struct SettingsProviderPane: View {
     @ViewBuilder
     private func modelTestRow(_ model: Model) -> some View {
         let result = modelTestResults[model.id] ?? .idle
-        HStack(alignment: .top, spacing: 6) {
+        let isDisabled = appState.isModelDisabled(model.id, for: providerID)
+        HStack(alignment: .center, spacing: 6) {
+            modelEnabledToggle(model.id)
+
             Text(model.id)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isDisabled ? .tertiary : .secondary)
+                .strikethrough(isDisabled)
                 .frame(maxWidth: 160, alignment: .leading)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .help(isDisabled ? "已禁用：从 /v1/models 与网关白名单隐藏（勾选可重新启用）" : "")
 
-            switch result {
-            case .testing:
-                ProgressView().controlSize(.small)
-            case .ok(let msg):
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.footnote)
-                Text(msg).font(.caption2).foregroundStyle(.secondary)
-            case .failed(let msg):
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.footnote)
-                Text(msg).font(.caption2).foregroundStyle(.red)
-            case .idle:
-                Spacer()
-                Button("测试") { startModelTest(model.id) }
-                    .buttonStyle(.link)
-                    .controlSize(.small)
-                    .pointingHandCursor()
+            if isDisabled {
+                Spacer(minLength: 8)
+                Text("已禁用")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                switch result {
+                case .testing:
+                    ProgressView().controlSize(.small)
+                case .ok(let msg):
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.footnote)
+                    Text(msg).font(.caption2).foregroundStyle(.secondary)
+                case .failed(let msg):
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                    Text(msg).font(.caption2).foregroundStyle(.red)
+                case .idle:
+                    Spacer()
+                    Button("测试") { startModelTest(model.id) }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                        .pointingHandCursor()
+                }
             }
         }
+    }
+
+    /// 模型行左侧「启用/禁用」勾选框（紧凑 checkbox）。
+    /// 取消勾选 = 禁用：模型从 /v1/models、网关白名单与测试列表隐藏；
+    /// 本列表仍保留（置灰 + 删除线）以便重新启用。
+    private func modelEnabledToggle(_ modelID: String) -> some View {
+        let enabled = !appState.isModelDisabled(modelID, for: providerID)
+        return Toggle("", isOn: Binding(
+            get: { !appState.isModelDisabled(modelID, for: providerID) },
+            set: { isOn in
+                appState.setModelDisabled(!isOn, modelID: modelID, for: providerID)
+                // 禁用/启用后清除旧测试结果，避免重新启用时残留过期状态
+                modelTestResults.removeValue(forKey: modelID)
+            }
+        ))
+        .labelsHidden()
+        .toggleStyle(.checkbox)
+        .controlSize(.mini)
+        .help(enabled ? "禁用该模型（从 /v1/models 与网关白名单隐藏）" : "启用该模型")
+        .pointingHandCursor()
     }
 
     // MARK: - 自定义 Provider 模型列表（可编辑）
@@ -673,35 +746,46 @@ struct SettingsProviderPane: View {
     @ViewBuilder
     private func customModelRow(_ model: Model) -> some View {
         let result = modelTestResults[model.id] ?? .idle
-        HStack(alignment: .top, spacing: 6) {
+        let isDisabled = appState.isModelDisabled(model.id, for: providerID)
+        HStack(alignment: .center, spacing: 6) {
+            modelEnabledToggle(model.id)
+
             Text(model.id)
                 .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 200, alignment: .leading)
+                .foregroundStyle(isDisabled ? .tertiary : .secondary)
+                .strikethrough(isDisabled)
+                .frame(maxWidth: 180, alignment: .leading)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .help(isDisabled ? "已禁用：从 /v1/models 与网关白名单隐藏（勾选可重新启用）" : "")
 
             // 模型名后直接放弹性空白：状态区与删除按钮固定靠右，测试后删除按钮也始终在最右侧。
             Spacer(minLength: 8)
 
-            switch result {
-            case .testing:
-                ProgressView().controlSize(.small)
-            case .ok(let msg):
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.footnote)
-                Text(msg).font(.caption2).foregroundStyle(.secondary)
-            case .failed(let msg):
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.footnote)
-                Text(msg).font(.caption2).foregroundStyle(.red)
-            case .idle:
-                Button("测试") { startModelTest("\(providerID)/\(model.id)", resultKey: model.id) }
-                    .buttonStyle(.link)
-                    .controlSize(.small)
-                    .pointingHandCursor()
+            if isDisabled {
+                Text("已禁用")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                switch result {
+                case .testing:
+                    ProgressView().controlSize(.small)
+                case .ok(let msg):
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.footnote)
+                    Text(msg).font(.caption2).foregroundStyle(.secondary)
+                case .failed(let msg):
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                    Text(msg).font(.caption2).foregroundStyle(.red)
+                case .idle:
+                    Button("测试") { startModelTest("\(providerID)/\(model.id)", resultKey: model.id) }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                        .pointingHandCursor()
+                }
             }
 
             if result != .testing {
@@ -802,13 +886,22 @@ struct SettingsProviderPane: View {
         }
 
         // deviceFlow (CodeBuddy)：主 token（credential.accessToken）+ 轮换 token（apiKeys）
+        // 主 token 的标签：新配置同时存在 apiKeys[]（带用户标签）时优先复用，
+        // 否则（旧配置 / OAuth 登录）回退为掩码标签；按值去重避免主 token 重复。
         if draftTokens.isEmpty {
             var tokens: [KeyedToken] = []
+            var seen = Set<String>()
+            let stored = pc?.apiKeys ?? []
             if let access = pc?.credential.accessToken, !access.isEmpty {
-                tokens.append(KeyedToken(value: access))
+                seen.insert(access)
+                if let labeled = stored.first(where: { $0.value == access }) {
+                    tokens.append(labeled)
+                } else {
+                    tokens.append(KeyedToken(value: access))
+                }
             }
-            if let rest = pc?.apiKeys, !rest.isEmpty {
-                tokens.append(contentsOf: rest)
+            for t in stored where !seen.contains(t.value) {
+                tokens.append(t)
             }
             if !tokens.isEmpty {
                 draftTokens = tokens
@@ -982,7 +1075,9 @@ struct SettingsProviderPane: View {
         testAllTotal = 0
         let credential = appState.config.credential(for: providerID)
         Task {
-            let models = (try? await provider.listModels(credential: credential)) ?? []
+            let all = (try? await provider.listModels(credential: credential)) ?? []
+            // 跳过已禁用的模型（设置面板「禁用」开关）
+            let models = all.filter { !appState.isModelDisabled($0.id, for: providerID) }
             testAllTotal = models.count
             if models.isEmpty {
                 testAllOutcomes.append(ModelTestOutcome(

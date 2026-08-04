@@ -125,6 +125,11 @@ public struct RouteHandler: Sendable {
             return allowedModels.contains("\(aliasOrID)/\(modelID)")
         }
 
+        // 供应商级模型禁用（设置面板「禁用」开关）：禁用模型视为不存在，不进 /v1/models
+        let isModelDisabled = { (providerID: String, modelID: String) in
+            config.providers[providerID]?.isModelDisabled(modelID) ?? false
+        }
+
         for descriptor in registry.orderedDescriptors(config.providerOrder) {
             // 仅处理已注册且启用的 provider
             guard config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id) else { continue }
@@ -142,10 +147,10 @@ public struct RouteHandler: Sendable {
             }
 
             // 静态目录与动态结果合并，按归一化 id 去重
-            for model in descriptor.models where isModelAllowed(alias, model.id) {
+            for model in descriptor.models where isModelAllowed(alias, model.id) && !isModelDisabled(descriptor.id, model.id) {
                 appendModel(alias, model.id, descriptor.id)
             }
-            for model in dynamicModels ?? [] where isModelAllowed(alias, model.id) {
+            for model in dynamicModels ?? [] where isModelAllowed(alias, model.id) && !isModelDisabled(descriptor.id, model.id) {
                 appendModel(alias, model.id, descriptor.id)
             }
         }
@@ -173,6 +178,11 @@ public struct RouteHandler: Sendable {
         }
         guard let provider = registry.provider(for: resolution.providerID) else {
             return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+        }
+
+        // 供应商级模型禁用：禁用模型视为不存在（与 /v1/models 不展示保持一致）
+        if config.providers[resolution.providerID]?.isModelDisabled(resolution.modelID) == true {
+            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(chatRequest.model)\"}", contentType: "application/json")
         }
 
         // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 且模型不在其中 → 403

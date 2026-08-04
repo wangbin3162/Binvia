@@ -15,51 +15,52 @@ struct ServerStatusView: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "bolt.shield")
-                .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(.tint)
-                .frame(width: 26, height: 26)
+        VStack(alignment: .leading, spacing: 8) {
+            // 行 1：服务端点独占一行（不折行，文字稍大）；停止时也展示配置地址（置灰）以便复制。
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.shield")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.tint)
+                    .frame(width: 26, height: 26)
 
-            VStack(alignment: .leading, spacing: 3) {
-                // 服务地址 + 复制按钮
-                HStack(spacing: 6) {
-                    Text(appState.isServerRunning ? address : "服务已停止")
-                        .font(.system(.caption, weight: .medium))
-                        .monospaced()
-                        .foregroundStyle(appState.isServerRunning ? .primary : .secondary)
-                    if appState.isServerRunning {
-                        copyButton
-                    }
-                }
-                // 状态灯 + 状态文字 + 错误信息
-                HStack(spacing: 5) {
-                    StatusBadge(
-                        color: appState.isServerRunning ? BadgeColor.running : BadgeColor.stopped,
-                        tooltip: appState.isServerRunning ? "运行中" : "已停止"
-                    )
-                    Text(appState.isServerRunning ? "运行中" : "已停止")
+                Text(address)
+                    .font(.system(.callout, weight: .medium))
+                    .monospaced()
+                    .foregroundStyle(appState.isServerRunning ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                copyButton
+            }
+
+            // 行 2：状态（状态灯 + 文字 + 错误信息）与右侧启停按钮同一排。
+            HStack(spacing: 6) {
+                StatusBadge(
+                    color: appState.isServerRunning ? BadgeColor.running : BadgeColor.stopped,
+                    tooltip: appState.isServerRunning ? "运行中" : "已停止"
+                )
+                Text(appState.isServerRunning ? "运行中" : "已停止")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let err = appState.serverError, !err.isEmpty {
+                    Text("· \(err)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if let err = appState.serverError, !err.isEmpty {
-                        Text("· \(err)")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-            }
 
-            Spacer()
+                Spacer()
 
-            Button(appState.isServerRunning ? "停止" : "启动") {
-                appState.toggleServer()
+                Button(appState.isServerRunning ? "停止" : "启动") {
+                    appState.toggleServer()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(appState.isServerRunning ? .red : .accentColor)
+                .controlSize(.small)
+                .pointingHandCursor()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(appState.isServerRunning ? .red : .accentColor)
-            .controlSize(.small)
-            .pointingHandCursor()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

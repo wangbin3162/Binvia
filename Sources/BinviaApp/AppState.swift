@@ -211,8 +211,12 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
-    /// 设置 deviceFlow 类型 provider 的多 AccessToken（首 token → credential.accessToken，其余 → apiKeys[]）。
-    /// 配套的 refreshToken 保留在 credential 中。令牌带标签（CodexBar 令牌账户风格）。
+    /// 设置 deviceFlow 类型 provider 的多 AccessToken（主 token → credential.accessToken + apiKeys[0]，
+    /// 其余 → apiKeys[]）。配套的 refreshToken 保留在 credential 中。令牌带标签（CodexBar 令牌账户风格）。
+    ///
+    /// 标签保留：全部令牌（含主 token）带标签写入 `apiKeys[]`，主 token 值同时同步到
+    /// `credential.accessToken` 供路由读取（`accessTokens(for:)` / provider 端按值去重，不重复）。
+    /// 此前主 token 只存 value、标签丢失，导致重开设置面板后自定义标签回退为掩码缩写。
     func setAccessTokens(_ tokens: [KeyedToken], refreshToken: String?, for providerID: String) throws {
         let cleaned = tokens
             .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -229,9 +233,9 @@ final class AppState: ObservableObject {
         credential.refreshToken = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? refreshToken!.trimmingCharacters(in: .whitespacesAndNewlines)
             : credential.refreshToken
-        // apiKeys[] 中存放除主 token 外的其他 token（轮换用）
         providerConfig.credential = credential
-        providerConfig.apiKeys = Array(cleaned.dropFirst())
+        // 全部令牌（含主 token）带标签存入 apiKeys[]，保证标签跨会话保留
+        providerConfig.apiKeys = cleaned
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
@@ -328,6 +332,42 @@ final class AppState: ObservableObject {
     func setProviderEnabled(_ enabled: Bool, for providerID: String) {
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = enabled
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
+    }
+
+    /// 某模型是否被禁用（设置面板模型行「启用/禁用」开关）。
+    func isModelDisabled(_ modelID: String, for providerID: String) -> Bool {
+        config.providers[providerID]?.isModelDisabled(modelID) ?? false
+    }
+
+    /// 设置某模型启用/禁用（禁用模型视为不存在：/v1/models 不展示、网关白名单不可选、请求 404）。
+    func setModelDisabled(_ disabled: Bool, modelID: String, for providerID: String) {
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        var disabledSet = Set(providerConfig.disabledModels)
+        if disabled {
+            disabledSet.insert(modelID)
+        } else {
+            disabledSet.remove(modelID)
+        }
+        providerConfig.disabledModels = disabledSet.sorted()
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
+    }
+
+    /// 批量设置该供应商多个模型的启用/禁用（一次持久化，避免逐模型保存/热更新）。
+    func setModelsDisabled(_ disabled: Bool, modelIDs: [String], for providerID: String) {
+        guard !modelIDs.isEmpty else { return }
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        var disabledSet = Set(providerConfig.disabledModels)
+        for id in modelIDs {
+            if disabled {
+                disabledSet.insert(id)
+            } else {
+                disabledSet.remove(id)
+            }
+        }
+        providerConfig.disabledModels = disabledSet.sorted()
         config.providers[providerID] = providerConfig
         try? saveConfig()
     }

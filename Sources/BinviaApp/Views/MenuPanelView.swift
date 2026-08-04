@@ -27,7 +27,8 @@ struct MenuPanelView: View {
     @State private var contentHeight: CGFloat = 0
 
     /// 内容区高度上限：超过则内部滚动（MenuBarExtra 面板不可过高）。
-    private static let maxContentHeight: CGFloat = 400
+    /// 供应商较多时允许面板继续长高（从 400 提升到 560），减少内部滚动。
+    private static let maxContentHeight: CGFloat = 560
 
     /// 测量值未到达前的兜底高度，避免初始闪跳。
     private static let fallbackContentHeight: CGFloat = 260
@@ -70,6 +71,11 @@ struct MenuPanelView: View {
             if selectedTab != "overview" && !newIDs.contains(selectedTab) {
                 selectedTab = "overview"
             }
+        }
+        // 主面板背景与设置窗口统一：sidebar 材质，轻微半透明。
+        .background {
+            AppBackgroundMaterial()
+                .ignoresSafeArea()
         }
     }
 

@@ -530,6 +530,69 @@ func gatewayKeyWhitelistTests() async throws {
     }
 }
 
+// MARK: - 供应商级模型禁用（设置面板「禁用」开关）
+
+/// 禁用模型视为不存在：/v1/models 不展示、chat 请求 404；配置可往返编解码。
+func providerModelDisableTests() async throws {
+    ProviderCatalog.registerAll()
+    unsetenv("DEEPSEEK_API_KEY")
+    unsetenv("DEEPSEEK_BASE_URL")
+    await ModelCache.shared.invalidate("deepseek")
+
+    // 1) ProviderConfig.disabledModels 编解码（含旧配置缺字段回退）
+    let pc = ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), disabledModels: ["deepseek-v4-flash"])
+    let pcData = try JSONEncoder().encode(pc)
+    let pcDecoded = try JSONDecoder().decode(ProviderConfig.self, from: pcData)
+    expectEqual(pcDecoded.disabledModels, ["deepseek-v4-flash"], "disabledModels round trip")
+    expectTrue(pcDecoded.isModelDisabled("deepseek-v4-flash"), "isModelDisabled 命中")
+    expectFalse(pcDecoded.isModelDisabled("deepseek-v4-pro"), "isModelDisabled 未命中")
+
+    let legacy = #"{"enabled": true, "credential": {"apiKey": "k"}}"#
+    let legacyDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacy.utf8))
+    expectEqual(legacyDecoded.disabledModels, [], "旧配置缺 disabledModels → 空数组")
+
+    // 2) 路由：禁用模型不出现在 /v1/models，chat 返回 404
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            "deepseek": ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                disabledModels: ["deepseek-v4-flash"]
+            ),
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    func req(_ method: String, _ path: String, body: Data? = nil) -> HTTPRequest {
+        HTTPRequest(
+            method: method, path: path, queryItems: [:],
+            headers: ["authorization": "Bearer test-key"], body: body)
+    }
+    func chatBody(model: String) -> Data {
+        Data(#"{"model": "\#(model)", "messages": [{"role": "user", "content": "hi"}]}"#.utf8)
+    }
+
+    let modelsResp = try await handler.handle(req("GET", "/v1/models"))
+    if let data = modelsResp.bodyData(),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        let ids = Set((json["data"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+        expectTrue(ids.contains("ds/deepseek-v4-pro"), "/v1/models 含未禁用模型")
+        expectFalse(ids.contains("ds/deepseek-v4-flash"), "/v1/models 不含禁用模型")
+    } else {
+        failed += 1
+        print("FAIL: /v1/models 禁用模型过滤响应解析失败")
+    }
+
+    let disabled = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/deepseek-v4-flash")))
+    expectEqual(disabled.status, 404, "禁用模型 chat → 404")
+
+    // 未禁用模型仍正常路由（无凭据/不可达上游 → 502，而非 404）
+    let enabled = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/deepseek-v4-pro")))
+    expectEqual(enabled.status, 502, "未禁用模型正常进入上游（无凭据 → 502）")
+}
+
 extension HTTPResponse {
     /// 便捷取 data body（测试用）。
     func bodyData() -> Data? {
@@ -3549,6 +3612,7 @@ await run("ProviderRegistry 反向索引", registryReverseIndexTests)
 await run("Router 消歧升级", routerDisambiguationTests)
 await run("配置 v1→v2 迁移", configMigrationTests)
 await run("网关 key 白名单过滤", gatewayKeyWhitelistTests)
+await run("供应商模型禁用过滤", providerModelDisableTests)
 await run("SSE 解析与聚合", sseTests)
 await run("APIKey 认证", apiKeyAuthenticatorTests)
 await run("RouteConfig 配置", routeConfigTests)

@@ -19,6 +19,10 @@ struct SettingsGatewayKeysPane: View {
     @State private var limitedMode: Set<String> = []
     /// 各 key 是否展开白名单编辑。
     @State private var expandedKeys: Set<String> = []
+    /// 各 key 的供应商分组展开状态（key → 已展开的 providerID 集合），分组可独立展开/收起。
+    @State private var expandedProviderGroups: [String: Set<String>] = [:]
+    /// 已执行过「自动展开含勾选分组」的 key（避免动态模型加载时反复自动展开）。
+    @State private var autoExpandedGroups: Set<String> = []
     /// 各 key 的保存反馈。
     @State private var saveMessages: [String: String] = [:]
 
@@ -54,6 +58,13 @@ struct SettingsGatewayKeysPane: View {
         .scrollContentBackground(.hidden)
         .onAppear {
             loadAllModels()
+        }
+        .onChange(of: allModelOptions) { _, options in
+            // 模型列表异步加载完成后，补做一次「自动展开含勾选分组」
+            guard !options.isEmpty else { return }
+            for key in limitedMode {
+                autoExpandGroupsWithSelection(for: key)
+            }
         }
     }
 
@@ -113,10 +124,7 @@ struct SettingsGatewayKeysPane: View {
                         expandedKeys.insert(key)
                         // 展开时：已有白名单 → 进入限制模式并预填勾选；全部启用 → 保持勾选模式隐藏
                         if gateway.enabledModels != nil {
-                            limitedMode.insert(key)
-                            if selectedModels[key] == nil {
-                                selectedModels[key] = Set(gateway.enabledModels ?? [])
-                            }
+                            enterLimitedMode(for: key, enabledModels: gateway.enabledModels)
                         }
                     } else {
                         expandedKeys.remove(key)
@@ -127,7 +135,7 @@ struct SettingsGatewayKeysPane: View {
                     // 全部启用开关：开 → 不限制（nil）；关 → 进入模型勾选模式
                     Toggle("全部启用（不限制模型）", isOn: allEnabledBinding(for: gateway))
                         .font(.caption)
-                        .toggleStyle(.switch)
+                        .toggleStyle(.checkbox)
                         .controlSize(.mini)
 
                     if limitedMode.contains(key) {
@@ -150,35 +158,48 @@ struct SettingsGatewayKeysPane: View {
                                     .pointingHandCursor()
                             }
                         } else {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(Array(groupedOptions.enumerated()), id: \.element.providerID) { (index, group) in
-                                        if index > 0 {
-                                            Divider()
-                                                .padding(.vertical, 2)
+                            // 供应商分组（可独立展开/收起），避免供应商过多时整屏滚动：
+                            // 分组头 = 品牌图标 + 名称 + 已选计数；底部「全部展开/收起」一键切换。
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text("已选 \(selectedModels[key]?.count ?? 0) / \(allModelOptions.count) 个模型")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button(areAllGroupsExpanded(for: key) ? "全部收起" : "全部展开") {
+                                        toggleAllGroups(for: key)
+                                    }
+                                    .buttonStyle(.link)
+                                    .controlSize(.small)
+                                    .pointingHandCursor()
+                                }
+                                .padding(.bottom, 2)
+
+                                ForEach(groupedOptions) { group in
+                                    DisclosureGroup(isExpanded: providerGroupBinding(key: key, group: group)) {
+                                        VStack(alignment: .leading, spacing: 0) {
+                                            ForEach(group.options) { option in
+                                                modelToggleRow(key: key, option: option)
+                                            }
                                         }
+                                        .padding(.leading, 4)
+                                    } label: {
                                         HStack(spacing: 4) {
                                             ProviderBrandIcon(providerID: group.providerID, size: 12)
                                             Text(group.label)
-                                                .font(.caption2.weight(.semibold))
-                                                .foregroundStyle(.secondary)
+                                                .font(.caption.weight(.semibold))
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
                                             Spacer()
-                                        }
-                                        .padding(.top, index == 0 ? 0 : 4)
-                                        ForEach(group.options) { option in
-                                            modelToggleRow(key: key, option: option)
+                                            Text("已选 \(selectedCount(key: key, in: group))")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
                                         }
                                     }
+                                    .disclosurePointingHand(isExpanded: (expandedProviderGroups[key] ?? []).contains(group.providerID))
                                 }
-                                .padding(.trailing, 4)
                             }
-                            .frame(maxHeight: 180)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                            Text("已选 \(selectedModels[key]?.count ?? 0) / \(allModelOptions.count) 个模型")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                            .padding(.trailing, 4)
                         }
                     }
 
@@ -198,6 +219,7 @@ struct SettingsGatewayKeysPane: View {
                             appState.setGatewayKeyEnabledModels(key, enabledModels: nil)
                             limitedMode.remove(key)
                             selectedModels[key] = nil
+                            expandedProviderGroups[key] = nil
                             saveMessages[key] = "已保存（全部启用）"
                         }
                         .buttonStyle(.bordered)
@@ -232,17 +254,73 @@ struct SettingsGatewayKeysPane: View {
                     saveMessages[key] = "已保存（全部启用）"
                 } else {
                     // 进入限制模式：预填当前白名单（或从空开始）
-                    limitedMode.insert(key)
-                    if selectedModels[key] == nil {
-                        selectedModels[key] = Set(gateway.enabledModels ?? [])
-                    }
+                    enterLimitedMode(for: key, enabledModels: gateway.enabledModels)
                     saveMessages[key] = nil
                 }
             }
         )
     }
 
-    /// 单个模型勾选行。
+    /// 进入「限制模型」编辑模式：预填勾选集合 + 自动展开含已勾选模型的分组（每 key 仅一次）。
+    private func enterLimitedMode(for key: String, enabledModels: [String]?) {
+        limitedMode.insert(key)
+        if selectedModels[key] == nil {
+            selectedModels[key] = Set(enabledModels ?? [])
+        }
+        autoExpandGroupsWithSelection(for: key)
+    }
+
+    /// 自动展开「包含已勾选模型」的供应商分组（模型列表未加载完时留待 onChange 补做）。
+    private func autoExpandGroupsWithSelection(for key: String) {
+        guard !autoExpandedGroups.contains(key) else { return }
+        let selected = selectedModels[key] ?? []
+        let toExpand = groupedOptions
+            .filter { group in group.options.contains { selected.contains($0.id) } }
+            .map(\.providerID)
+        if !toExpand.isEmpty {
+            expandedProviderGroups[key] = Set(toExpand)
+            autoExpandedGroups.insert(key)
+        }
+    }
+
+    /// 单个供应商分组的展开/收起绑定。
+    private func providerGroupBinding(key: String, group: ProviderModelGroup) -> Binding<Bool> {
+        Binding(
+            get: { (expandedProviderGroups[key] ?? []).contains(group.providerID) },
+            set: { isOn in
+                var set = expandedProviderGroups[key] ?? []
+                if isOn {
+                    set.insert(group.providerID)
+                } else {
+                    set.remove(group.providerID)
+                }
+                expandedProviderGroups[key] = set
+            }
+        )
+    }
+
+    /// 全部展开 / 全部收起（按当前状态取反）。
+    private func toggleAllGroups(for key: String) {
+        if areAllGroupsExpanded(for: key) {
+            expandedProviderGroups[key] = []
+        } else {
+            expandedProviderGroups[key] = Set(groupedOptions.map(\.providerID))
+        }
+    }
+
+    private func areAllGroupsExpanded(for key: String) -> Bool {
+        guard !groupedOptions.isEmpty else { return false }
+        let expanded = expandedProviderGroups[key] ?? []
+        return expanded.count == groupedOptions.count
+    }
+
+    /// 某分组内已勾选的模型数（分组头右侧计数）。
+    private func selectedCount(key: String, in group: ProviderModelGroup) -> Int {
+        let selected = selectedModels[key] ?? []
+        return group.options.filter { selected.contains($0.id) }.count
+    }
+
+    /// 单个模型勾选行（紧凑 checkbox，避免开关样式过大）。
     private func modelToggleRow(key: String, option: GatewayModelOption) -> some View {
         let selected = selectedModels[key] ?? []
         return HStack(spacing: 6) {
@@ -259,6 +337,7 @@ struct SettingsGatewayKeysPane: View {
                 }
             ))
             .labelsHidden()
+            .toggleStyle(.checkbox)
             .controlSize(.mini)
             Text(option.id)
                 .font(.caption2)
@@ -313,6 +392,8 @@ struct SettingsGatewayKeysPane: View {
         for descriptor in ProviderRegistry.shared.allDescriptors() where isIncluded(descriptor) {
             let alias = descriptor.alias ?? descriptor.id
             for model in descriptor.models {
+                // 供应商面板「禁用」的模型不出现在白名单可选列表
+                guard !appState.isModelDisabled(model.id, for: descriptor.id) else { continue }
                 let normalized = "\(alias)/\(model.id)"
                 guard seen.insert(normalized).inserted else { continue }
                 options.append(GatewayModelOption(id: normalized, providerID: descriptor.id, modelID: model.id))
@@ -329,6 +410,8 @@ struct SettingsGatewayKeysPane: View {
                 var merged = allModelOptions
                 var mergedSeen = Set(merged.map(\.id))
                 for model in dynamic {
+                    // 供应商面板「禁用」的模型不出现在白名单可选列表
+                    guard !appState.isModelDisabled(model.id, for: descriptor.id) else { continue }
                     let normalized = "\(alias)/\(model.id)"
                     guard mergedSeen.insert(normalized).inserted else { continue }
                     merged.append(GatewayModelOption(id: normalized, providerID: descriptor.id, modelID: model.id))

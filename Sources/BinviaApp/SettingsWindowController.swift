@@ -32,6 +32,15 @@ final class SettingsWindowController {
         let w = NSWindow(contentViewController: hosting)
         w.title = "Binvia Settings"
         w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        // 统一半透明材质背景：窗口非不透明 + 透明 titlebar，让 `AppBackgroundMaterial`
+        // （sidebar 材质）真正透出模糊，并延伸到标题栏区域（edge-to-edge，对齐 CodexBar）。
+        w.titlebarAppearsTransparent = true
+        w.titlebarSeparatorStyle = .none
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        if !w.styleMask.contains(.fullSizeContentView) {
+            w.styleMask.insert(.fullSizeContentView)
+        }
         w.setContentSize(
             NSSize(
                 width: SettingsWindowMetrics.windowWidth,
