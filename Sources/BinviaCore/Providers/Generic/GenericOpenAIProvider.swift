@@ -66,10 +66,32 @@ public struct GenericOpenAIProvider: Provider {
                 throw ProviderError.invalidResponse("invalid request body")
             }
             json["model"] = strippedModel
+            // 对齐 OmniRoute：非 OpenAI 系供应商把 developer 角色归一化为 system
+            // （tokenhub/glm、DeepSeek、MiniMax 等上游只认 system）
+            json = RoleNormalizer.normalizeDeveloperRole(json, providerID: id)
+            // 对齐 OmniRoute chatCore.ts #711（Provider-specific max_tokens caps）：
+            // 客户端可能发送超出上游上限的 max_tokens（如 pi 配置 384000），
+            // 上游会直接 400 拒绝，流式客户端会误报 "Stream ended without finish_reason"。
+            // 这里钳制到通用安全上限 131072（GLM 等主流模型的 maxOutputTokens）。
+            if let maxTokens = json["max_tokens"] as? Int, maxTokens > 131_072 {
+                json["max_tokens"] = 131_072
+            }
             return try JSONSerialization.data(withJSONObject: json)
         }
         var req = request
         req.model = strippedModel
+        // 无 rawBody 时同样归一化 developer → system
+        if !RoleNormalizer.preservesDeveloperRole(providerID: id) {
+            req.messages = req.messages.map { message in
+                message.role == .developer
+                    ? ChatMessage(role: .system, content: message.content, name: message.name, toolCallID: message.toolCallID)
+                    : message
+            }
+        }
+        // 与 rawBody 路径一致的 max_tokens 钳制（对齐 OmniRoute #711）
+        if let maxTokens = req.maxTokens, maxTokens > 131_072 {
+            req.maxTokens = 131_072
+        }
         return try JSONEncoder().encode(req)
     }
 

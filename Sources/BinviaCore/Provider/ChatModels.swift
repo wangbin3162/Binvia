@@ -5,15 +5,124 @@ public enum ChatRole: String, Sendable, Codable {
     case user
     case assistant
     case tool
+    /// OpenAI 新版 system 角色（o1/gpt-5 等推理模型、AI SDK 常用），与 `system` 语义等价。
+    case developer
+    /// 旧版 OpenAI 函数调用角色（legacy）。
+    case function
+
+    /// 宽容解码：未知 role 一律归入 `.user`，不因客户端扩展角色而 400
+    /// （参考 OmniRoute：`content`/`role` 不做强校验，按原样透传）。
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ChatRole(rawValue: raw) ?? .user
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// 消息内容块（OpenAI content part 的宽松子集）。
+/// 只取类型与常见字段，未知字段由 Codable 忽略；仅供需要内容块结构的翻译器使用。
+public struct ChatContentPart: Sendable, Codable, Equatable {
+    public var type: String?
+    public var text: String?
+    public var imageURL: String?
+
+    public init(type: String? = nil, text: String? = nil, imageURL: String? = nil) {
+        self.type = type
+        self.text = text
+        self.imageURL = imageURL
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, text
+        case imageURL = "image_url"
+    }
+
+    /// 宽容解码：`image_url` 既可能是字符串（`"url"`）也可能是对象（`{"url": "...", "detail": ...}`，
+    /// 真实多模态请求的形态），两种都接受，避免 content 数组整体解码失败。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decodeIfPresent(String.self, forKey: .type)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        if let url = try? c.decodeIfPresent(String.self, forKey: .imageURL) {
+            imageURL = url
+        } else if let obj = try? c.decodeIfPresent([String: String].self, forKey: .imageURL) {
+            imageURL = obj["url"]
+        } else {
+            imageURL = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(type, forKey: .type)
+        try c.encodeIfPresent(text, forKey: .text)
+        try c.encodeIfPresent(imageURL, forKey: .imageURL)
+    }
+}
+
+/// 消息内容：既可以是纯文本字符串，也可以是内容块数组（多模态 / file part / 工具结果）。
+///
+/// 参考 OmniRoute 的宽松处理：网关对 `content` 不做类型强校验，字符串与数组都接受，
+/// 未知结构（如对象）也不影响整个请求的解析。需要纯文本的翻译器用 `textValue` 提取。
+public enum ChatContent: Sendable, Equatable {
+    case text(String)
+    case parts([ChatContentPart])
+
+    /// 纯文本表示：`text` 原样返回；`parts` 拼接全部 `text` 块。
+    /// 供 Anthropic / Gemini / Cursor 等需要纯文本内容的翻译器使用（图片等非文本块被丢弃）。
+    public var textValue: String {
+        switch self {
+        case .text(let value):
+            return value
+        case .parts(let parts):
+            return parts.compactMap(\.text).joined()
+        }
+    }
+}
+
+extension ChatContent: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) {
+            self = .text(text)
+        } else if let parts = try? container.decode([ChatContentPart].self) {
+            self = .parts(parts)
+        } else {
+            // 兜底：既非字符串也非内容块数组（如对象等未知结构），置空文本，避免整个请求 400。
+            // 原始内容仍由 rawBody 透传，不受影响。
+            self = .text("")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let value):
+            try container.encode(value)
+        case .parts(let parts):
+            try container.encode(parts)
+        }
+    }
+}
+
+extension ChatContent: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) {
+        self = .text(value)
+    }
 }
 
 public struct ChatMessage: Sendable, Codable, Equatable {
     public var role: ChatRole
-    public var content: String?
+    public var content: ChatContent?
     public var name: String?
     public var toolCallID: String?
 
-    public init(role: ChatRole, content: String?, name: String? = nil, toolCallID: String? = nil) {
+    /// `content` 接受字符串字面量（经 `ChatContent: ExpressibleByStringLiteral` 自动包装为 `.text`）。
+    public init(role: ChatRole, content: ChatContent? = nil, name: String? = nil, toolCallID: String? = nil) {
         self.role = role
         self.content = content
         self.name = name

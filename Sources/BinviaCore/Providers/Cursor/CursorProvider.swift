@@ -214,7 +214,7 @@ public struct CursorProvider: Provider {
            let messages = json["messages"] as? [[String: Any]] {
             return Self.convertMessages(messages)
         }
-        return request.messages.map { ($0.role.rawValue, $0.content ?? "") }
+        return request.messages.map { ($0.role.rawValue, $0.content?.textValue ?? "") }
     }
 
     /// Cursor 无 system role：system 内容前置到 user 消息（`[System Instructions]`），

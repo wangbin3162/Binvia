@@ -307,6 +307,8 @@ case "serve":
         try await handler.handle(request)
     }
     try server.start(host: config.host, port: port)
+    // 全局忽略 SIGPIPE：流式响应客户端提前断开不杀进程（与 HTTPServer SO_NOSIGPIPE 双保险）
+    signal(SIGPIPE, SIG_IGN)
     signal(SIGINT, SIG_IGN)
     signal(SIGTERM, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)

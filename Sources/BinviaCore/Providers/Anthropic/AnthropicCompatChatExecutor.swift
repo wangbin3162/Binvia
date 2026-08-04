@@ -55,8 +55,8 @@ public struct AnthropicCompatChatExecutor: Sendable {
     /// 与 Anthropic 信封不兼容，故一律从已解码的 `ChatRequest` 翻译。
     public func makeBody(request: ChatRequest) throws -> Data {
         let system = request.messages
-            .filter { $0.role == .system }
-            .compactMap { $0.content }
+            .filter { $0.role == .system || $0.role == .developer }
+            .compactMap { $0.content?.textValue }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
         let json = AnthropicEnvelopeTranslator.makeAnthropicRequest(

@@ -3356,6 +3356,51 @@ func customProviderConfigCodecTests() throws {
 
 // MARK: - Phase 22: Token 用量提取器与聚合
 
+/// ChatMessage/ChatContent 宽容解码测试（参考 OmniRoute 的宽松透传）。
+/// 覆盖 `role: "developer"`、`content` 数组（含 image_url 对象）、未知 role 回退、字面量构造。
+func chatMessageTolerantDecodeTests() throws {
+    // 1) developer role：不再 400
+    let devJSON = Data(#"{"model":"m","messages":[{"role":"developer","content":"be helpful"}]}"#.utf8)
+    let devReq = try JSONDecoder().decode(ChatRequest.self, from: devJSON)
+    expectEqual(devReq.messages.count, 1, "developer role 消息解析成功")
+    expectEqual(devReq.messages[0].role, .developer, "developer role 保留")
+    expectEqual(devReq.messages[0].content?.textValue, "be helpful", "developer 消息文本")
+
+    // 2) content 数组（多模态 / file part），image_url 为对象形态
+    let partsJSON = Data(#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#.utf8)
+    let partsReq = try JSONDecoder().decode(ChatRequest.self, from: partsJSON)
+    expectEqual(partsReq.messages.count, 1, "content 数组消息解析成功")
+    expectEqual(partsReq.messages[0].content, .parts([
+        ChatContentPart(type: "text", text: "hi"),
+        ChatContentPart(type: "image_url", imageURL: "https://x/y.png"),
+    ]), "content 数组解析为 parts（image_url 对象取 url）")
+    expectEqual(partsReq.messages[0].content?.textValue, "hi", "parts textValue 只拼文本块")
+
+    // 3) 未知 role → 回退 .user，不 400
+    let unknownJSON = Data(#"{"model":"m","messages":[{"role":"computer","content":"ok"}]}"#.utf8)
+    let unknownReq = try JSONDecoder().decode(ChatRequest.self, from: unknownJSON)
+    expectEqual(unknownReq.messages[0].role, .user, "未知 role 回退 user")
+
+    // 4) 字符串字面量构造 + 编解码往返
+    let msg = ChatMessage(role: .user, content: "hi")
+    expectEqual(msg.content?.textValue, "hi", "字面量构造为 .text")
+    let req = ChatRequest(model: "m", messages: [msg], stream: false)
+    let data = try JSONEncoder().encode(req)
+    let round = try JSONDecoder().decode(ChatRequest.self, from: data)
+    expectEqual(round.messages[0].content, .text("hi"), "往返后 content 保留")
+    expectEqual(round.messages[0].role, .user, "往返后 role 保留")
+
+    // 5) content: null → nil
+    let nullJSON = Data(#"{"model":"m","messages":[{"role":"assistant","content":null}]}"#.utf8)
+    let nullReq = try JSONDecoder().decode(ChatRequest.self, from: nullJSON)
+    expectNil(nullReq.messages[0].content, "content null → nil")
+
+    // 6) content 为未知结构（对象）→ 兜底为空文本，不 400
+    let objJSON = Data(#"{"model":"m","messages":[{"role":"user","content":{"weird":true}}]}"#.utf8)
+    let objReq = try JSONDecoder().decode(ChatRequest.self, from: objJSON)
+    expectEqual(objReq.messages[0].content?.textValue, "", "未知结构 content 兜底为空文本")
+}
+
 func tokenUsageExtractorTests() {
     // 1) 流式带 usage 的 chunk（完整 SSE 事件）
     let e1 = TokenUsageExtractor()
@@ -3543,6 +3588,7 @@ await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIPro
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)
+await run("ChatMessage 宽容解码（developer/content 数组）", chatMessageTolerantDecodeTests)
 
 print("")
 print("========================================")

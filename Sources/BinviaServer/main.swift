@@ -29,6 +29,10 @@ if args.contains("--help") || args.contains("-h") {
 let configPath = value(for: "--config")
 let config = try ConfigStore.load(path: configPath)
 
+// 全局忽略 SIGPIPE：流式响应时客户端提前断开会触发 SIGPIPE，默认动作是终止进程。
+// 配合 HTTPServer 对 client fd 设置 SO_NOSIGPIPE（per-socket 双保险）。
+signal(SIGPIPE, SIG_IGN)
+
 let port: Int
 if let portStr = value(for: "--port"), let p = Int(portStr) {
     port = p

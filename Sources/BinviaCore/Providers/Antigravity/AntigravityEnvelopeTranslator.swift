@@ -135,16 +135,16 @@ public enum AntigravityEnvelopeTranslator {
 
         for message in request.messages {
             switch message.role {
-            case .system:
+            case .system, .developer:
                 if systemInstruction == nil,
-                   let text = message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let text = message.content?.textValue.trimmingCharacters(in: .whitespacesAndNewlines),
                    !text.isEmpty {
                     systemInstruction = AntigravitySystemInstruction(parts: [AntigravityPart(text: text)])
                 }
             case .assistant:
-                append(role: "model", text: message.content, to: &contents)
-            case .user, .tool:
-                append(role: "user", text: message.content, to: &contents)
+                append(role: "model", text: message.content?.textValue, to: &contents)
+            case .user, .tool, .function:
+                append(role: "user", text: message.content?.textValue, to: &contents)
             }
         }
 

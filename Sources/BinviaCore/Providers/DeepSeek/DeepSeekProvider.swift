@@ -118,9 +118,17 @@ public struct DeepSeekProvider: Provider {
                 throw ProviderError.invalidResponse("invalid request body")
             }
             json["model"] = request.model
+            json = RoleNormalizer.normalizeDeveloperRole(json, providerID: id)
             body = try JSONSerialization.data(withJSONObject: json)
         } else {
-            body = try JSONEncoder().encode(request)
+            // DeepSeek 上游不认 developer 角色（OpenAI 新版约定），归一化为 system
+            var req = request
+            req.messages = req.messages.map { message in
+                message.role == .developer
+                    ? ChatMessage(role: .system, content: message.content, name: message.name, toolCallID: message.toolCallID)
+                    : message
+            }
+            body = try JSONEncoder().encode(req)
         }
 
         return AsyncThrowingStream { continuation in

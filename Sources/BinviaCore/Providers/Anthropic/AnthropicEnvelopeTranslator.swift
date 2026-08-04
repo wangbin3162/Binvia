@@ -45,11 +45,11 @@ public enum AnthropicEnvelopeTranslator {
             body["system"] = system
         }
         var anthropicMessages: [[String: Any]] = []
-        for message in messages where message.role != .system {
+        for message in messages where message.role != .system && message.role != .developer {
             let role = (message.role == .assistant) ? "assistant" : "user"
             anthropicMessages.append([
                 "role": role,
-                "content": message.content ?? "",
+                "content": message.content?.textValue ?? "",
             ])
         }
         if anthropicMessages.isEmpty {

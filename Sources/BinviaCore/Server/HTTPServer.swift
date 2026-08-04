@@ -219,6 +219,10 @@ enum SocketUtil {
                 }
                 continue
             }
+            // 为 client fd 设置 SO_NOSIGPIPE：客户端提前断开时 write 返回 EPIPE 而非触发 SIGPIPE 杀进程。
+            // macOS 选项，SOL_SOCKET 层级。
+            var nosigpipe = 1
+            _ = setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
             Task.detached {
                 await handleConnection(fd: clientFD, handler: handler)
                 close(clientFD)
