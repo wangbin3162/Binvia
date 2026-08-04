@@ -1,0 +1,80 @@
+# Binvia Release：打 v* tag（或手动触发）→ 构建 universal 产物 → 发布 GitHub Release。
+# 版本号以 tag 为准（v0.1.0 → MARKETING_VERSION=0.1.0），并覆盖 version.env。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 0.1.0），仅手动触发时使用；tag 触发时以 tag 为准"
+        required: true
+        default: "0.1.0"
+
+# 允许 gh release create 写 Releases
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: universal 构建 + 发布
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SwiftPM 构建缓存
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-swift-release-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-
+
+      - name: 版本号以 tag / 手动输入为准（覆盖 version.env）
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"    # v0.1.0 -> 0.1.0
+          fi
+          printf 'MARKETING_VERSION=%s\nBUILD_NUMBER=%s\n' "$VERSION" "${{ github.run_number }}" > version.env
+          cat version.env
+
+      # 双架构（arm64 + x86_64）构建 + 698 项测试 + smoke-test + adhoc 签名 + tar.gz
+      - name: 构建 universal 产物
+        run: ./Scripts/build.sh
+
+      - name: 校验产物
+        run: |
+          cd bin
+          ls -lh
+          lipo -info BinviaApp
+          cat SHA256SUMS
+
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          TAG="v${VERSION}"
+          NOTES=/tmp/release-notes.md
+          echo "Binvia ${VERSION}（macOS universal：Apple Silicon + Intel）" > "$NOTES"
+          echo "" >> "$NOTES"
+          echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 698 项断言 → GUI 无界面自检 → adhoc 签名）" >> "$NOTES"
+          echo "- 产物校验：bin/SHA256SUMS" >> "$NOTES"
+          echo "- 使用：解压后把 Binvia.app 拖入「应用程序」；BinviaServer / BinviaCLI 可在终端直接运行" >> "$NOTES"
+          echo "" >> "$NOTES"
+          echo "> 说明：adhoc 签名仅保证包内完整性，未经 Apple 公证（notarization）。" >> "$NOTES"
+          echo "> 若 Gatekeeper 提示无法打开，请在「系统设置 → 隐私与安全性」中点击「仍要打开」" >> "$NOTES"
+          gh release create "$TAG" \
+            "bin/Binvia-${VERSION}-macos-arm64-x86_64.tar.gz" \
+            bin/SHA256SUMS \
+            --title "Binvia ${VERSION}" \
+            --notes-file "$NOTES"

@@ -1,0 +1,41 @@
+# Binvia CI：每次 push / PR 自动构建 + 测试 + 打包自检。
+# 复用本地发布脚本 Scripts/build.sh（单架构，避免 CI 上重复双架构构建）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支的新提交会取消正在跑的旧 CI，节省 runner 时间
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS 构建 + 测试 + 打包自检
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # SwiftPM 增量构建缓存：Package.swift 不变时直接复用 .build
+      - name: Cache SwiftPM 构建缓存
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-swift-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-
+
+      # build.sh 内部依次执行：release 构建 → BinviaCheck（698 项断言）
+      # → BinviaApp --smoke-test → adhoc 签名 → tar.gz 打包
+      - name: 构建 + 测试 + 打包
+        run: ARCHES="$(uname -m)" ./Scripts/build.sh
+
+      - name: 校验产物
+        run: |
+          cd bin
+          ls -lh
+          cat SHA256SUMS
