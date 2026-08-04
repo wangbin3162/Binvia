@@ -76,6 +76,13 @@ struct ProviderUsageCard: View {
                         modelQuotaRow(snapshot.modelQuotas[index])
                     }
                 }
+
+                // CodeBuddy 积分接口仅支持企业账号（需登录 + 企业 ID）
+                if providerID == "codebuddy-cn" {
+                    Text("仅支持企业积分查询（需登录 + 企业 ID）")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         } else if let dashboard = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
             // 无公开用量 API 的供应商（如 opencode）：提供网页看板入口。
@@ -114,6 +121,7 @@ struct ProviderUsageCard: View {
     }
 
     /// 单个配额窗口行：label + ProgressView + 百分比 + 重置时间。
+    /// CodeBuddy 积分窗口额外展示总积分 / 已用积分。
     private func quotaWindowRow(_ window: QuotaWindow) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -126,15 +134,33 @@ struct ProviderUsageCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let resetAt = window.resetAt {
-                    Text("重置 \(resetAt.formatted(date: .omitted, time: .shortened))")
+                    // 重置时间带日期（仅时间如「重置 0:00」无意义）
+                    Text("重置 \(Self.resetTimeText(resetAt))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
             ProgressView(value: window.remainingFraction)
                 .tint(progressColor(for: window.remainingFraction))
+            // CodeBuddy 积分：展示总积分 / 已用积分
+            if providerID == "codebuddy-cn", window.total > 0 {
+                Text("总积分 \(window.total) · 已用 \(window.used)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 2)
+    }
+
+    /// 重置时间展示：`MM-dd HH:mm`（如「08-21 00:00」）。
+    private static func resetTimeText(_ date: Date) -> String {
+        date.formatted(
+            .dateTime
+            .month(.twoDigits)
+            .day(.twoDigits)
+            .hour(.twoDigits(amPM: .omitted))
+            .minute(.twoDigits)
+        )
     }
 
     /// 单个模型配额行：modelID + ProgressView + 百分比。

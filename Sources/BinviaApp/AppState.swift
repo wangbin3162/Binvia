@@ -211,6 +211,18 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
+    /// 设置某 provider 的企业 ID（CodeBuddy CN 积分查询用，存 `credential.workspaceId`）。
+    func setEnterpriseID(_ id: String, for providerID: String) {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        var credential = providerConfig.credential
+        credential.workspaceId = trimmed.isEmpty ? nil : trimmed
+        providerConfig.credential = credential
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
+    }
+
     /// 设置 deviceFlow 类型 provider 的多 AccessToken（主 token → credential.accessToken + apiKeys[0]，
     /// 其余 → apiKeys[]）。配套的 refreshToken 保留在 credential 中。令牌带标签（CodexBar 令牌账户风格）。
     ///

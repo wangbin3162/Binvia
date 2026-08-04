@@ -3278,92 +3278,120 @@ func openCodeGoUsageFetcherTests() async throws {
 /// - 401/403 → 错误快照；code != 0 → 错误快照；无凭据 → 抛错
 func codeBuddyCnUsageFetcherTests() async throws {
     unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
-    unsetenv("CODEBUDDY_CN_BASE_URL")
+    unsetenv("CODEBUDDY_CN_USAGE_URL")
     defer {
         unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
-        unsetenv("CODEBUDDY_CN_BASE_URL")
+        unsetenv("CODEBUDDY_CN_USAGE_URL")
     }
 
-    // 1) 正常解析：月循环包 + 周循环包 + 赠送包，字段为 Precise 字符串 + 秒级时间戳
+    // 1) 正常解析：code=0 + data{credit, limitNum, cycleResetTime} → 单个积分窗口
     try await withGlobalURLProtocolMock {
-        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        setenv("CODEBUDDY_CN_USAGE_URL", "https://mock.test/billing/meter/get-enterprise-user-usage", 1)
         URLProtocolMock.reset()
         URLProtocolMock.requestHandler = { request in
-            expectEqual(request.url?.absoluteString, "https://mock.test/v2/billing/meter/get-user-resource", "CodeBuddy CN 额度请求 URL")
+            expectEqual(request.url?.absoluteString, "https://mock.test/billing/meter/get-enterprise-user-usage", "CodeBuddy CN 积分请求 URL")
             expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token", "CodeBuddy CN 鉴权头")
-            expectEqual(request.value(forHTTPHeaderField: "X-Product"), "SaaS", "CodeBuddy CN 产品头")
-            let now = Int(Date().timeIntervalSince1970)
-            // 月包：循环 30 天（cycle 结束 30 天后才到期 → refill）；周包：循环 7 天；赠送包：cycle 结束即到期
-            let body = #"{"code":0,"data":{"Response":{"Data":{"Accounts":[{"PackageName":"体验包","CycleStartTime":\#(now - 2592000),"CycleEndTime":\#(now + 2592000),"DeductionEndTime":\#(now + 7776000),"CycleCapacitySizePrecise":"10000","CycleCapacityUsedPrecise":"3000"},{"PackageName":"周包","CycleStartTime":\#(now - 302400),"CycleEndTime":\#(now + 302400),"DeductionEndTime":\#(now + 2592000),"CycleCapacitySizePrecise":"2000","CycleCapacityUsedPrecise":"500"},{"PackageName":"赠送","CycleEndTime":\#(now + 86400),"DeductionEndTime":\#(now + 86400),"CapacitySizePrecise":"500","CapacityUsedPrecise":"200"}]}}}}"#
+            expectEqual(request.value(forHTTPHeaderField: "x-client-platform"), "web", "CodeBuddy CN 客户端平台头")
+            expectEqual(request.value(forHTTPHeaderField: "x-enterprise-id"), "fjm1ce4mdxc0", "CodeBuddy CN 企业 ID 头")
+            let body = #"{"code":0,"msg":"OK","data":{"credit":8988.44,"cycleStartTime":"2026-07-21 00:00:00","cycleEndTime":"2026-08-20 23:59:59","limitNum":13000,"cycleResetTime":"2026-08-21 00:00:00"}}"#
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, Data(body.utf8))
         }
-        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token", workspaceId: "fjm1ce4mdxc0"))
         expectNil(snapshot.error, "CodeBuddy CN 成功快照无 error，实际: \(snapshot.error ?? "nil")")
-        expectEqual(snapshot.quotaWindows.count, 3, "CodeBuddy CN 三个额度包（周/月/赠送，按到期先后）")
-        // 周包先到期 → 排最前
-        let weekly = snapshot.quotaWindows[0]
-        expectEqual(weekly.label, "周度包", "周包标签")
-        expectEqual(weekly.used, 500, "周包 used = CycleCapacityUsedPrecise")
-        expectEqual(weekly.total, 2000, "周包 total = CycleCapacitySizePrecise")
-        expectTrue(abs(weekly.remainingFraction - 0.75) < 0.001, "周包剩余 75%")
-        let monthly = snapshot.quotaWindows[1]
-        expectEqual(monthly.label, "月度包", "月包标签")
-        expectEqual(monthly.used, 3000, "月包 used = CycleCapacityUsedPrecise")
-        expectEqual(monthly.total, 10000, "月包 total = CycleCapacitySizePrecise")
-        expectTrue(abs(monthly.remainingFraction - 0.7) < 0.001, "月包剩余 70%")
-        expectEqual(snapshot.quotaWindows[2].label, "赠送包 1", "赠送包标签")
-        expectEqual(snapshot.quotaWindows[2].used, 200, "赠送包 used = CapacityUsedPrecise")
-    }
-
-    // 2) 数字字段回退（无 Precise）+ 毫秒时间戳
-    try await withGlobalURLProtocolMock {
-        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            let nowMS = Int(Date().timeIntervalSince1970 * 1000)
-            let body = #"{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleEndTime":\#(nowMS + 86400000),"DeductionEndTime":\#(nowMS + 86400000),"CapacitySize":1000,"CapacityUsed":100}]}}}}"#
-            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
-        }
-        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
-        expectEqual(snapshot.quotaWindows.count, 1, "数字字段回退解析 1 个包")
+        expectEqual(snapshot.quotaWindows.count, 1, "CodeBuddy CN 单个积分窗口")
         let window = snapshot.quotaWindows[0]
-        expectEqual(window.used, 100, "CapacityUsed 数字字段回退")
-        expectEqual(window.total, 1000, "CapacitySize 数字字段回退")
+        expectEqual(window.label, "积分", "积分窗口标签")
+        expectEqual(window.used, 8988, "已用积分 = credit = 8988.44")
+        expectEqual(window.total, 13000, "周期总积分 = limitNum")
+        expectTrue(abs(window.remainingFraction - 0.3086) < 0.001, "剩余比例 ≈ (13000-8988.44)/13000 ≈ 30.9%")
         if let reset = window.resetAt {
-            let diff = reset.timeIntervalSinceNow
-            expectTrue(abs(diff - 86400) < 5, "毫秒时间戳 → 重置时间 ≈ now + 1d，实际差值 \(diff)")
+            let components = Calendar.current.dateComponents([.year, .month, .day], from: reset)
+            expectEqual(components.year, 2026, "重置时间年份 2026")
+            expectEqual(components.month, 8, "重置时间月份 8")
+            expectEqual(components.day, 21, "重置时间日期 21")
         } else {
             expectTrue(false, "应有重置时间")
         }
     }
 
-    // 3) 鉴权失败 401 → 错误快照（不抛错）
+    // 2) 鉴权失败 401 → 错误快照（提示重新登录，不抛错）
     try await withGlobalURLProtocolMock {
-        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        setenv("CODEBUDDY_CN_USAGE_URL", "https://mock.test/billing/meter/get-enterprise-user-usage", 1)
         URLProtocolMock.reset()
         URLProtocolMock.requestHandler = { request in
             return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data("unauthorized".utf8))
         }
-        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "bad-token"))
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "bad-token", workspaceId: "fjm1ce4mdxc0"))
         expectTrue(snapshot.error?.contains("重新登录") == true, "CodeBuddy CN 401 → 重新登录提示，实际: \(snapshot.error ?? "nil")")
     }
 
-    // 4) 业务错误 code != 0 → 错误快照
+    // 3) 业务错误 code != 0 → 错误快照（带 msg）
     try await withGlobalURLProtocolMock {
-        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        setenv("CODEBUDDY_CN_USAGE_URL", "https://mock.test/billing/meter/get-enterprise-user-usage", 1)
         URLProtocolMock.reset()
         URLProtocolMock.requestHandler = { request in
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"code":400,"msg":"bad request"}"#.utf8))
         }
-        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token", workspaceId: "fjm1ce4mdxc0"))
         expectTrue(snapshot.error?.contains("bad request") == true, "CodeBuddy CN code!=0 → 错误快照，实际: \(snapshot.error ?? "nil")")
     }
 
-    // 5) 无凭据抛 missingCredentials（不触发网络）
+    // 4) 缺少 credit / limitNum → 错误快照
+    try await withGlobalURLProtocolMock {
+        setenv("CODEBUDDY_CN_USAGE_URL", "https://mock.test/billing/meter/get-enterprise-user-usage", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"code":0,"data":{}}"#.utf8))
+        }
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token", workspaceId: "fjm1ce4mdxc0"))
+        expectTrue(snapshot.error?.contains("credit") == true, "CodeBuddy CN 缺字段 → 错误快照，实际: \(snapshot.error ?? "nil")")
+    }
+
+    // 5) 缺少企业 ID → 错误快照（提示配置 x-enterprise-id，不发网络）
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        expectTrue(snapshot.error?.contains("企业 ID") == true, "CodeBuddy CN 缺企业 ID → 错误快照，实际: \(snapshot.error ?? "nil")")
+        expectEqual(URLProtocolMock.requestCount, 0, "缺企业 ID 不发网络请求")
+    }
+
+    // 6) 无凭据抛 missingCredentials（不触发网络）
     await expectThrows({
         _ = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential())
     }, "CodeBuddy CN 无凭据抛 missingCredentials")
 }
+
+// MARK: - CodeBuddy OAuth 登录账号标识（纯单测）
+
+/// 登录账号标识提取：token 响应字段优先，JWT payload 兜底。
+func codeBuddyIdentityTests() {
+    // 1) 从 token 响应 payload 提取（email 优先）
+    let emailIdentity = CodeBuddyOAuthClient.identity(from: ["email": "user@example.com", "userName": "zhangsan"])
+    expectEqual(emailIdentity, "user@example.com", "identity 优先 email")
+    let userNameIdentity = CodeBuddyOAuthClient.identity(from: ["nickName": "张三", "phoneNumber": "13800138000"])
+    expectEqual(userNameIdentity, "张三", "identity 回退 nickName")
+    let phoneIdentity = CodeBuddyOAuthClient.identity(from: ["phone_number": "13800138000"])
+    expectEqual(phoneIdentity, "13800138000", "identity 回退手机号")
+    expectNil(CodeBuddyOAuthClient.identity(from: ["state": "abc"]), "无身份字段返回 nil")
+
+    // 2) JWT payload 提取（base64url）
+    func jwt(_ payload: [String: Any]) -> String {
+        let header = "eyJhbGciOiJub25lIn0" // {"alg":"none"}
+        let payloadData = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+        let b64 = payloadData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "\(header).\(b64).sig"
+    }
+    let jwtIdentity = CodeBuddyOAuthClient.jwtIdentity(jwt(["email": "jwt@example.com", "sub": "u-123"]))
+    expectEqual(jwtIdentity, "jwt@example.com", "JWT payload 提取 email")
+    let jwtName = CodeBuddyOAuthClient.jwtIdentity(jwt(["name": "李四"]))
+    expectEqual(jwtName, "李四", "JWT payload 回退 name")
+    expectNil(CodeBuddyOAuthClient.jwtIdentity("not-a-jwt"), "非 JWT 返回 nil")
+    expectNil(CodeBuddyOAuthClient.jwtIdentity("header.payload"), "payload 非 JSON 返回 nil")
+}
+
 
 // MARK: - 通用 OpenAI 兼容 Provider（自定义 provider，URLProtocol mock）
 
@@ -3899,6 +3927,7 @@ await run("cursor IDE 模式（URLProtocol mock）", cursorIDEModeTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 await run("OpenCode Go 用量查询（URLProtocol mock）", openCodeGoUsageFetcherTests)
 await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFetcherTests)
+await run("CodeBuddy OAuth 登录账号标识", codeBuddyIdentityTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)

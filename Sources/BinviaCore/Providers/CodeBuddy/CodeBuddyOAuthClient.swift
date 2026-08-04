@@ -58,18 +58,21 @@ public struct CodeBuddyDeviceCode: Sendable, Equatable {
     }
 }
 
-/// 成功获取到的 token 集。
+/// 成功获取到的 token 集。`identity` 为登录账号标识（email / userName / nickName /
+/// phoneNumber，从 token 响应或 accessToken 的 JWT payload 提取，best-effort）。
 public struct CodeBuddyTokenResponse: Sendable, Equatable {
     public let accessToken: String
     public let refreshToken: String?
     public let expiresIn: Int?
     public let tokenType: String
+    public let identity: String?
 
-    public init(accessToken: String, refreshToken: String?, expiresIn: Int?, tokenType: String = "Bearer") {
+    public init(accessToken: String, refreshToken: String?, expiresIn: Int?, tokenType: String = "Bearer", identity: String? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresIn = expiresIn
         self.tokenType = tokenType
+        self.identity = identity
     }
 }
 
@@ -207,7 +210,8 @@ public struct CodeBuddyOAuthClient: Sendable {
                 accessToken: accessToken,
                 refreshToken: Self.stringValue(payload["refreshToken"]),
                 expiresIn: Self.intValue(payload["expiresIn"]),
-                tokenType: Self.stringValue(payload["tokenType"]) ?? "Bearer"
+                tokenType: Self.stringValue(payload["tokenType"]) ?? "Bearer",
+                identity: Self.identity(from: payload)
             )
         }
         if code == 11217 {
@@ -267,10 +271,49 @@ public struct CodeBuddyOAuthClient: Sendable {
         print(device.authUrl.absoluteString)
         openURL(device.authUrl)
         let tokens = try await pollToken(state: device.state)
-        return ProviderCredential(accessToken: tokens.accessToken, refreshToken: tokens.refreshToken)
+        // 登录账号标识（对齐 Antigravity 显示登录用户）：token 响应字段优先，
+        // accessToken 为 JWT 时再从 payload 提取（best-effort，失败不阻塞登录）。
+        let identity = tokens.identity ?? Self.jwtIdentity(tokens.accessToken)
+        return ProviderCredential(
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            email: identity
+        )
     }
 
     // MARK: - 工具
+
+    /// 从 token 响应 payload / JWT claims 提取登录账号标识（best-effort）。
+    /// 优先 email，其次 userName / nickName / name，最后手机号（腾讯账号常为手机号）。
+    public static func identity(from payload: [String: Any]) -> String? {
+        let candidates = [
+            "email", "userName", "user_name", "nickName", "nick_name",
+            "name", "phoneNumber", "phone_number", "phone", "enterpriseName",
+        ]
+        for key in candidates {
+            if let value = payload[key] as? String, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    /// 从 JWT accessToken 的 payload 提取登录账号标识（best-effort）。非 JWT 返回 nil。
+    public static func jwtIdentity(_ token: String) -> String? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 {
+            base64 += "="
+        }
+        guard let data = Data(base64Encoded: base64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return identity(from: json)
+    }
 
     private func jsonMessage(from data: Data) -> String {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

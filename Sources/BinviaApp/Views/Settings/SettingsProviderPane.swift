@@ -24,6 +24,8 @@ struct SettingsProviderPane: View {
     /// OAuth (Antigravity) 手动 Token 草稿。
     @State private var manualToken = ""
     @State private var manualRefreshToken = ""
+    /// CodeBuddy 企业 ID（积分查询用，存 credential.workspaceId）。
+    @State private var enterpriseID = ""
     @State private var tokenSaveMessage: String?
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
     @State private var isManualTokenExpanded = false
@@ -106,6 +108,11 @@ struct SettingsProviderPane: View {
                     loadModels()
                 }
                 loadDrafts()
+            }
+            .onChange(of: enterpriseID) { _, newValue in
+                // 企业 ID 变更即持久化（积分查询头 x-enterprise-id）
+                guard providerID == "codebuddy-cn" else { return }
+                appState.setEnterpriseID(newValue, for: providerID)
             }
         } else {
             Text("未注册的 provider: \(providerID)")
@@ -420,7 +427,16 @@ struct SettingsProviderPane: View {
             }
 
             // refreshToken 与首 token 配套保存（仅首 token 专用）。
-            APIKeyInputField(title: "Refresh Token（可选，用于刷新首 Token）", text: $manualRefreshToken)
+            LabeledContent("Refresh Token") {
+                APIKeyInputField(title: "用于刷新首 Token（可选）", text: $manualRefreshToken)
+            }
+
+            // CodeBuddy 企业 ID：积分查询接口（get-enterprise-user-usage）必需的头。
+            if providerID == "codebuddy-cn" {
+                LabeledContent("企业 ID") {
+                    APIKeyInputField(title: "积分查询（控制台 x-enterprise-id）", text: $enterpriseID)
+                }
+            }
 
             HStack {
                 if let msg = tokenSaveMessage {
@@ -888,8 +904,9 @@ struct SettingsProviderPane: View {
         }
 
         // deviceFlow (CodeBuddy)：主 token（credential.accessToken）+ 轮换 token（apiKeys）
-        // 主 token 的标签：新配置同时存在 apiKeys[]（带用户标签）时优先复用，
-        // 否则（旧配置 / OAuth 登录）回退为掩码标签；按值去重避免主 token 重复。
+        // 主 token 的标签：新配置同时存在 apiKeys[]（带用户标签）时优先复用；
+        // OAuth 登录后自动追加的主 token，用登录账号标识（credential.email）作标签
+        // （对齐 Antigravity 显示登录用户）；无账号标识回退掩码。按值去重避免主 token 重复。
         if draftTokens.isEmpty {
             var tokens: [KeyedToken] = []
             var seen = Set<String>()
@@ -899,7 +916,9 @@ struct SettingsProviderPane: View {
                 if let labeled = stored.first(where: { $0.value == access }) {
                     tokens.append(labeled)
                 } else {
-                    tokens.append(KeyedToken(value: access))
+                    let identity = (pc?.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let label = identity.isEmpty ? KeyedToken.defaultLabel(for: access) : identity
+                    tokens.append(KeyedToken(label: label, value: access))
                 }
             }
             for t in stored where !seen.contains(t.value) {
@@ -912,6 +931,12 @@ struct SettingsProviderPane: View {
 
         if manualRefreshToken.isEmpty, let refresh = pc?.credential.refreshToken, !refresh.isEmpty {
             manualRefreshToken = refresh
+        }
+
+        // CodeBuddy 企业 ID（积分查询）
+        if enterpriseID.isEmpty, providerID == "codebuddy-cn",
+           let wid = pc?.credential.workspaceId, !wid.isEmpty {
+            enterpriseID = wid
         }
 
         // oauth (Antigravity)：单 token 草稿
