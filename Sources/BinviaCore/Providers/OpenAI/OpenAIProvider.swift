@@ -21,6 +21,8 @@ public enum OpenAIProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://api.openai.com/v1/models"),
         forceStream: false,
+        // OpenAI 无公开用量 API（余额需登录控制台查看），提供网页看板入口。
+        usageDashboardURL: URL(string: "https://platform.openai.com/usage"),
         makeProvider: { OpenAIProvider() }
     )
 }

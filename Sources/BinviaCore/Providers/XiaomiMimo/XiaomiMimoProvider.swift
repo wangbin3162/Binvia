@@ -17,6 +17,9 @@ public enum XiaomiMimoProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://api.xiaomimimo.com/v1/models"),
         forceStream: false,
+        // 纯 API key 无法调用 tokenPlan/usage 端点（仅控制台可访问），余额需登录控制台查看
+        //（参考 zai 的 usageDashboardURL 方案）。
+        usageDashboardURL: URL(string: "https://platform.xiaomimimo.com/console/balance"),
         makeProvider: { XiaomiMimoProvider() }
     )
 }

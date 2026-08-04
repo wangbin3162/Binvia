@@ -73,6 +73,10 @@ struct OverviewTabView: View {
 
     // MARK: - Provider 健康度列表
 
+    /// 概览列表最多展示的供应商数：超出则截断并提示去上方 Tab 查看。
+    /// 目的：避免供应商较多时概览内容超高触发内部滚动条，造成概览区宽度收窄抖动。
+    private static let maxOverviewRows = 6
+
     private var providerHealthList: some View {
         VStack(spacing: 0) {
             if appState.configuredProviders.isEmpty {
@@ -82,13 +86,20 @@ struct OverviewTabView: View {
                     .padding(.vertical, 16)
                     .frame(maxWidth: .infinity)
             } else {
-                ForEach(appState.configuredProviders, id: \.id) { descriptor in
+                ForEach(appState.configuredProviders.prefix(Self.maxOverviewRows), id: \.id) { descriptor in
                     ProviderHealthRow(
                         descriptor: descriptor,
                         onTap: { onSelectProvider(descriptor.id) },
                         onSettings: { openSettings(providerID: descriptor.id) }
                     )
                     Divider()
+                }
+                if appState.configuredProviders.count > Self.maxOverviewRows {
+                    Text("还有 \(appState.configuredProviders.count - Self.maxOverviewRows) 个供应商，请在上方 Tab 查看")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                 }
             }
         }

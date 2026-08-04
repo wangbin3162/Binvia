@@ -347,7 +347,9 @@ struct SettingsProviderPane: View {
                     .pointingHandCursor()
             }
         } header: {
+            // 标题黑体：分区标题用粗体（默认 Form 小标题样式偏细，用户反馈 API 令牌标题不醒目）。
             Text("API 令牌")
+                .font(.headline)
         } footer: {
             Text("请求会通过 Authorization: Bearer <key> 转发到 DeepSeek。保存后立即热更新。")
         }

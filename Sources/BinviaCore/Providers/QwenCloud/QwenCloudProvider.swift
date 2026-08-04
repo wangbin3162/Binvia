@@ -18,6 +18,8 @@ public enum QwenCloudProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"),
         forceStream: false,
+        // DashScope 国际站无公开用量 API（余额需登录百炼控制台查看），提供网页看板入口。
+        usageDashboardURL: URL(string: "https://bailian.console.alibabacloud.com"),
         makeProvider: { QwenCloudProvider() }
     )
 }

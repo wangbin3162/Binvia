@@ -16,7 +16,10 @@ struct HiddenScrollIndicators: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
-/// 挂到窗口后递归隐藏窗口内所有 NSScrollView 的滚动条，并延迟重试数次。
+/// 挂到窗口后递归隐藏窗口内所有 NSScrollView 的滚动条。
+/// `layout()` 每次布局同步隐藏（Tab 切换重建 ScrollView 后立即生效，避免
+/// 「先显示滚动条、延迟后才隐藏」造成的概览区宽度收窄抖动）；
+/// `viewDidMoveToWindow` 再延迟重试数次兜底覆盖延迟创建的滚动视图。
 private final class ScrollbarHidingView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -24,7 +27,12 @@ private final class ScrollbarHidingView: NSView {
         scheduleHide()
     }
 
-    private func scheduleHide(retries: Int = 8) {
+    override func layout() {
+        super.layout()
+        hideScrollers()
+    }
+
+    private func scheduleHide(retries: Int = 4) {
         hideScrollers()
         guard retries > 0 else { return }
         Task { @MainActor [weak self] in

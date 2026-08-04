@@ -43,15 +43,24 @@ struct ProviderUsageCard: View {
                     }
                 }
 
-                // 余额（CodexBar ProviderMetricInlineRow 风格：标签左 semibold，余额右 footnote secondary）
+                // 余额（CodexBar ProviderMetricInlineRow 风格：标签左 semibold，余额右 footnote）
+                // 余额值统一绿色 + 币种符号（¥/$），与概览健康行一致。
                 if !snapshot.balances.isEmpty {
-                    // 多 Key 余额：逐行展示（DeepSeek 多 api-key）
+                    // 多 Key 余额：逐行展示（DeepSeek / Kimi 多 api-key）
                     ForEach(Array(snapshot.balances.indices), id: \.self) { index in
                         let entry = snapshot.balances[index]
-                        usageMetricRow(label: entry.label, value: balanceText(entry.balance, currency: entry.currency))
+                        usageMetricRow(
+                            label: entry.label,
+                            value: balanceText(entry.balance, currency: entry.currency),
+                            valueTint: .green
+                        )
                     }
                 } else if let balance = snapshot.balance {
-                    usageMetricRow(label: "余额", value: balanceText(balance, currency: snapshot.currency))
+                    usageMetricRow(
+                        label: "余额",
+                        value: balanceText(balance, currency: snapshot.currency),
+                        valueTint: .green
+                    )
                 }
 
                 // 配额窗口
@@ -87,8 +96,8 @@ struct ProviderUsageCard: View {
     // MARK: - 行组件
 
     /// 用量指标行（CodexBar ProviderMetricInlineRow 风格）：标签左 `.subheadline.weight(.semibold)`，
-    /// 值右 `.footnote` `.secondary` `.monospacedDigit()`。
-    private func usageMetricRow(label: String, value: String) -> some View {
+    /// 值右 `.footnote` `.monospacedDigit()`。`valueTint` 控制值颜色（余额行传绿色）。
+    private func usageMetricRow(label: String, value: String, valueTint: Color = .secondary) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
                 .font(.subheadline.weight(.semibold))
@@ -97,7 +106,7 @@ struct ProviderUsageCard: View {
             Spacer(minLength: 8)
             Text(value)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(valueTint)
                 .monospacedDigit()
                 .multilineTextAlignment(.trailing)
         }
@@ -163,8 +172,8 @@ struct ProviderUsageCard: View {
         Task { await appState.refreshUsageNow(for: providerID) }
     }
 
-    /// 余额展示文本（先拼成 String 再交给 Text，避免 LocalizedStringKey 对 Decimal 插值告警）。
+    /// 余额展示文本：币种符号 + 金额（CNY → ¥、USD → $），两位小数补齐。
     private func balanceText(_ balance: Decimal, currency: String?) -> String {
-        "\(balance) \(currency ?? "")"
+        UsageBalanceText.format(balance, currency: currency)
     }
 }

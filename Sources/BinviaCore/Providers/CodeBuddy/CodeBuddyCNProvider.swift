@@ -29,7 +29,9 @@ public enum CodeBuddyCNProviderDescriptor {
             Model(id: "deepseek-v3-2-volc", name: "DeepSeek-V3.2", contextLength: 96_000, supportsReasoning: true),
         ],
         supportsStreaming: true,
-        // CodeBuddy CN 官方用量接口返回 500，改为网页看板入口（登录后查看积分/余额）。
+        // 通过 OAuth 登录 token 调腾讯计费接口获取额度（CodeBuddyCnUsageFetcher，参考
+        // OmniRoute usage/codebuddy-cn.ts）；失败时兜底展示网页看板入口（登录后查看积分/余额）。
+        usageFetcherFactory: { CodeBuddyCnUsageFetcher() },
         usageDashboardURL: URL(string: "https://www.codebuddy.cn/profile/usage"),
         makeProvider: { CodeBuddyCNProvider() }
     )

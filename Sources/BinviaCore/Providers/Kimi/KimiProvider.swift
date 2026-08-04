@@ -8,7 +8,7 @@ public enum KimiProviderDescriptor {
             displayName: "Kimi",
             authType: .apiKey
         ),
-        baseURL: URL(string: "https://api.moonshot.ai/v1"),
+        baseURL: URL(string: "https://api.moonshot.cn/v1"),
         models: [
             Model(id: "kimi-k3", name: "Kimi K3", contextLength: 1_048_576, supportsReasoning: true),
             Model(id: "kimi-k2.7-code", name: "Kimi K2.7 Code", contextLength: 256_000, supportsReasoning: true),
@@ -25,6 +25,7 @@ public enum KimiProviderDescriptor {
 
 /// Kimi (Moonshot) 供应商（API key 型）。Phase 15 实现。
 ///
+/// 默认国内站点 `api.moonshot.cn`（可用 `KIMI_BASE_URL` / `MOONSHOT_BASE_URL` 覆盖）。
 /// 关键点：Moonshot 的 Kimi 路由**强制流式**（非流式请求会被拒），与 CodeBuddyCN 同型：
 /// - 无论客户端 `stream` 标志，上游请求体恒带 `stream: true`；
 /// - 客户端 `stream=false` 时，用 `SSEJSONAggregator` 把上游 SSE 聚合成单个 OpenAI JSON 返回；
@@ -38,7 +39,7 @@ public struct KimiProvider: Provider {
 
     private enum Endpoint {
         static var base: String {
-            RouteConfig.envValue(["KIMI_BASE_URL"]) ?? "https://api.moonshot.ai/v1"
+            RouteConfig.envValue(["KIMI_BASE_URL", "MOONSHOT_BASE_URL"]) ?? "https://api.moonshot.cn/v1"
         }
         static var chat: URL { URL(string: "\(base)/chat/completions")! }
     }

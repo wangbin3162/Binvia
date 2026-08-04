@@ -18,6 +18,7 @@ public enum OpenCodeGoProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://opencode.ai/zen/go/v1/models"),
         forceStream: false,
+        usageFetcherFactory: { OpenCodeGoUsageFetcher() },
         makeProvider: { OpenCodeGoProvider() }
     )
 }

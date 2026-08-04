@@ -3044,9 +3044,10 @@ func kimiUsageFetcherTests() async throws {
         unsetenv("KIMI_BASE_URL")
         unsetenv("MOONSHOT_API_KEY")
         unsetenv("MOONSHOT_BASE_URL")
+        try? FileManager.default.removeItem(atPath: ConfigStore.defaultPath())
     }
 
-    // 1) 正常解析：data[0].available_balance（字符串）→ Decimal
+    // 1) 正常解析：data[0].available_balance（字符串）+ currency → Decimal；单 Key 掩码标签
     try await withGlobalURLProtocolMock {
         setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
         URLProtocolMock.reset()
@@ -3064,9 +3065,45 @@ func kimiUsageFetcherTests() async throws {
         expectEqual(snapshot.balance, Decimal(string: "88.50"), "Kimi 余额解析（字符串 → Decimal）")
         expectEqual(snapshot.currency, "CNY", "Kimi 币种")
         expectNil(snapshot.error, "Kimi 成功快照无 error")
+        // 对齐 DeepSeek：balances 逐 Key 展示（单 Key 时用掩码标签）
+        expectEqual(snapshot.balances.count, 1, "Kimi 单 Key 也填充 balances")
+        expectTrue(snapshot.balances[0].label.contains("••••"), "Kimi 未配置标签回退掩码，实际: \(snapshot.balances[0].label)")
+        expectEqual(snapshot.balances[0].balance, Decimal(string: "88.50"), "Kimi balances 余额")
     }
 
-    // 2) 顶层 available_balance 回退
+    // 2) 现行响应：data 为字典（无 currency）→ 余额解析 + 币种默认 CNY
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"scode":"0x0","status":true}"#.utf8))
+        }
+        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectEqual(snapshot.balance, Decimal(string: "49.58894"), "Kimi 字典 data 的 available_balance 解析")
+        expectEqual(snapshot.currency, "CNY", "Kimi 响应无 currency 时默认 CNY")
+        expectNil(snapshot.error, "Kimi 字典 data 成功快照无 error")
+    }
+
+    // 3) 业务错误：code != 0 → 该 Key 查询失败 → 全部失败抛 upstreamError
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data(#"{"code":401,"msg":"invalid token","status":false}"#.utf8))
+        }
+        await expectThrows({
+            _ = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "bad-key"))
+        }, "Kimi code!=0 全部 Key 失败抛 upstreamError")
+    }
+
+    // 4) 顶层 available_balance 回退
     try await withGlobalURLProtocolMock {
         setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
         URLProtocolMock.reset()
@@ -3080,7 +3117,7 @@ func kimiUsageFetcherTests() async throws {
         expectEqual(snapshot.balance, Decimal(string: "12.34"), "Kimi 顶层 available_balance 回退")
     }
 
-    // 3) 字段缺失 → error 快照（不抛错）
+    // 5) 字段缺失 → 该 Key 失败 → 全部失败抛错
     try await withGlobalURLProtocolMock {
         setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
         URLProtocolMock.reset()
@@ -3090,12 +3127,12 @@ func kimiUsageFetcherTests() async throws {
             )!
             return (response, Data(#"{"data":[]}"#.utf8))
         }
-        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
-        expectNil(snapshot.balance, "字段缺失时 balance 为 nil")
-        expectTrue(snapshot.error != nil, "字段缺失时返回 error 快照")
+        await expectThrows({
+            _ = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        }, "Kimi 字段缺失抛 upstreamError")
     }
 
-    // 4) 非 2xx 抛 upstreamError
+    // 6) 非 2xx 抛 upstreamError
     try await withGlobalURLProtocolMock {
         setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
         URLProtocolMock.reset()
@@ -3110,10 +3147,222 @@ func kimiUsageFetcherTests() async throws {
         }, "Kimi 401 抛 upstreamError")
     }
 
-    // 5) 无凭据抛 missingCredentials（不触发网络）
+    // 7) 带标签令牌（对齐 DeepSeek）：config apiKeys 标签展示而非掩码
+    try await withGlobalURLProtocolMock {
+        setenv("KIMI_BASE_URL", "https://mock.test/v1", 1)
+        let labeled = RouteConfig(
+            providers: [
+                "kimi": ProviderConfig(
+                    enabled: true,
+                    credential: ProviderCredential(),
+                    apiKeys: [
+                        KeyedToken(label: "主 Key", value: "sk-label-key"),
+                        KeyedToken(label: "备用 Key", value: "sk-backup-key"),
+                    ]
+                ),
+            ]
+        )
+        try ConfigStore.save(labeled)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"code":0,"data":{"available_balance":12.34}}"#.utf8))
+        }
+        let snapshot = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential())
+        expectEqual(snapshot.balances.count, 2, "Kimi config 两令牌均展示")
+        let labels = snapshot.balances.map(\.label)
+        expectEqual(labels, ["主 Key", "备用 Key"], "Kimi 用量卡展示用户配置的令牌标签")
+        expectEqual(snapshot.balances.first?.balance, Decimal(string: "12.34"), "Kimi 标签令牌余额解析")
+        // credential 同 value 时展示配置标签而非掩码
+        let snapshot2 = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "sk-label-key"))
+        expectEqual(snapshot2.balances.first?.label, "主 Key", "Kimi credential 与 config 同 value 时展示配置标签")
+        // 清理临时 config，避免影响后续测试
+        try? FileManager.default.removeItem(atPath: ConfigStore.defaultPath())
+    }
+
+    // 8) 无凭据抛 missingCredentials（不触发网络）
     await expectThrows({
         _ = try await KimiUsageFetcher().fetchUsage(credential: ProviderCredential())
     }, "Kimi 无凭据抛 missingCredentials")
+}
+
+// MARK: - Phase 25: 新用量查询器（URLProtocol mock）
+
+/// OpenCode Go 用量查询器（参考 OmniRoute usage/opencode.ts + opencodeQuotaFetcher.ts）：
+func openCodeGoUsageFetcherTests() async throws {
+    unsetenv("OPENCODE_GO_API_KEY")
+    unsetenv("OPENCODE_GO_QUOTA_URL")
+    unsetenv("OPENCODE_GO_BASE_URL")
+    defer {
+        unsetenv("OPENCODE_GO_API_KEY")
+        unsetenv("OPENCODE_GO_QUOTA_URL")
+        unsetenv("OPENCODE_GO_BASE_URL")
+    }
+
+    // 1) 正常解析：quota 包三窗口（snake_case + 时间戳）
+    try await withGlobalURLProtocolMock {
+        setenv("OPENCODE_GO_QUOTA_URL", "https://mock.test/zen/go/v1/quota", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.url?.absoluteString, "https://mock.test/zen/go/v1/quota", "OpenCode Go 用量请求 URL")
+            expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key", "OpenCode Go 用量鉴权头")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let body = #"{"quota":{"window_5h":{"used":6,"limit":12,"reset_after_seconds":18000},"window_weekly":{"used":12,"limit":30,"reset_at":"2099-01-01T00:00:00Z"},"window_monthly":{"used":0,"limit":60}},"limit_reached":false}"#
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectNil(snapshot.error, "OpenCode Go 成功快照无 error")
+        expectEqual(snapshot.quotaWindows.count, 3, "OpenCode Go 三个配额窗口")
+        let fiveHour = snapshot.quotaWindows[0]
+        expectEqual(fiveHour.label, "$12 / 5小时", "5h 窗口标签")
+        expectEqual(fiveHour.used, 6, "5h 窗口 used = 6")
+        expectEqual(fiveHour.total, 12, "5h 窗口 total = 12")
+        expectTrue(abs(fiveHour.remainingFraction - 0.5) < 0.001, "5h 窗口剩余 50%")
+        if let reset = fiveHour.resetAt {
+            let diff = reset.timeIntervalSinceNow
+            expectTrue(abs(diff - 18000) < 5, "5h 窗口 reset_after_seconds → now + 5h，实际差值 \(diff)")
+        } else {
+            expectTrue(false, "5h 窗口应有重置时间")
+        }
+        expectEqual(snapshot.quotaWindows[1].total, 30, "周窗口 total = 30")
+        expectEqual(snapshot.quotaWindows[2].total, 60, "月窗口 total = 60")
+    }
+
+    // 2) 备用字段名（data 包 + used_amount/limit_amount + 毫秒时间戳）
+    try await withGlobalURLProtocolMock {
+        setenv("OPENCODE_GO_QUOTA_URL", "https://mock.test/zen/go/v1/quota", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let futureMS = Int(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
+            let body = #"{"data":{"5h":{"used_amount":"3","limit_amount":"12","reset_at":"\#(futureMS)"}}}"#
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectEqual(snapshot.quotaWindows.count, 1, "备用字段名解析 1 个窗口")
+        let window = snapshot.quotaWindows[0]
+        expectEqual(window.used, 3, "used_amount 字符串解析")
+        expectEqual(window.total, 12, "limit_amount 字符串解析")
+        if let reset = window.resetAt {
+            let diff = reset.timeIntervalSinceNow
+            expectTrue(abs(diff - 3600) < 5, "毫秒时间戳 → 重置时间，实际差值 \(diff)")
+        } else {
+            expectTrue(false, "应有重置时间")
+        }
+    }
+
+    // 3) 404（配额 API 未公开）→ error 快照，不抛错
+    try await withGlobalURLProtocolMock {
+        setenv("OPENCODE_GO_QUOTA_URL", "https://mock.test/zen/go/v1/quota", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data("not found".utf8))
+        }
+        let snapshot = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential(apiKey: "test-key"))
+        expectTrue(snapshot.error?.contains("404") == true, "OpenCode Go 404 → error 快照，实际: \(snapshot.error ?? "nil")")
+    }
+
+    // 4) 无凭据抛 missingCredentials（不触发网络）
+    await expectThrows({
+        _ = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "OpenCode Go 无凭据抛 missingCredentials")
+}
+
+/// CodeBuddy CN 用量查询器（参考 OmniRoute usage/codebuddy-cn.ts）：
+/// - OAuth 登录 token 调腾讯计费接口 → data.Response.Data.Accounts[]
+/// - 循环包（CycleEndTime 远早于 DeductionEndTime）读 Cycle 字段，按周期标签；
+///   赠送包读 Capacity 字段，按到期编号
+/// - 401/403 → 错误快照；code != 0 → 错误快照；无凭据 → 抛错
+func codeBuddyCnUsageFetcherTests() async throws {
+    unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
+    unsetenv("CODEBUDDY_CN_BASE_URL")
+    defer {
+        unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
+        unsetenv("CODEBUDDY_CN_BASE_URL")
+    }
+
+    // 1) 正常解析：月循环包 + 周循环包 + 赠送包，字段为 Precise 字符串 + 秒级时间戳
+    try await withGlobalURLProtocolMock {
+        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.url?.absoluteString, "https://mock.test/v2/billing/meter/get-user-resource", "CodeBuddy CN 额度请求 URL")
+            expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token", "CodeBuddy CN 鉴权头")
+            expectEqual(request.value(forHTTPHeaderField: "X-Product"), "SaaS", "CodeBuddy CN 产品头")
+            let now = Int(Date().timeIntervalSince1970)
+            // 月包：循环 30 天（cycle 结束 30 天后才到期 → refill）；周包：循环 7 天；赠送包：cycle 结束即到期
+            let body = #"{"code":0,"data":{"Response":{"Data":{"Accounts":[{"PackageName":"体验包","CycleStartTime":\#(now - 2592000),"CycleEndTime":\#(now + 2592000),"DeductionEndTime":\#(now + 7776000),"CycleCapacitySizePrecise":"10000","CycleCapacityUsedPrecise":"3000"},{"PackageName":"周包","CycleStartTime":\#(now - 302400),"CycleEndTime":\#(now + 302400),"DeductionEndTime":\#(now + 2592000),"CycleCapacitySizePrecise":"2000","CycleCapacityUsedPrecise":"500"},{"PackageName":"赠送","CycleEndTime":\#(now + 86400),"DeductionEndTime":\#(now + 86400),"CapacitySizePrecise":"500","CapacityUsedPrecise":"200"}]}}}}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, Data(body.utf8))
+        }
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        expectNil(snapshot.error, "CodeBuddy CN 成功快照无 error，实际: \(snapshot.error ?? "nil")")
+        expectEqual(snapshot.quotaWindows.count, 3, "CodeBuddy CN 三个额度包（周/月/赠送，按到期先后）")
+        // 周包先到期 → 排最前
+        let weekly = snapshot.quotaWindows[0]
+        expectEqual(weekly.label, "周度包", "周包标签")
+        expectEqual(weekly.used, 500, "周包 used = CycleCapacityUsedPrecise")
+        expectEqual(weekly.total, 2000, "周包 total = CycleCapacitySizePrecise")
+        expectTrue(abs(weekly.remainingFraction - 0.75) < 0.001, "周包剩余 75%")
+        let monthly = snapshot.quotaWindows[1]
+        expectEqual(monthly.label, "月度包", "月包标签")
+        expectEqual(monthly.used, 3000, "月包 used = CycleCapacityUsedPrecise")
+        expectEqual(monthly.total, 10000, "月包 total = CycleCapacitySizePrecise")
+        expectTrue(abs(monthly.remainingFraction - 0.7) < 0.001, "月包剩余 70%")
+        expectEqual(snapshot.quotaWindows[2].label, "赠送包 1", "赠送包标签")
+        expectEqual(snapshot.quotaWindows[2].used, 200, "赠送包 used = CapacityUsedPrecise")
+    }
+
+    // 2) 数字字段回退（无 Precise）+ 毫秒时间戳
+    try await withGlobalURLProtocolMock {
+        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let nowMS = Int(Date().timeIntervalSince1970 * 1000)
+            let body = #"{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleEndTime":\#(nowMS + 86400000),"DeductionEndTime":\#(nowMS + 86400000),"CapacitySize":1000,"CapacityUsed":100}]}}}}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        expectEqual(snapshot.quotaWindows.count, 1, "数字字段回退解析 1 个包")
+        let window = snapshot.quotaWindows[0]
+        expectEqual(window.used, 100, "CapacityUsed 数字字段回退")
+        expectEqual(window.total, 1000, "CapacitySize 数字字段回退")
+        if let reset = window.resetAt {
+            let diff = reset.timeIntervalSinceNow
+            expectTrue(abs(diff - 86400) < 5, "毫秒时间戳 → 重置时间 ≈ now + 1d，实际差值 \(diff)")
+        } else {
+            expectTrue(false, "应有重置时间")
+        }
+    }
+
+    // 3) 鉴权失败 401 → 错误快照（不抛错）
+    try await withGlobalURLProtocolMock {
+        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data("unauthorized".utf8))
+        }
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "bad-token"))
+        expectTrue(snapshot.error?.contains("重新登录") == true, "CodeBuddy CN 401 → 重新登录提示，实际: \(snapshot.error ?? "nil")")
+    }
+
+    // 4) 业务错误 code != 0 → 错误快照
+    try await withGlobalURLProtocolMock {
+        setenv("CODEBUDDY_CN_BASE_URL", "https://mock.test", 1)
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"code":400,"msg":"bad request"}"#.utf8))
+        }
+        let snapshot = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential(accessToken: "test-token"))
+        expectTrue(snapshot.error?.contains("bad request") == true, "CodeBuddy CN code!=0 → 错误快照，实际: \(snapshot.error ?? "nil")")
+    }
+
+    // 5) 无凭据抛 missingCredentials（不触发网络）
+    await expectThrows({
+        _ = try await CodeBuddyCnUsageFetcher().fetchUsage(credential: ProviderCredential())
+    }, "CodeBuddy CN 无凭据抛 missingCredentials")
 }
 
 // MARK: - 通用 OpenAI 兼容 Provider（自定义 provider，URLProtocol mock）
@@ -3648,6 +3897,8 @@ await run("Cursor 官方模型目录", cursorModelsCatalogTests)
 await run("Cursor 用量查询（URLProtocol mock）", cursorUsageFetcherTests)
 await run("cursor IDE 模式（URLProtocol mock）", cursorIDEModeTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
+await run("OpenCode Go 用量查询（URLProtocol mock）", openCodeGoUsageFetcherTests)
+await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFetcherTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
