@@ -72,10 +72,10 @@ struct MenuPanelView: View {
                 selectedTab = "overview"
             }
         }
-        // 主面板背景：popover 材质（CodexBar 菜单毛玻璃效果，随桌面壁纸透色），
-        // 与设置窗口侧栏的 sidebar 材质区分——菜单面板更像原生菜单弹出层。
+        // 主面板背景：menu 材质（CodexBar 原生 NSMenu 的菜单背景，随桌面壁纸透色），
+        // 透明度 0.8 让壁纸更透；与设置窗口侧栏的 sidebar 材质区分——菜单面板对齐原生菜单弹出层。
         .background {
-            AppBackgroundMaterial(material: .popover)
+            AppBackgroundMaterial(material: .menu, opacity: 0.55)
                 .ignoresSafeArea()
         }
     }

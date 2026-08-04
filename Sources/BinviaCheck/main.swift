@@ -2541,7 +2541,7 @@ func codexProviderIntegrationTests() async throws {
     expectTrue(testResult.success, "testModel 应成功（nil rawBody 回退编码），实际: \(testResult.message)")
 }
 
-/// Codex 用量查询（URLProtocol mock）：5h/7d 双窗口 + code_review + 401 刷新重试。
+/// Codex 用量查询（URLProtocol mock）：5h/7d 双窗口 + code_review + 401 刷新重试 + 时长标注。
 func codexUsageFetcherTests() async throws {
     // 1) 标准双窗口解析（used_percent 为 0-100 量纲）+ code_review 窗口 + latent 窗口跳过
     try await withGlobalURLProtocolMock {
@@ -2637,7 +2637,67 @@ func codexUsageFetcherTests() async throws {
         expectEqual(snapshot.quotaWindows.count, 2, "刷新重试后仍解析两个窗口")
     }
 
-    // 3) 无 token 抛 missingCredentials
+    // 3) 时长标注（参考 OmniRoute `windowDurationLabel`）：30 天月度窗口 → "Monthly"（免费版现状）
+    try await withGlobalURLProtocolMock {
+        setenv("CODEX_BASE_URL", "https://mock.test", 1)
+        defer { unsetenv("CODEX_BASE_URL") }
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            // 免费版 wham/usage 现返回 30 天月度窗口（limit_window_seconds=2592000），
+            // 此前被位置标签错标为 "5h"，导致「重置一个月后」的月度总额显示在 5h 行上。
+            let body = """
+            {"rate_limit":{"primary_window":{"used_percent":42,"limit_window_seconds":2592000,"reset_after_seconds":2592000},"limit_reached":false}}
+            """
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await CodexUsageFetcher().fetchUsage(
+            credential: ProviderCredential(accessToken: "at", workspaceId: "ws-1")
+        )
+        expectEqual(snapshot.quotaWindows.count, 1, "免费版月度窗口 payload 解析一个窗口")
+        if let monthly = snapshot.quotaWindows.first(where: { $0.label == "Monthly" }) {
+            expectEqual(monthly.remainingFraction, 0.58, "Monthly 窗口 remainingFraction = 1 - 42/100")
+            expectEqual(monthly.used, 42, "Monthly 窗口 used=42")
+            expectTrue(monthly.resetAt != nil, "Monthly 窗口 reset_after_seconds 解析")
+        } else {
+            expectTrue(false, "30 天窗口应标注为 Monthly，实际: \(snapshot.quotaWindows.map(\.label))")
+        }
+    }
+
+    // 3b) 7 天 primary 窗口 → "Weekly"（时长优先于位置，OmniRoute 同款场景）
+    try await withGlobalURLProtocolMock {
+        setenv("CODEX_BASE_URL", "https://mock.test", 1)
+        defer { unsetenv("CODEX_BASE_URL") }
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = """
+            {"rate_limit":{"primary_window":{"used_percent":30,"limit_window_seconds":604800,"reset_after_seconds":100000},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"limit_reached":false}}
+            """
+            return (response, Data(body.utf8))
+        }
+        let snapshot = try await CodexUsageFetcher().fetchUsage(
+            credential: ProviderCredential(accessToken: "at", workspaceId: "ws-1")
+        )
+        if let weekly = snapshot.quotaWindows.first(where: { $0.label == "Weekly" }) {
+            expectEqual(weekly.remainingFraction, 0.7, "7 天 primary 窗口标注 Weekly，remainingFraction = 1 - 30/100")
+        } else {
+            expectTrue(false, "7 天 primary 窗口应标注 Weekly，实际: \(snapshot.quotaWindows.map(\.label))")
+        }
+        if let fiveHour = snapshot.quotaWindows.first(where: { $0.label == "5h" }) {
+            expectEqual(fiveHour.remainingFraction, 0.9, "5h 窗口标注 5h，remainingFraction = 1 - 10/100")
+        } else {
+            expectTrue(false, "5h 窗口缺失，实际: \(snapshot.quotaWindows.map(\.label))")
+        }
+    }
+
+    // 4) 无 token 抛 missingCredentials
     await expectThrows({
         _ = try await CodexUsageFetcher().fetchUsage(credential: ProviderCredential())
     }, "Codex 无 token 抛 missingCredentials")

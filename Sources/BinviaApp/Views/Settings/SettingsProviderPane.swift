@@ -877,7 +877,7 @@ struct SettingsProviderPane: View {
     // MARK: - 用量 Section（Phase 16 / Phase 23.1）
 
     /// 用量卡片：余额 / 配额窗口 / 模型配额。无快照时不展示（「有则展示无则隐藏」）；
-    /// 供应商声明了 `usageDashboardURL` 且无公开用量 API 时，显示「在网页查看」入口。
+    /// 供应商声明了 `usageDashboardURL` 且无公开用量 API 时，显示「官网」入口。
     /// Phase 23.1：渲染逻辑抽取到共享组件 `ProviderUsageCard`，行为与原实现一致。
     @ViewBuilder
     private var usageSection: some View {

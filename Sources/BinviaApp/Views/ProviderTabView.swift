@@ -23,8 +23,6 @@ struct ProviderTabView: View {
                     RecentRequestsView(providerID: providerID)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                    Divider()
-                    actionSection(descriptor)
                 }
                 // 上报内容完整自然高度（放在 ScrollView 内容内部，取完整高度而非可视区）
                 .reportContentHeight()
@@ -153,57 +151,6 @@ struct ProviderTabView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-        }
-    }
-
-    // MARK: - 操作
-
-    private func actionSection(_ descriptor: ProviderDescriptor) -> some View {
-        HStack(spacing: 8) {
-            Button("测试连接") {
-                Task { await appState.testProvider(providerID) }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .pointingHandCursor()
-
-            if let url = descriptor.usageDashboardURL {
-                Button("在网页查看") {
-                    NSWorkspace.shared.open(url)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .pointingHandCursor()
-            }
-
-            testStateIndicator
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    @ViewBuilder
-    private var testStateIndicator: some View {
-        switch appState.testStates[providerID] ?? .idle {
-        case .testing:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("测试中…").font(.caption).foregroundStyle(.secondary)
-            }
-        case .ok(let msg):
-            Label(msg, systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .lineLimit(1)
-        case .failed(let msg):
-            Label(msg, systemImage: "xmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
-                .lineLimit(1)
-        case .idle:
-            EmptyView()
         }
     }
 }

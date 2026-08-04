@@ -85,13 +85,13 @@ struct ProviderUsageCard: View {
                 }
             }
         } else if let dashboard = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
-            // 无公开用量 API 的供应商（如 opencode）：提供网页看板入口。
+            // 无公开用量 API 的供应商（如 opencode）：提供官网入口。
             HStack(spacing: 8) {
-                Label("上游暂未开放用量 API，可在网页查看余额。", systemImage: "globe")
+                Label("未开放用量查询，请到网页查看", systemImage: "globe")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Button("在网页查看") {
+                Button("官网") {
                     NSWorkspace.shared.open(dashboard)
                 }
                 .buttonStyle(.link)

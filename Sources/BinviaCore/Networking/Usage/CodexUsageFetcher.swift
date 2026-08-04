@@ -3,8 +3,10 @@ import Foundation
 /// Codex（ChatGPT 后端）用量查询器。
 ///
 /// 上游：`GET {base}/backend-api/wham/usage`（参考 OmniRoute `services/codexQuotaFetcher.ts`）。
-/// Codex 有**两个独立配额窗口**：primary（5h 短期）与 secondary（7d 每周），
-/// 解析为两个 `QuotaWindow`（label "5h" / "Weekly"）。
+/// Codex 通常有**两个独立配额窗口**：primary（5h 短期）与 secondary（7d 每周）；
+/// 免费版现返回 **30 天月度窗口**（月度总额）。窗口标签按真实时长（`limit_window_seconds`）标注
+/// （参考 OmniRoute `windowDurationLabel`）：≤6h → "5h"、≥6d → "Weekly"、≥20d → "Monthly"，
+/// 上游未提供时长时回退位置标签（"5h" / "Weekly"）。
 ///
 /// 鉴权：`credential.accessToken`（或环境变量 `CODEX_ACCESS_TOKEN`）；
 /// `chatgpt-account-id` 头带 `credential.workspaceId`（OAuth 后绑定）。
@@ -125,6 +127,10 @@ public struct CodexUsageFetcher: ProviderUsageFetcher {
     }
 
     /// 解析 `used_percent`（0-100 量纲）为 `QuotaWindow`；跳过 latent 窗口。
+    /// 窗口标签按真实时长（`limit_window_seconds`）标注（参考 OmniRoute `windowDurationLabel`）：
+    /// - 月度窗口（≥20 天）→ "Monthly"（免费版现状：wham/usage 返回 30 天月度总额）；
+    /// - 周窗口（≥6 天）→ "Weekly"；会话窗口（≤6h）→ "5h"；
+    /// - 上游未提供时长时回退到位置标签（"5h"/"Weekly"）。
     private static func parseWindow(_ raw: Any?, fallbackLabel: String, limitReached: Bool) -> QuotaWindow? {
         guard let window = raw as? [String: Any], !window.isEmpty else { return nil }
         guard let usedPercent = parseDouble(window["used_percent"] ?? window["usedPercent"]) else { return nil }
@@ -141,13 +147,31 @@ public struct CodexUsageFetcher: ProviderUsageFetcher {
         let total = 100
         let usedCount = unlimited ? 0 : Int((Double(total) * used).rounded())
         return QuotaWindow(
-            label: fallbackLabel,
+            label: Self.resolveLabel(window, fallbackLabel: fallbackLabel),
             remainingFraction: remaining,
             resetAt: resetAt,
             unlimited: unlimited,
             used: usedCount,
             total: unlimited ? 0 : total
         )
+    }
+
+    /// 按真实时长推导窗口标签（参考 OmniRoute `windowDurationLabel`）：
+    /// `limit_window_seconds` ≥20 天 → "Monthly"（月度窗口，免费版现状）；≥6 天 → "Weekly"；≤6h → "5h"。
+    /// 上游未给时长（或无明确归属）时保留位置 fallback 标签；code_review 窗口沿用 "Code Review" 系列标签。
+    private static func resolveLabel(_ window: [String: Any], fallbackLabel: String) -> String {
+        // code_review 窗口（fallback "Code Review"/"Code Review Weekly"）不做时长重标注，
+        // 保持现有展示（与 OmniRoute 一致：仅 session/weekly 主窗口按时长标注）。
+        if fallbackLabel.contains("Review") {
+            return fallbackLabel
+        }
+        let limitWindow = parseDouble(window["limit_window_seconds"] ?? window["limitWindowSeconds"]) ?? 0
+        guard limitWindow > 0 else { return fallbackLabel }
+        let day: Double = 24 * 3600
+        if limitWindow >= 20 * day { return "Monthly" }
+        if limitWindow >= 6 * day { return "Weekly" }
+        if limitWindow <= 6 * 3600 { return "5h" }
+        return fallbackLabel
     }
 
     /// 未使用的隐性上限（`used_percent === 0` 且 `reset_after_seconds >= limit_window_seconds`）：
