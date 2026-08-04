@@ -31,8 +31,11 @@ struct APIKeyInputField: View {
             } label: {
                 Image(systemName: isRevealed ? "eye.slash" : "eye")
                     .foregroundStyle(.secondary)
+                    .padding(2)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .hoverHighlight(cornerRadius: 3)
             .help(isRevealed ? "隐藏 Key" : "显示 Key")
         }
         .frame(maxWidth: .infinity)

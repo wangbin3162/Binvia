@@ -72,9 +72,10 @@ struct MenuPanelView: View {
                 selectedTab = "overview"
             }
         }
-        // 主面板背景与设置窗口统一：sidebar 材质，轻微半透明。
+        // 主面板背景：popover 材质（CodexBar 菜单毛玻璃效果，随桌面壁纸透色），
+        // 与设置窗口侧栏的 sidebar 材质区分——菜单面板更像原生菜单弹出层。
         .background {
-            AppBackgroundMaterial()
+            AppBackgroundMaterial(material: .popover)
                 .ignoresSafeArea()
         }
     }
@@ -108,24 +109,25 @@ struct MenuPanelView: View {
                 NSApp.terminate(nil)
             }
         }
-        // 设置条边距：左右 6pt、顶部 2pt；底部 8pt 避免操作列贴边
+        // 设置条边距：左右 6pt、顶部 8pt 与内容区隔开；底部 8pt 避免操作列贴边
         .padding(.horizontal, 6)
-        .padding(.top, 2)
+        .padding(.top, 8)
         .padding(.bottom, 8)
     }
 
     /// 底部文字按钮：图标 + 文字 + 悬停高亮 + 小手光标。
     private func footerButton(systemName: String, title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: systemName)
                     .imageScale(.medium)
                     .frame(width: 18, alignment: .center)
                 Text(title)
+                    .font(.callout)
             }
-            .foregroundStyle(.primary)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.vertical, 5)
             // 让整个悬停高亮区域（含 padding）都可点击，否则只有图标/文字本身命中
             .contentShape(Rectangle())
         }

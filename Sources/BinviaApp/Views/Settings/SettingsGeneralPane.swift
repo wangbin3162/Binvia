@@ -9,6 +9,7 @@ struct SettingsGeneralPane: View {
     @State private var portText = ""
     @State private var saveMessage: String?
     @State private var endpointCopied = false
+    @State private var pathCopied = false
 
     private let envVars = [
         "BINVIA_CONFIG",
@@ -48,7 +49,7 @@ struct SettingsGeneralPane: View {
                         .textSelection(.enabled)
                     Spacer(minLength: 8)
                     Button {
-                        copyEndpoint()
+                        copyToClipboard(endpointText, flag: $endpointCopied)
                     } label: {
                         Image(systemName: endpointCopied ? "checkmark" : "doc.on.doc")
                             .foregroundStyle(endpointCopied ? .green : .secondary)
@@ -66,13 +67,25 @@ struct SettingsGeneralPane: View {
             }
 
             Section {
-                LabeledContent("路径") {
+                HStack(spacing: 8) {
                     Text(appState.configPath)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button {
+                        copyToClipboard(appState.configPath, flag: $pathCopied)
+                    } label: {
+                        Image(systemName: pathCopied ? "checkmark" : "doc.on.doc")
+                            .foregroundStyle(pathCopied ? .green : .secondary)
+                            .padding(4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .hoverHighlight(cornerRadius: 4)
+                    .help("复制配置文件路径")
                 }
             } header: {
                 Text("配置文件")
@@ -129,14 +142,13 @@ struct SettingsGeneralPane: View {
         return "http://localhost:\(port)/v1"
     }
 
-    private func copyEndpoint() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(endpointText, forType: .string)
-        endpointCopied = true
+    private func copyToClipboard(_ text: String, flag: Binding<Bool>) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        flag.wrappedValue = true
         Task {
             try? await Task.sleep(for: .seconds(1.5))
-            endpointCopied = false
+            flag.wrappedValue = false
         }
     }
 

@@ -17,8 +17,11 @@ struct SettingsView: View {
                         .ignoresSafeArea()
                 }
 
-            Divider()
-                .ignoresSafeArea()
+            // 分割线：用不透明色块替代 SwiftUI Divider（Divider 在透明窗口中
+            // 背景透明，会透出桌面壁纸；改为与详情区背景色一致的不透明色块）。
+            Color(nsColor: .windowBackgroundColor)
+                .frame(width: 1)
+                .ignoresSafeArea(.all, edges: .vertical)
 
             detailView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

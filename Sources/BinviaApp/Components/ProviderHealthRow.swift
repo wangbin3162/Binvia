@@ -15,34 +15,37 @@ struct ProviderHealthRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ProviderBrandIcon(providerID: descriptor.id, size: 20)
+            ProviderBrandIcon(providerID: descriptor.id, size: 18)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(descriptor.displayName)
-                    .font(.body)
+                    .font(.callout.weight(.medium))
                 captionLine
             }
 
             Spacer()
 
-            Text("\(requestCount) req")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("\(requestCount) req")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
 
             Button {
                 onSettings()
             } label: {
                 Image(systemName: "gearshape")
-                    .foregroundStyle(.secondary)
-                    .padding(4)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .hoverHighlight(cornerRadius: 4)
+            .hoverHighlight(cornerRadius: 3)
             .help("配置")
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .padding(.horizontal, 12)
         .contentShape(Rectangle())
         .hoverHighlight(cornerRadius: 0, hoverOpacity: 0.04)

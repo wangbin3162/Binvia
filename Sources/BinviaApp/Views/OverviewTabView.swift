@@ -29,7 +29,7 @@ struct OverviewTabView: View {
 
     private var summaryCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 summaryMetric(title: "总请求", value: "\(appState.totalRequests)")
                 summaryMetric(title: "错误", value: "\(appState.totalErrors)", tint: appState.totalErrors > 0 ? .red : .secondary)
                 summaryMetric(title: "活跃", value: "\(appState.activeProviderCount)")
@@ -60,14 +60,14 @@ struct OverviewTabView: View {
     }
 
     private func summaryMetric(title: String, value: String, tint: Color = .secondary) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(value)
                 .font(.headline)
                 .monospacedDigit()
                 .foregroundStyle(tint)
             Text(title)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
         }
     }
 

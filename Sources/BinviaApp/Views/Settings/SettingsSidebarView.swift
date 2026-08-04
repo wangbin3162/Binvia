@@ -8,37 +8,43 @@ struct SettingsSidebarView: View {
     @ObservedObject var selectionModel: SettingsSelectionModel
 
     var body: some View {
-        List(selection: selectionBinding) {
-            Section {
-                paneRow(.general)
-                paneRow(.gatewayKeys)
-                paneRow(.compatProviders)
-                paneRow(.test)
-            } header: {
-                Text("通用")
-            }
+        VStack(spacing: 0) {
+            // fullSizeContentView 下 List 会滚动到透明标题栏区域，
+            // 添加顶部占位让内容起始位置在交通灯按钮下方。
+            Color.clear.frame(height: 28)
 
-            Section {
-                ForEach(providerDescriptors, id: \.id) { descriptor in
-                    providerRow(descriptor)
-                        .tag(SettingsPane.provider(descriptor.id))
+            List(selection: selectionBinding) {
+                Section {
+                    paneRow(.general)
+                    paneRow(.gatewayKeys)
+                    paneRow(.compatProviders)
+                    paneRow(.test)
+                } header: {
+                    Text("通用")
                 }
-                .onMove { fromOffsets, toOffset in
-                    appState.moveProvider(fromOffsets: fromOffsets, toOffset: toOffset)
-                }
-            } header: {
-                HStack(spacing: 4) {
-                    Text("供应商")
-                    Spacer()
-                    Text("\(configuredCount)/\(providerDescriptors.count)")
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                        .padding(.trailing, 6)
+
+                Section {
+                    ForEach(providerDescriptors, id: \.id) { descriptor in
+                        providerRow(descriptor)
+                            .tag(SettingsPane.provider(descriptor.id))
+                    }
+                    .onMove { fromOffsets, toOffset in
+                        appState.moveProvider(fromOffsets: fromOffsets, toOffset: toOffset)
+                    }
+                } header: {
+                    HStack(spacing: 4) {
+                        Text("供应商")
+                        Spacer()
+                        Text("\(configuredCount)/\(providerDescriptors.count)")
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                            .padding(.trailing, 6)
+                    }
                 }
             }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
     }
 
     private var selectionBinding: Binding<SettingsPane?> {
@@ -77,8 +83,8 @@ struct SettingsSidebarView: View {
                 .foregroundStyle(enabled ? .primary : .secondary)
             Spacer(minLength: 4)
             Circle()
-                .fill(configured ? Color.green : Color.gray)
-                .frame(width: 8, height: 8)
+                .fill(configured ? Color.green : Color.gray.opacity(0.5))
+                .frame(width: 6, height: 6)
                 .help(configured ? "已配置" : "未配置")
         }
         .opacity(enabled ? 1 : 0.62)
