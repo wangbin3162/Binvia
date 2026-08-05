@@ -22,7 +22,8 @@
 | 决策点 | 选择 | 理由 |
 |---|---|---|
 | 前端框架 | **Vite + Vue 3 + TypeScript** | 用户指定；TS 对 admin API 契约友好（类型即文档） |
-| UI 组件库 | **不引入**（手写 CSS） | 保持零依赖精神；面板组件简单（卡片/表格/表单）；无 CDN 请求，断网可用 |
+| UI 样式 | **Tailwind CSS**（v4 + `@tailwindcss/vite` 插件） | 用户指定；原子类快速实现卡片/表格/表单；产物为纯 CSS，构建后内联进单文件，无 CDN、断网可用 |
+| UI 组件库 | **不引入** | 面板组件简单（卡片/表格/表单），Tailwind 足够；避免引入重量级组件库 |
 | 状态/请求 | Composition API + 原生 `fetch` | 不引入 pinia/axios，面板规模不需要 |
 | 开发联调 | Vite dev server（默认 5173）+ proxy 到 `127.0.0.1:20427` | 热更新迭代，后端无改动 |
 | 发布形态 | `vite build` → 内联单文件 HTML → **base64 内嵌 Swift 字符串** | 单二进制交付（install-cli.sh 不变）；base64 规避 JS 转义问题 |
@@ -36,7 +37,7 @@
 ```
 Binvia/
 ├── web/                          # 前端工程（独立目录）
-│   ├── package.json              # vite / vue / typescript 等 devDependencies
+│   ├── package.json              # vite / vue / typescript / tailwindcss 等 devDependencies
 │   ├── vite.config.ts            # dev proxy → 127.0.0.1:20427
 │   ├── tsconfig.json
 │   ├── index.html                # Vite 入口
@@ -54,7 +55,7 @@ Binvia/
 │       │   ├── LogsView.vue      # 请求日志表格（2s 轮询）
 │       │   ├── KeysView.vue      # 网关 Key 管理
 │       │   └── SettingsView.vue  # 服务器设置
-│       └── styles/main.css       # 手写样式（系统字体栈，浅色为主）
+│       └── styles/main.css       # Tailwind 入口（@import "tailwindcss" + 少量自定义变量）
 ├── Sources/BinviaCore/
 │   ├── Server/ServerState.swift      # 新增：可变配置盒 + 热更新回调 + admin token
 │   ├── Server/WebPanel.swift         # 新增：admin API 编排 + HTML 服务
@@ -169,6 +170,8 @@ state.onConfigChanged = { newConfig in
 `RouteConfig.swift` 增加 `webPanelEnabled: Bool = true`、`adminPassword: String? = nil`，`init(from:)` 用 `decodeIfPresent` 回退（与既有 `region` 模式一致）。
 
 ## 8. 前端页面设计（对齐现有 GUI 信息架构）
+
+样式统一用 **Tailwind 原子类**实现（浅色为主、系统字体栈、状态色如 green/red/amber 表达健康度），不写组件库、不引外部资源。
 
 - **顶栏**：服务器状态灯、监听地址 `http://<host>:<port>`、版本号。
 - **Tab**：概览 / Provider / 请求日志 / 网关 Keys / 设置。
