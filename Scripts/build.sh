@@ -30,12 +30,16 @@ HOST_ARCH="$(uname -m)"
 
 echo "==> Binvia ${MARKETING_VERSION} (build ${BUILD_NUMBER})  架构: ${ARCHES}"
 
+# ---------- 构建 Web 面板 ----------
+echo "==> [1/7] Web 面板构建（npm install + build + embed）"
+make web
+
 # ---------- 清理旧产物 ----------
 rm -rf "$ROOT/bin"
 mkdir -p "$ROOT/bin"
 
 # ---------- 构建 ----------
-echo "==> [1/6] swift build -c release（逐架构，独立 scratch 目录）"
+echo "==> [2/7] swift build -c release（逐架构，独立 scratch 目录）"
 for arch in $ARCHES; do
     echo "    -- 构建 ${arch} ..."
     # 每个架构用独立 scratch 目录：多架构顺序构建时，SwiftPM 顶层 .build/release
@@ -50,17 +54,17 @@ build_dir() { echo "$ROOT/.build/$1/release"; }
 if [[ " $ARCHES " == *" $HOST_ARCH "* ]]; then
     HOST_BUILD="$(build_dir "$HOST_ARCH")"
 
-    echo "==> [2/6] BinviaCheck（自包含测试，本机可直接运行）"
+    echo "==> [3/7] BinviaCheck（自包含测试，本机可直接运行）"
     "$HOST_BUILD/BinviaCheck"
 
-    echo "==> [3/6] BinviaApp 无界面自检（--smoke-test）"
+    echo "==> [4/7] BinviaApp 无界面自检（--smoke-test）"
     "$HOST_BUILD/BinviaApp" --smoke-test
 else
-    echo "==> [2-3/6] 跳过测试：宿主架构 ${HOST_ARCH} 不在目标架构 ${ARCHES} 内"
+    echo "==> [3-4/7] 跳过测试：宿主架构 ${HOST_ARCH} 不在目标架构 ${ARCHES} 内"
 fi
 
 # ---------- 合并可执行文件 ----------
-echo "==> [4/6] 合并可执行文件到 bin/"
+echo "==> [5/7] 合并可执行文件到 bin/"
 combine() {
     local name="$1"
     local out="$ROOT/bin/$name"
@@ -80,7 +84,7 @@ combine BinviaCLI
 combine BinviaApp
 
 # ---------- .app bundle ----------
-echo "==> [5/6] 打包 .app（LSUIElement 菜单栏应用）"
+echo "==> [6/7] 打包 .app（LSUIElement 菜单栏应用）"
 make_app_bundle() {
     local APP="$ROOT/bin/Binvia.app"
     rm -rf "$APP"
@@ -160,12 +164,12 @@ BINVIA_SIGNING="${BINVIA_SIGNING:-adhoc}"
 if [ "$BINVIA_SIGNING" = "developer" ]; then
     : "${DEVELOPER_ID_CERT:?BINVIA_SIGNING=developer 需要设置 DEVELOPER_ID_CERT}"
     SIGN_FLAGS=(--force --options runtime --sign "$DEVELOPER_ID_CERT")
-    echo "==> [6/6] Developer ID 签名（hardened runtime）"
+    echo "==> [7/7] Developer ID 签名（hardened runtime）"
 elif [ "$BINVIA_SIGNING" = "adhoc" ]; then
     SIGN_FLAGS=(--force --sign -)
-    echo "==> [6/6] adhoc 代码签名"
+    echo "==> [7/7] adhoc 代码签名"
 else
-    echo "==> [6/6] 跳过签名（BINVIA_SIGNING=none）"
+    echo "==> [7/7] 跳过签名（BINVIA_SIGNING=none）"
 fi
 if [ "$BINVIA_SIGNING" != "none" ]; then
     codesign "${SIGN_FLAGS[@]}" "$ROOT/bin/Binvia.app"

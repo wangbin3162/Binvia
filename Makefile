@@ -1,6 +1,6 @@
 # Binvia 常用命令
 
-.PHONY: build test release run clean
+.PHONY: build test release run clean web
 
 build:
 	swift build
@@ -17,3 +17,8 @@ run:
 
 clean:
 	rm -rf .build bin
+
+# Web 面板构建：安装依赖 → 构建前端 → 内嵌生成 Swift 源码
+# 修改前端后必须运行此命令，并将生成的 WebPanelAssets.swift 一起提交
+web:
+	cd web && npm install && npm run build && node scripts/embed.mjs

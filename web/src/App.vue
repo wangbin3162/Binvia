@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { api } from './api/client'
-import type { OverviewResponse, ProviderHealth, Summary } from './api/types'
+import type { OverviewResponse } from './api/types'
 import OverviewView from './views/OverviewView.vue'
 import ProvidersView from './views/ProvidersView.vue'
 import LogsView from './views/LogsView.vue'

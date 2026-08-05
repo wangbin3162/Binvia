@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { api } from '../api/client'
-import type { OverviewResponse, ProviderHealth } from '../api/types'
+import type { OverviewResponse } from '../api/types'
 
 const props = defineProps<{
   overview: OverviewResponse | null

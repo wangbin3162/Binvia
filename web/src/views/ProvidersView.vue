@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { api } from '../api/client'
 import type { ProviderItem, ProviderUsageSnapshot, RouteConfig } from '../api/types'
 
@@ -19,18 +19,6 @@ async function testProvider(id: string) {
   testing.value[id] = true
   testResults.value[id] = await api.testProvider(id)
   testing.value[id] = false
-}
-
-function providerConfig(id: string) {
-  return config.value?.providers[id]
-}
-
-function hasCredential(id: string, p: ProviderItem): boolean {
-  return p.configured
-}
-
-function authTypeLabel(t: string): string {
-  return { apiKey: 'API Key', oauth: 'OAuth', deviceFlow: '设备码', localProbe: '本地探测' }[t] ?? t
 }
 
 onMounted(fetchData)
@@ -61,7 +49,7 @@ onMounted(fetchData)
             <span class="text-xs text-[var(--color-text-secondary)]">({{ p.id }})</span>
           </div>
           <span class="text-xs text-[var(--color-text-secondary)]">
-            {{ authTypeLabel(p.authType) }} · {{ p.modelCount }} 模型
+            {{ p.authType }} · {{ p.modelCount }} 模型
           </span>
         </div>
         <div class="flex items-center gap-3 text-xs text-[var(--color-text-secondary)] mb-3">

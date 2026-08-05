@@ -348,26 +348,9 @@ public struct RouteHandler: Sendable {
 
     // MARK: - Web 面板
 
-    /// 返回内嵌 HTML（占位；S2 替换为真实面板）。
+    /// 返回内嵌 HTML（由 WebPanelAssets 提供，S5 构建时自动生成）。
     private func webPanelResponse() -> HTTPResponse {
-        let html = """
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head><meta charset="utf-8"><title>Binvia 管理面板</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-        body { font-family: -apple-system, system-ui, sans-serif; display: flex;
-               align-items: center; justify-content: center; height: 100vh;
-               margin: 0; background: #f5f5f7; color: #1d1d1f; }
-        .card { text-align: center; padding: 2rem; background: white;
-                border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-        h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
-        p { color: #6e6e73; margin: 0; }
-        </style></head>
-        <body><div class="card"><h1>Binvia 管理面板</h1><p>正在加载…</p></div></body>
-        </html>
-        """
-        return HTTPResponse.text(200, html, contentType: "text/html; charset=utf-8")
+        HTTPResponse.text(200, WebPanelAssets.html, contentType: "text/html; charset=utf-8")
     }
 
     /// admin API 认证检查：未启用面板或未授权时返回 401/404。
