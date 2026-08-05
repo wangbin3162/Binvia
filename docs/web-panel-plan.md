@@ -240,7 +240,57 @@ make release                       # 内嵌新面板的完整打包
 | **S4 前端全量** | Provider / 日志 / Keys / 设置 四个 Tab + 登录流程 + toast | 全功能走查（对照 GUI 行为） |
 | **S5 内嵌与发布** | `embed.mjs` + `make web` + build.sh 集成 + README/发布指南更新 | `make release` 产物面板可用；安装包内无需额外文件 |
 
-## 13. 验收标准（全部完成后）
+## 13. 远期分发形态：npm 全局安装（OmniRoute 式）
+
+> 目标命令：`npm i -g binvia` 后直接 `binvia` 启动服务 + 自动打开浏览器访问 Web 面板。
+> 实现方式：**npm 包 = 下载器 + 启动器**（参考 esbuild/sharp 的原生二进制分发模式），Swift 代码零改动。
+
+### 13.1 包结构（`npm/` 目录）
+
+```
+npm/
+├── package.json        # name=binvia（npm 已确认可用），os=darwin，bin=bin/binvia
+├── install.js          # postinstall：下载 + SHA256 校验 + 解出 BinviaServer
+└── bin/
+    ├── binvia          # shim：exec BinviaServer "$@"（保持命令名）
+    └── BinviaServer    # 由 install.js 从 GitHub Releases 拉取（universal 二进制）
+```
+
+```jsonc
+// package.json 要点
+{
+  "name": "binvia",
+  "version": "0.1.2",            // 与 GitHub Release tag 对齐
+  "os": ["darwin"],              // universal 二进制同时覆盖 arm64 + x64
+  "bin": { "binvia": "bin/binvia" },
+  "scripts": { "postinstall": "node install.js" }
+}
+```
+
+`install.js` 逻辑：按包版本拼接 Release 下载 URL → `curl -fL` 拉 tar.gz → 从同 Release 拉 `SHA256SUMS` 比对（不一致即失败）→ 解出 `BinviaServer` → `chmod +x`。
+
+### 13.2 命令行为
+
+- `binvia`：启动服务器，打印 `Web panel: http://localhost:20427/`，`autoOpenBrowser` 时自动打开浏览器（复用 Phase 4 的 serve 行为）。
+- `binvia --port 8080 --config ...`：参数透传，与 BinviaServer 一致。
+- 更新：`npm i -g binvia@latest`（reinstall 触发 postinstall 重新拉二进制）；后续可选 `binvia update` 自更新子命令。
+
+### 13.3 与现有分发形态的关系
+
+| 形态 | 面向用户 | 状态 |
+|---|---|---|
+| DMG 拖入安装 | 普通用户（GUI） | 已有（v0.1.2） |
+| `curl .../install-cli.sh \| bash` | 无 node 环境用户 | 已有 |
+| `npm i -g binvia` | 开发者 / 终端用户 | **本计划实现** |
+
+### 13.4 实施要点
+
+- 前置依赖：S1-S5 完成（Web 面板内嵌二进制）后，本形态零 Swift 改动。
+- 发布流程：`make release` 产出二进制 → 打 tag → `cd npm && npm version <tag> && npm publish`；可选在 release.yml 加 npm publish 步骤（需 npm token secret）。
+- 包名冲突风险已排查：`binvia` 在 npm registry 可用（2026-08-05 验证）。
+- 后续若做 Windows 版，可拆 `binvia-darwin-arm64` / `binvia-darwin-x64` 等 optionalDependencies 平台包（当前 universal 单包即可）。
+
+## 14. 验收标准（全部完成后）
 
 1. `make test` 全绿（含 WebPanelTests 新套件，无回归）。
 2. 浏览器打开 `http://127.0.0.1:20427/`：概览/Provider/日志/Keys/设置全部可用；配置保存即时生效（热更新）；凭据回显全部掩码。
