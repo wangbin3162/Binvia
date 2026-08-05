@@ -233,44 +233,28 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
-    /// 设置 deviceFlow 类型 provider 的多 AccessToken：首个 token 为主 token（→ credential.accessToken），
-    /// 其余为轮换 token（→ apiKeys[]）。配套的 refreshToken 保留在 credential 中。
-    ///
-    /// 主 token **不写入 apiKeys**（历史版本双写导致同一 token 在 config 里存两份冗余；
-    /// 调用侧按值去重，双写无功能收益）。主 token 标签由 UI 从 `credential.email` 重建，
-    /// 轮换 token 标签存于 apiKeys 自身。
-    func setAccessTokens(_ tokens: [KeyedToken], refreshToken: String?, for providerID: String) throws {
-        let cleaned = tokens
-            .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { !$0.value.isEmpty }
-        var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        providerConfig.enabled = true
-        var credential = providerConfig.credential
-        if let primary = cleaned.first {
-            credential.accessToken = primary.value
-        } else {
-            // 全部令牌被移除时清空主 token（避免残留已删除的凭据）
-            credential.accessToken = nil
-        }
-        credential.refreshToken = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? refreshToken!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : credential.refreshToken
-        providerConfig.credential = credential
-        // 仅轮换 token 写入 apiKeys[]（主 token 只在 credential，避免重复存储）
-        providerConfig.apiKeys = Array(cleaned.dropFirst())
-        config.providers[providerID] = providerConfig
-        try saveConfig()
-    }
-
-    /// 仅更新 deviceFlow provider 的轮换 token 列表（不动主 token）。
-    /// 用于已登录场景：主 token 由「已连接 · 账号 + 重新登录」管理，列表只含轮换 token。
-    func setRotationTokens(_ tokens: [KeyedToken], for providerID: String) throws {
+    /// 设置 deviceFlow 类型 provider 的模型调用 token 列表（只写 `apiKeys`）。
+    /// OAuth 登录 token 单独存于 `credential.accessToken`，**仅用于积分查询，不参与模型调用**
+    /// （CodeBuddy 登录 token 调用模型会报「体验版尚未激活」）。
+    func setModelTokens(_ tokens: [KeyedToken], for providerID: String) throws {
         let cleaned = tokens
             .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
             .filter { !$0.value.isEmpty }
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true
         providerConfig.apiKeys = cleaned
+        config.providers[providerID] = providerConfig
+        try saveConfig()
+    }
+
+    /// 仅更新 provider 的 refreshToken（登录响应已自动保存；手动修改可选）。
+    func setRefreshToken(_ token: String?, for providerID: String) throws {
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        var credential = providerConfig.credential
+        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        credential.refreshToken = (trimmed?.isEmpty == false) ? trimmed : nil
+        providerConfig.credential = credential
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
@@ -623,12 +607,14 @@ final class AppState: ObservableObject {
         oauthStates["codebuddy-cn"] = .requestingCode
         do {
             let client = CodeBuddyOAuthClient()
-            let credential = try await client.login { url in
+            var credential = try await client.login { url in
                 Task { @MainActor in
                     NSWorkspace.shared.open(url)
                     self.oauthStates["codebuddy-cn"] = .waitingForAuth
                 }
             }
+            // 保留企业 ID：登录响应不含 workspaceId，整体替换会清空用户已填的企业 ID
+            credential.workspaceId = config.credential(for: "codebuddy-cn").workspaceId
             try saveCredential(credential, for: "codebuddy-cn")
             oauthStates["codebuddy-cn"] = .connected
         } catch {

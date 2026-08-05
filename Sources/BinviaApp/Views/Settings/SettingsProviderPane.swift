@@ -25,7 +25,6 @@ struct SettingsProviderPane: View {
     @State private var manualToken = ""
     @State private var manualRefreshToken = ""
     /// CodeBuddy 企业 ID（积分查询用，存 credential.workspaceId）。
-    @State private var enterpriseID = ""
     @State private var tokenSaveMessage: String?
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
     @State private var isManualTokenExpanded = false
@@ -108,11 +107,6 @@ struct SettingsProviderPane: View {
                     loadModels()
                 }
                 loadDrafts()
-            }
-            .onChange(of: enterpriseID) { _, newValue in
-                // 企业 ID 变更即持久化（积分查询头 x-enterprise-id）
-                guard providerID == "codebuddy-cn" else { return }
-                appState.setEnterpriseID(newValue, for: providerID)
             }
         } else {
             Text("未注册的 provider: \(providerID)")
@@ -383,19 +377,11 @@ struct SettingsProviderPane: View {
     }
 
     /// 单个令牌行：图标 + 标签 + 掩码值 + 右侧「移除」按钮（对齐 CodexBar 令牌账户）。
-    private func tokenRow(label: String, value: String, isPrimary: Bool = false, onRemove: @escaping () -> Void) -> some View {
+    private func tokenRow(label: String, value: String, onRemove: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "key")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            if isPrimary {
-                Text("主")
-                    .font(.caption2.weight(.bold))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.16)))
-                    .foregroundStyle(Color.accentColor)
-            }
             Text(label)
                 .font(.footnote.weight(.medium))
                 .lineLimit(1)
@@ -415,15 +401,13 @@ struct SettingsProviderPane: View {
     /// 令牌行样式对齐 DeepSeek 的 API 令牌列表（标签 + 掩码 + 移除，添加/移除即时持久化）。
     private var deviceFlowConnectionSection: some View {
         Section {
-            OAuthLoginButton(providerID: providerID)
-
             if draftTokens.isEmpty {
-                Text("暂无令牌")
+                Text("暂无模型调用 Token")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
-                    tokenRow(label: token.label, value: token.value, isPrimary: !isLoggedInViaOAuth && index == 0) {
+                    tokenRow(label: token.label, value: token.value) {
                         draftTokens.remove(at: index)
                         persistDeviceTokens()
                     }
@@ -432,18 +416,6 @@ struct SettingsProviderPane: View {
 
             tokenAddRow(placeholder: "粘贴Access Token") {
                 addDeviceToken()
-            }
-
-            // refreshToken 与首 token 配套保存（仅首 token 专用）。
-            LabeledContent("Refresh Token") {
-                APIKeyInputField(title: "用于刷新首 Token（可选）", text: $manualRefreshToken)
-            }
-
-            // CodeBuddy 企业 ID：积分查询接口（get-enterprise-user-usage）必需的头。
-            if providerID == "codebuddy-cn" {
-                LabeledContent("企业 ID") {
-                    APIKeyInputField(title: "积分查询（控制台 x-enterprise-id）", text: $enterpriseID)
-                }
             }
 
             HStack {
@@ -458,9 +430,9 @@ struct SettingsProviderPane: View {
                     .pointingHandCursor()
             }
         } header: {
-            Text("Access Token")
+            Text("模型调用 Access Token")
         } footer: {
-            Text("请求会通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy。多 token 轮换：首个 token 失败（401/403）时自动试用下一个。")
+            Text("请求通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy；多个 token 自动轮换（首个 401/403 时试用下一个）。OAuth 登录 token 仅用于积分查询（见用量面板），不参与模型调用。")
         }
     }
 
@@ -898,14 +870,6 @@ struct SettingsProviderPane: View {
 
     // MARK: - Actions
 
-    /// deviceFlow 是否处于「已登录」状态（credential 有主 token 且有登录账号标识）。
-    /// 已登录时主 token 由「已连接 · 账号 + 重新登录」管理，不再作为令牌列表条目展示。
-    private var isLoggedInViaOAuth: Bool {
-        guard let pc = appState.config.providers[providerID] else { return false }
-        guard !(pc.credential.accessToken ?? "").isEmpty else { return false }
-        return !(pc.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     /// 首次显示时加载已有配置：DeepSeek 的令牌列表、deviceFlow 多 Token、oauth 的 Token 草稿。
     private func loadDrafts() {
         let pc = appState.config.providers[providerID]
@@ -919,43 +883,10 @@ struct SettingsProviderPane: View {
             }
         }
 
-        // deviceFlow (CodeBuddy)：主 token（credential.accessToken）+ 轮换 token（apiKeys）
-        // 已登录（OAuth 建立且有账号标识）：列表只装轮换 token，主 token 由「已连接」展示管理；
-        // 手动粘贴场景（无登录标识）：保留主 token 行（带「主」徽标）。
-        if draftTokens.isEmpty {
-            let stored = pc?.apiKeys ?? []
-            if isLoggedInViaOAuth {
-                draftTokens = stored
-            } else {
-                var tokens: [KeyedToken] = []
-                var seen = Set<String>()
-                if let access = pc?.credential.accessToken, !access.isEmpty {
-                    seen.insert(access)
-                    if let labeled = stored.first(where: { $0.value == access }) {
-                        tokens.append(labeled)
-                    } else {
-                        let identity = (pc?.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                        let label = identity.isEmpty ? KeyedToken.defaultLabel(for: access) : identity
-                        tokens.append(KeyedToken(label: label, value: access))
-                    }
-                }
-                for t in stored where !seen.contains(t.value) {
-                    tokens.append(t)
-                }
-                if !tokens.isEmpty {
-                    draftTokens = tokens
-                }
-            }
-        }
-
-        if manualRefreshToken.isEmpty, let refresh = pc?.credential.refreshToken, !refresh.isEmpty {
-            manualRefreshToken = refresh
-        }
-
-        // CodeBuddy 企业 ID（积分查询）
-        if enterpriseID.isEmpty, providerID == "codebuddy-cn",
-           let wid = pc?.credential.workspaceId, !wid.isEmpty {
-            enterpriseID = wid
+        // deviceFlow (CodeBuddy)：模型调用 token 列表（apiKeys）。
+        // OAuth 登录 token 单独存于 credential（仅积分查询，见用量面板），不在此列表。
+        if draftTokens.isEmpty, let stored = pc?.apiKeys, !stored.isEmpty {
+            draftTokens = stored
         }
 
         // oauth (Antigravity)：单 token 草稿
@@ -993,12 +924,8 @@ struct SettingsProviderPane: View {
 
     private func persistDeviceTokens() {
         do {
-            if isLoggedInViaOAuth {
-                // 已登录：列表只含轮换 token，仅更新 apiKeys，不动主 token（登录凭据）
-                try appState.setRotationTokens(draftTokens, for: providerID)
-            } else {
-                try appState.setAccessTokens(draftTokens, refreshToken: manualRefreshToken, for: providerID)
-            }
+            // 模型调用 token 只写 apiKeys；登录 token（credential）不在此列表、不受影响
+            try appState.setModelTokens(draftTokens, for: providerID)
             tokenSaveMessage = draftTokens.isEmpty ? nil : "已保存 \(draftTokens.count) 个 Token"
         } catch {
             tokenSaveMessage = "保存失败: \(error.localizedDescription)"

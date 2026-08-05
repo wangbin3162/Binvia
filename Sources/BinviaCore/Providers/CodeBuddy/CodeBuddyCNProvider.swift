@@ -40,7 +40,9 @@ public enum CodeBuddyCNProviderDescriptor {
 /// 腾讯 CodeBuddy 供应商（OAuth 设备码流）。Phase 2 完整实现。
 /// 依据：OmniRoute `registry/codebuddy-cn` + `oauth/providers/codebuddy-cn.ts` + `executors/codebuddy-cn.ts`。
 /// 关键点：
-/// - 认证：`Authorization: Bearer <accessToken>`（credential 或 env `CODEBUDDY_CN_ACCESS_TOKEN`）。
+/// - 认证：`Authorization: Bearer <accessToken>`（config `apiKeys` 或 env `CODEBUDDY_CN_ACCESS_TOKEN`）。
+/// - **OAuth 登录 token（credential.accessToken）仅用于积分查询**（CodeBuddyCnUsageFetcher），
+///   不参与模型调用——登录 token 调用模型会报「体验版尚未激活」。
 /// - 上游强制流式（非流式请求被拒 400 code 11101）：即使客户端 `stream=false` 也发 `stream:true`，
 ///   非流式客户端由本层用 `SSEJSONAggregator` 聚合成单个 JSON 返回。
 /// - 请求头抄自 OmniRoute registry（CodeBuddy CLI 头）。
@@ -62,31 +64,30 @@ public struct CodeBuddyCNProvider: Provider {
 
     // MARK: - 凭据解析（多 token 轮换）
 
-    /// 当前使用的主 token（credential 优先）。
+    /// 当前使用的模型调用 token：config `apiKeys` 首个 → 环境变量兜底。
+    /// 注意：`credential.accessToken`（OAuth 登录 token）仅用于积分查询，不参与模型调用。
     private func resolveToken(_ credential: ProviderCredential?) throws -> String {
-        if let token = credential?.accessToken, !token.isEmpty {
-            return token
+        if let config = try? ConfigStore.load(),
+           let first = config.apiKeys(for: id).first, !first.isEmpty {
+            return first
         }
         if let token = RouteConfig.envValue(["CODEBUDDY_CN_ACCESS_TOKEN"]), !token.isEmpty {
             return token
         }
         throw ProviderError.missingCredentials(
-            "CODEBUDDY_CN_ACCESS_TOKEN or config providers.codebuddy-cn.credential.accessToken"
+            "config providers.codebuddy-cn.apiKeys 或 CODEBUDDY_CN_ACCESS_TOKEN（OAuth 登录 token 仅用于积分查询）"
         )
     }
 
-    /// 解析全部可用 token（轮换用）：credential.accessToken 优先，并入 config `apiKeys` 数组与环境变量 token。
+    /// 解析全部可用模型调用 token（轮换用）：config `apiKeys` 数组 + 环境变量 token。
+    /// 不含 `credential.accessToken`（登录 token 仅积分查询，不参与调用轮换）。
     private func resolveTokens(_ credential: ProviderCredential?) -> [String] {
         var tokens: [String] = []
-        // 1. credential.accessToken 优先（RouteHandler 传入的主 token）
-        if let access = credential?.accessToken, !access.isEmpty {
-            tokens.append(access)
-        }
-        // 2. 配置文件中的 apiKeys 数组（多 token 载体）与环境变量 token。
+        // 1. 配置文件中的 apiKeys 数组（模型调用 token 载体）
         if let config = try? ConfigStore.load() {
             tokens.append(contentsOf: config.apiKeys(for: id))
         }
-        // 3. 环境变量显式兜底（config 读取失败时仍可用）
+        // 2. 环境变量显式兜底（config 读取失败时仍可用）
         if let env = RouteConfig.envValue(["CODEBUDDY_CN_ACCESS_TOKEN"]), !env.isEmpty {
             tokens.append(env)
         }

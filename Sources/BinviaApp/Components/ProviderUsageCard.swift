@@ -17,6 +17,11 @@ struct ProviderUsageCard: View {
     var body: some View {
         if let snapshot = appState.usageSnapshots[providerID] {
             VStack(alignment: .leading, spacing: 8) {
+                // CodeBuddy：积分查询凭据区（登录 token 仅用于积分查询，不参与模型调用）
+                if providerID == "codebuddy-cn" {
+                    codeBuddyUsageCredentials
+                }
+
                 // 刷新按钮
                 HStack {
                     Spacer()
@@ -97,6 +102,80 @@ struct ProviderUsageCard: View {
                 .buttonStyle(.link)
                 .pointingHandCursor()
             }
+        }
+    }
+
+    // MARK: - CodeBuddy 积分凭据区
+
+    /// CodeBuddy 积分查询凭据：登录（OAuth 设备码）+ 企业 ID + Refresh Token。
+    /// 说明：OAuth 登录 token 仅支持积分查询（企业账号），不参与模型调用——
+    /// 模型调用 token 在设置面板「模型调用 Access Token」中配置。
+    @State private var codeBuddyEnterpriseID = ""
+    @State private var codeBuddyRefreshToken = ""
+    @State private var codeBuddyCredentialMessage: String?
+    @State private var didLoadCodeBuddyCredentials = false
+
+    private var codeBuddyUsageCredentials: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // 提示放在「刷新用量」上方
+            Text("仅支持企业积分查询")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            OAuthLoginButton(providerID: "codebuddy-cn")
+
+            LabeledContent("企业 ID") {
+                APIKeyInputField(title: "积分查询（控制台 x-enterprise-id）", text: $codeBuddyEnterpriseID)
+            }
+
+            LabeledContent("Refresh Token") {
+                APIKeyInputField(title: "刷新登录 Token（可选）", text: $codeBuddyRefreshToken)
+            }
+
+            HStack(spacing: 8) {
+                if let msg = codeBuddyCredentialMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(msg.contains("失败") ? .red : .green)
+                }
+                Spacer()
+                Button("保存") { saveCodeBuddyCredentials() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .onAppear(perform: loadCodeBuddyCredentials)
+        .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
+            // 重新登录后刷新草稿（企业 ID 保留、refreshToken 更新）
+            loadCodeBuddyCredentials()
+        }
+    }
+
+    private func loadCodeBuddyCredentials() {
+        guard !didLoadCodeBuddyCredentials || codeBuddyEnterpriseID.isEmpty else {
+            // 已加载且用户填过企业 ID 时，仅刷新 refreshToken（避免覆盖用户正在编辑的输入）
+            if let pc = appState.config.providers["codebuddy-cn"] {
+                codeBuddyRefreshToken = pc.credential.refreshToken ?? ""
+            }
+            return
+        }
+        guard let pc = appState.config.providers["codebuddy-cn"] else { return }
+        codeBuddyEnterpriseID = pc.credential.workspaceId ?? ""
+        codeBuddyRefreshToken = pc.credential.refreshToken ?? ""
+        didLoadCodeBuddyCredentials = true
+    }
+
+    private func saveCodeBuddyCredentials() {
+        let app = appState
+        app.setEnterpriseID(codeBuddyEnterpriseID, for: "codebuddy-cn")
+        do {
+            try app.setRefreshToken(codeBuddyRefreshToken, for: "codebuddy-cn")
+            codeBuddyCredentialMessage = "已保存"
+        } catch {
+            codeBuddyCredentialMessage = "保存失败: \(error.localizedDescription)"
         }
     }
 
