@@ -15,74 +15,19 @@ struct ProviderUsageCard: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        if let snapshot = appState.usageSnapshots[providerID] {
+        if providerID == "codebuddy-cn" {
+            // CodeBuddy：积分凭据区（登录/企业 ID）始终显示；
+            // 登录并配置企业 ID 后，下方展示积分数据。
             VStack(alignment: .leading, spacing: 8) {
-                // CodeBuddy：积分查询凭据区（登录 token 仅用于积分查询，不参与模型调用）
-                if providerID == "codebuddy-cn" {
-                    codeBuddyUsageCredentials
+                codeBuddyUsageCredentials
+                if let snapshot = appState.usageSnapshots[providerID] {
+                    usageSnapshotContent(snapshot)
+                } else {
+                    codeBuddyUsagePlaceholder
                 }
-
-                // 刷新按钮
-                HStack {
-                    Spacer()
-                    Button("刷新用量") { refreshUsage() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .pointingHandCursor()
-                }
-
-                // 失败提示
-                if let error = snapshot.error, !error.isEmpty {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(3)
-                        Spacer()
-                        Button("刷新") { refreshUsage() }
-                            .buttonStyle(.link)
-                            .controlSize(.small)
-                            .pointingHandCursor()
-                    }
-                }
-
-                // 余额（CodexBar ProviderMetricInlineRow 风格：标签左 semibold，余额右 footnote）
-                // 余额值统一绿色 + 币种符号（¥/$），与概览健康行一致。
-                if !snapshot.balances.isEmpty {
-                    // 多 Key 余额：逐行展示（DeepSeek / Kimi 多 api-key）
-                    ForEach(Array(snapshot.balances.indices), id: \.self) { index in
-                        let entry = snapshot.balances[index]
-                        usageMetricRow(
-                            label: entry.label,
-                            value: balanceText(entry.balance, currency: entry.currency),
-                            valueTint: .green
-                        )
-                    }
-                } else if let balance = snapshot.balance {
-                    usageMetricRow(
-                        label: "余额",
-                        value: balanceText(balance, currency: snapshot.currency),
-                        valueTint: .green
-                    )
-                }
-
-                // 配额窗口
-                if !snapshot.quotaWindows.isEmpty {
-                    ForEach(Array(snapshot.quotaWindows.indices), id: \.self) { index in
-                        quotaWindowRow(snapshot.quotaWindows[index])
-                    }
-                }
-
-                // 模型配额
-                if !snapshot.modelQuotas.isEmpty {
-                    ForEach(Array(snapshot.modelQuotas.indices), id: \.self) { index in
-                        modelQuotaRow(snapshot.modelQuotas[index])
-                    }
-                }
-
             }
+        } else if let snapshot = appState.usageSnapshots[providerID] {
+            usageSnapshotContent(snapshot)
         } else if let dashboard = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
             // 无公开用量 API 的供应商（如 opencode）：提供官网入口。
             HStack(spacing: 8) {
@@ -96,6 +41,90 @@ struct ProviderUsageCard: View {
                 .buttonStyle(.link)
                 .pointingHandCursor()
             }
+        }
+    }
+
+    // MARK: - 快照内容
+
+    /// 用量快照主体：刷新按钮 + 失败提示 + 余额 / 配额窗口 / 模型配额。
+    private func usageSnapshotContent(_ snapshot: ProviderUsageSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // 刷新按钮
+            HStack {
+                Spacer()
+                Button("刷新用量") { refreshUsage() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+            }
+
+            // 失败提示
+            if let error = snapshot.error, !error.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(3)
+                    Spacer()
+                    Button("刷新") { refreshUsage() }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                        .pointingHandCursor()
+                }
+            }
+
+            // 余额（CodexBar ProviderMetricInlineRow 风格：标签左 semibold，余额右 footnote）
+            // 余额值统一绿色 + 币种符号（¥/$），与概览健康行一致。
+            if !snapshot.balances.isEmpty {
+                // 多 Key 余额：逐行展示（DeepSeek / Kimi 多 api-key）
+                ForEach(Array(snapshot.balances.indices), id: \.self) { index in
+                    let entry = snapshot.balances[index]
+                    usageMetricRow(
+                        label: entry.label,
+                        value: balanceText(entry.balance, currency: entry.currency),
+                        valueTint: .green
+                    )
+                }
+            } else if let balance = snapshot.balance {
+                usageMetricRow(
+                    label: "余额",
+                    value: balanceText(balance, currency: snapshot.currency),
+                    valueTint: .green
+                )
+            }
+
+            // 配额窗口
+            if !snapshot.quotaWindows.isEmpty {
+                ForEach(Array(snapshot.quotaWindows.indices), id: \.self) { index in
+                    quotaWindowRow(snapshot.quotaWindows[index])
+                }
+            }
+
+            // 模型配额
+            if !snapshot.modelQuotas.isEmpty {
+                ForEach(Array(snapshot.modelQuotas.indices), id: \.self) { index in
+                    modelQuotaRow(snapshot.modelQuotas[index])
+                }
+            }
+        }
+    }
+
+    /// CodeBuddy 未登录/未出数据时的占位：提示 + 官网入口。
+    private var codeBuddyUsagePlaceholder: some View {
+        HStack(spacing: 8) {
+            Label("登录并配置企业 ID 后可查看积分用量", systemImage: "globe")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("官网") {
+                if let url = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .buttonStyle(.link)
+            .pointingHandCursor()
         }
     }
 

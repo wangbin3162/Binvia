@@ -471,7 +471,8 @@ func gatewayKeyWhitelistTests() async throws {
         apiKeys: [
             GatewayKeyConfig(key: "whitelisted-key", enabledModels: ["ds/deepseek-v4-pro"]),
             GatewayKeyConfig(key: "open-key"),
-        ]
+        ],
+        providers: ["deepseek": ProviderConfig(enabled: true)]
     )
     let handler = RouteHandler(config: config)
 
@@ -756,7 +757,11 @@ func routeHandlerTests() async throws {
     unsetenv("DEEPSEEK_BASE_URL")
     unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
     await ModelCache.shared.invalidate("deepseek")
-    let config = RouteConfig(host: "127.0.0.1", port: 0, apiKeys: [GatewayKeyConfig(key: "test-key")])
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: ["codebuddy-cn": ProviderConfig(enabled: true)]
+    )
     let handler = RouteHandler(config: config)
 
     func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {

@@ -67,7 +67,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
     /// `/v1/models` 不展示、网关白名单不可选、请求返回 404。原始模型名（不含 provider 前缀）。
     public var disabledModels: [String]
 
-    public init(enabled: Bool = true, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil, disabledModels: [String] = []) {
+    public init(enabled: Bool = false, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil, disabledModels: [String] = []) {
         self.enabled = enabled
         self.credential = credential
         self.apiKeys = apiKeys
@@ -96,7 +96,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         self.credential = try container.decodeIfPresent(ProviderCredential.self, forKey: .credential) ?? ProviderCredential()
         // 兼容旧格式 `[String]` 与新版 `[{label,value}]`（旧 key 自动生成掩码标签）
         if let legacy = try? container.decodeIfPresent([String].self, forKey: .apiKeys) {
