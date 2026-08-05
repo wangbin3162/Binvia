@@ -7,9 +7,11 @@ public struct RouteHandler: Sendable {
     private let router: Router
     private let registry: ProviderRegistry
     private let logger: RequestLogger
+    private let state: ServerState?
 
-    public init(config: RouteConfig, registry: ProviderRegistry = .shared) {
+    public init(config: RouteConfig, state: ServerState? = nil, registry: ProviderRegistry = .shared) {
         self.config = config
+        self.state = state
         self.authenticator = APIKeyAuthenticator(configuredKeys: config.gatewayKeyStrings)
         self.router = Router(registry: registry)
         self.registry = registry
@@ -17,7 +19,43 @@ public struct RouteHandler: Sendable {
     }
 
     public func handle(_ request: HTTPRequest) async throws -> HTTPResponse {
-        switch (request.method, normalizePath(request.path)) {
+        // 面板开关：webPanelEnabled=false 时 / 与 /admin/* 返回 404
+        let panelEnabled = state?.isWebPanelEnabled() ?? config.webPanelEnabled
+
+        switch (request.method, normalizePath(request.path, panelEnabled: panelEnabled)) {
+        case ("GET", "/"):
+            guard panelEnabled else { return HTTPResponse.text(404, "Not Found") }
+            return webPanelResponse()
+        case ("GET", "/admin/api/overview"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminOverview() }
+        case ("GET", "/admin/api/entries"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminEntries(request) }
+        case ("GET", "/admin/api/providers"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminProviders() }
+        case ("GET", "/admin/api/snapshots"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminSnapshots() }
+        case ("GET", "/admin/api/config"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminGetConfig() }
+        case ("POST", "/admin/api/login"):
+            return adminLogin(request)
+        case ("POST", "/admin/api/config"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminSaveConfig(request) }
+        case ("POST", "/admin/api/usage/refresh"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminRefreshUsage() }
+        case ("POST", "/admin/api/providers/test"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminTestProvider(request) }
+        case ("POST", "/admin/api/keys"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminCreateKey(request) }
+        case ("DELETE", "/admin/api/keys"):
+            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminDeleteKey(request) }
+        default:
+            return try await handleV1Route(request)
+        }
+    }
+
+    /// /v1/* 路由
+    private func handleV1Route(_ request: HTTPRequest) async throws -> HTTPResponse {
+        switch (request.method, normalizePathV1(request.path)) {
         case ("GET", "/v1/health"):
             return healthResponse()
         case ("GET", "/v1/models"):
@@ -31,10 +69,16 @@ public struct RouteHandler: Sendable {
         }
     }
 
+    /// 路径归一化（admin 面板专用）：只放行 / 和 /admin 前缀，其余走 /v1 补全。
+    private func normalizePath(_ path: String, panelEnabled: Bool) -> String {
+        if path == "/" || path.hasPrefix("/admin") { return path }
+        return normalizePathV1(path)
+    }
+
     /// 路径归一化：兼容未带 `/v1` 前缀的客户端。
     /// 例如 opencode 配置 `baseURL` 漏写 `/v1` 时，AI SDK 会请求 `/chat/completions` 而非
     /// `/v1/chat/completions`，此处自动补前缀避免 404 Not Found。
-    private func normalizePath(_ path: String) -> String {
+    private func normalizePathV1(_ path: String) -> String {
         if path.hasPrefix("/v1") { return path }
         return "/v1" + path
     }
@@ -318,5 +362,101 @@ public struct RouteHandler: Sendable {
         )
         return (try? HTTPResponse.json(200, object: response))
             ?? HTTPResponse.text(500, "{\"error\":\"encode failed\"}", contentType: "application/json")
+    }
+
+    // MARK: - Web 面板
+
+    /// 返回内嵌 HTML（占位；S2 替换为真实面板）。
+    private func webPanelResponse() -> HTTPResponse {
+        let html = """
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head><meta charset="utf-8"><title>Binvia 管理面板</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+        body { font-family: -apple-system, system-ui, sans-serif; display: flex;
+               align-items: center; justify-content: center; height: 100vh;
+               margin: 0; background: #f5f5f7; color: #1d1d1f; }
+        .card { text-align: center; padding: 2rem; background: white;
+                border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+        p { color: #6e6e73; margin: 0; }
+        </style></head>
+        <body><div class="card"><h1>Binvia 管理面板</h1><p>正在加载…</p></div></body>
+        </html>
+        """
+        return HTTPResponse.text(200, html, contentType: "text/html; charset=utf-8")
+    }
+
+    /// admin API 认证检查：未启用面板或未授权时返回 401/404。
+    private func authorizedAdmin(_ request: HTTPRequest) -> Bool {
+        // 登录端点免认证
+        if request.method == "POST" && request.path == "/admin/api/login" { return true }
+        guard let state else { return true }
+        return state.isAuthorized(request.authorizationToken)
+    }
+
+    /// admin API 包装器：统一认证 + 面板启用检查。
+    private func handleAdminAPI(_ request: HTTPRequest, panelEnabled: Bool, handler: () async throws -> HTTPResponse) async throws -> HTTPResponse {
+        guard panelEnabled else {
+            return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
+        }
+        guard authorizedAdmin(request) else {
+            return HTTPResponse.text(401, "{\"error\":\"Unauthorized\"}", contentType: "application/json")
+        }
+        return try await handler()
+    }
+
+    // MARK: - admin API 端点（占位，S2 实现完整逻辑）
+
+    private func adminOverview() async throws -> HTTPResponse {
+        try HTTPResponse.json(200, object: ["status": "ok", "message": "S2 实现"] as [String: String])
+    }
+
+    private func adminEntries(_ request: HTTPRequest) async throws -> HTTPResponse {
+        try HTTPResponse.json(200, object: ["entries": [] as [String]] as [String: [String]])
+    }
+
+    private func adminProviders() async throws -> HTTPResponse {
+        try HTTPResponse.json(200, object: ["providers": [] as [String]] as [String: [String]])
+    }
+
+    private func adminSnapshots() async throws -> HTTPResponse {
+        try HTTPResponse.json(200, object: ["snapshots": [:]] as [String: [String: String]])
+    }
+
+    private func adminGetConfig() async throws -> HTTPResponse {
+        guard let state else {
+            return try HTTPResponse.json(200, object: config)
+        }
+        return try HTTPResponse.json(200, object: state.get())
+    }
+
+    private func adminLogin(_ request: HTTPRequest) -> HTTPResponse {
+        HTTPResponse.text(401, "{\"error\":\"Unauthorized\"}", contentType: "application/json")
+    }
+
+    private func adminSaveConfig(_ request: HTTPRequest) throws -> HTTPResponse {
+        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    }
+
+    private func adminRefreshUsage() async throws -> HTTPResponse {
+        try HTTPResponse.json(200, object: ["snapshots": [:]] as [String: [String: String]])
+    }
+
+    private func adminTestProvider(_ request: HTTPRequest) async throws -> HTTPResponse {
+        struct TestResult: Codable {
+            let success: Bool
+            let message: String
+        }
+        return try HTTPResponse.json(200, object: TestResult(success: false, message: "S2 实现"))
+    }
+
+    private func adminCreateKey(_ request: HTTPRequest) throws -> HTTPResponse {
+        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    }
+
+    private func adminDeleteKey(_ request: HTTPRequest) throws -> HTTPResponse {
+        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
     }
 }

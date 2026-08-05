@@ -22,6 +22,8 @@ if args.contains("--help") || args.contains("-h") {
       GET  /v1/models
       POST /v1/chat/completions
       GET  /v1/usage
+      GET  /                  Web 管理面板
+      GET  /admin/api/*       Web 管理 API
     """)
     exit(0)
 }
@@ -43,12 +45,25 @@ if let portStr = value(for: "--port"), let p = Int(portStr) {
 ProviderCatalog.registerAll()
 ProviderCatalog.registerCustomProviders(from: config)
 
-let handler = RouteHandler(config: config)
+let state = ServerState(config: config)
+var handler = RouteHandler(config: config, state: state)
 let server = HTTPServer { request in
     try await handler.handle(request)
 }
 
+// 热更新：配置变更后替换 RouteHandler（复用 HTTPServer.setHandler）
+state.onConfigChanged = { newConfig in
+    let newHandler = RouteHandler(config: newConfig, state: state)
+    server.setHandler { request in
+        try await newHandler.handle(request)
+    }
+}
+
 try server.start(host: config.host, port: port)
+
+if config.webPanelEnabled {
+    print("[Binvia] Web 管理面板: http://\(config.host):\(port)/")
+}
 
 // 常驻运行，等待信号退出
 signal(SIGINT, SIG_IGN)
