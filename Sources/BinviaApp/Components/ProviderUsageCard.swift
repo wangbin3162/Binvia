@@ -82,12 +82,6 @@ struct ProviderUsageCard: View {
                     }
                 }
 
-                // CodeBuddy 积分接口仅支持企业账号（需登录 + 企业 ID）
-                if providerID == "codebuddy-cn" {
-                    Text("仅支持企业积分查询（需登录 + 企业 ID）")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
             }
         } else if let dashboard = ProviderRegistry.shared.descriptor(for: providerID)?.usageDashboardURL {
             // 无公开用量 API 的供应商（如 opencode）：提供官网入口。

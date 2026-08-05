@@ -242,7 +242,7 @@ public struct CodeBuddyCNProvider: Provider {
         guard !tokens.isEmpty else {
             return ConnectionTestResult(
                 success: false,
-                message: "CodeBuddy CN 需要登录：设置 CODEBUDDY_CN_ACCESS_TOKEN 或 config providers.codebuddy-cn.credential.accessToken（可先跑 BinviaCLI login codebuddy-cn 走设备码流程）"
+                message: "请先配置模型调用 Token：在设置面板「模型调用 Access Token」中粘贴 Token，或设置 CODEBUDDY_CN_ACCESS_TOKEN 环境变量（OAuth 登录 token 仅用于积分查询）"
             )
         }
 
