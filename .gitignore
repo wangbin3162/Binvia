@@ -5,3 +5,7 @@ build/
 *.xcodeproj
 .DS_Store
 config.json
+# Web 面板前端构建产物（WebPanelAssets.swift 是提交入库的生成物，dist 不入库）
+web/node_modules/
+web/dist/
+web/.vite/
