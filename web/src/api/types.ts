@@ -1,0 +1,131 @@
+export interface ProviderHealth {
+  id: string
+  displayName: string
+  configured: boolean
+  enabled: boolean
+}
+
+export interface ServerInfo {
+  running: boolean
+  host: string
+  port: number
+}
+
+export interface Summary {
+  totalRequests: number
+  totalErrors: number
+  activeProviders: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
+export interface OverviewResponse {
+  server: ServerInfo
+  summary: Summary
+  providers: ProviderHealth[]
+}
+
+export interface RequestLogEntry {
+  id: string
+  timestamp: string
+  method: string
+  path: string
+  providerID: string | null
+  model: string | null
+  statusCode: number
+  durationMS: number
+  error: string | null
+  tokens: { promptTokens: number; completionTokens: number; totalTokens: number } | null
+}
+
+export interface EntriesResponse {
+  entries: RequestLogEntry[]
+}
+
+export interface ProviderItem {
+  id: string
+  alias: string | null
+  displayName: string
+  authType: string
+  configured: boolean
+  enabled: boolean
+  region: string | null
+  modelCount: number
+}
+
+export interface ProvidersResponse {
+  providers: ProviderItem[]
+}
+
+export interface KeyedBalance {
+  label: string
+  balance: number
+  currency: string | null
+}
+
+export interface QuotaWindow {
+  label: string
+  remainingFraction: number
+  resetAt: string | null
+  unlimited: boolean
+  used: number
+  total: number
+  remainingPercentage: number
+}
+
+export interface ProviderUsageSnapshot {
+  providerID: string
+  balance: number | null
+  currency: string | null
+  balances: KeyedBalance[]
+  quotaWindows: QuotaWindow[]
+  rawJSON: string | null
+  fetchedAt: string
+  error: string | null
+}
+
+export interface SnapshotsResponse {
+  snapshots: Record<string, ProviderUsageSnapshot>
+}
+
+export interface GatewayKeyConfig {
+  key: string
+  enabledModels: string[] | null
+}
+
+export interface RouteConfig {
+  version: number
+  host: string
+  port: number
+  apiKeys: GatewayKeyConfig[]
+  providers: Record<string, ProviderConfig>
+  providerOrder: string[]
+  webPanelEnabled: boolean
+  adminPassword: string | null
+}
+
+export interface ProviderCredential {
+  apiKey: string | null
+  accessToken: string | null
+  refreshToken: string | null
+  email: string | null
+  region: string | null
+}
+
+export interface ProviderConfig {
+  enabled: boolean
+  credential: ProviderCredential
+  apiKeys: { label: string; value: string }[]
+  region: string | null
+  disabledModels: string[]
+}
+
+export interface LoginResponse {
+  token: string
+}
+
+export interface TestResult {
+  success: boolean
+  message: string
+}
