@@ -47,13 +47,12 @@ let package = Package(
             ]),
         // 菜单栏 GUI 应用（SwiftUI + AppKit，仅依赖 BinviaCore，Core 无 UI 依赖）。
         // 支持 `--smoke-test` 无界面自检（启动服务器→健康检查→停服）。
+        // 注：Provider 品牌 SVG 图标已编译期内嵌（ProviderIcons.swift），不再声明 resources，
+        // 避免 SPM 资源包在手工打包 .app 时丢失（Bundle.module 崩溃）与 codesign 冲突。
         .executableTarget(
             name: "BinviaApp",
             dependencies: ["BinviaCore"],
             path: "Sources/BinviaApp",
-            resources: [
-                .process("Resources"),
-            ],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]),

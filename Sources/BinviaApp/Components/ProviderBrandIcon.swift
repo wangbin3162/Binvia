@@ -24,12 +24,14 @@ struct ProviderBrandIcon: View {
 
     // MARK: - SVG 加载
 
-    /// 从 `Bundle.module` 加载 `ProviderIcon-<id>.svg`，设为 16x16 template 图像。
-    /// 与 CodexBar 的 `ProviderBrandIcon` 一致：isTemplate = true，自动适配深/浅色模式。
+    /// 从编译期内嵌的 `ProviderIcons.svgs`（base64）加载 `ProviderIcon-<id>.svg`，
+    /// 设为 16x16 template 图像。与 CodexBar 的 `ProviderBrandIcon` 一致：
+    /// isTemplate = true，自动适配深/浅色模式。
+    /// 注：SVG 内嵌而非 SPM 资源包，避免打包 .app 时 Bundle.module 丢失崩溃。
     private static func loadSVGIcon(for providerID: String) -> NSImage? {
-        let resourceName = "ProviderIcon-\(providerID)"
-        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "svg"),
-              let image = NSImage(contentsOf: url) else {
+        guard let svgBase64 = ProviderIcons.svgs[providerID],
+              let data = Data(base64Encoded: svgBase64),
+              let image = NSImage(data: data) else {
             return nil
         }
         image.size = NSSize(width: 16, height: 16)
