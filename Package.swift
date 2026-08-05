@@ -53,6 +53,9 @@ let package = Package(
             name: "BinviaApp",
             dependencies: ["BinviaCore"],
             path: "Sources/BinviaApp",
+            // SVG 源文件仅供 Scripts/embed_svgs.sh 生成 ProviderIcons.swift 使用，
+            // 不参与构建（避免 "unhandled files" 警告）。
+            exclude: ["Resources"],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]),

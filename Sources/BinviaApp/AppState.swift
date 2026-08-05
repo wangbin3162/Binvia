@@ -523,7 +523,7 @@ final class AppState: ObservableObject {
             // 缓存未命中：若配置里显式存过 token（手动导入账号），也算已配置。
             if let pc = config.providers["cursor"] {
                 let hasToken = !(pc.credential.accessToken ?? "").isEmpty
-                    || !(pc.apiKeys ?? []).isEmpty
+                    || !pc.apiKeys.isEmpty
                 if hasToken { return true }
             }
             // 未探测过 → 异步刷新缓存后再判定（避免首次打开密钥面板看不到 cursor）。

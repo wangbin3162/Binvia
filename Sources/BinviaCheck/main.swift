@@ -3913,32 +3913,32 @@ func updateCheckerTests() async {
     expectFalse(UpdateChecker.isNewer("0.1.3", than: "0.2.0"), "低版本不算更新")
     expectFalse(UpdateChecker.isNewer("0.1.2", than: "0.1.2-beta"), "非数字段退化比较")
 
-    // GitHub releases/latest 响应解析（URLProtocolMock）
+    // 版本号从重定向 URL 提取
+    expectEqual(UpdateChecker.extractVersion(from: "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3"),
+                "0.1.3", "tag URL 提取版本")
+    expectEqual(UpdateChecker.extractVersion(from: "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3/"),
+                "0.1.3", "尾部斜杠容忍")
+    expectEqual(UpdateChecker.extractVersion(from: "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3?foo=1"),
+                "0.1.3", "查询参数剔除")
+    expectNil(UpdateChecker.extractVersion(from: "https://github.com/wangbin3162/Binvia/releases"), "无 tag 返回 nil")
+
+    // fetchLatestRelease：模拟 302 → 200 重定向（URLProtocolMock）
     URLProtocolMock.reset()
-    URLProtocolMock.requestHandler = { _ in
-        let json = """
-        {
-          "tag_name": "v0.1.3",
-          "prerelease": false,
-          "published_at": "2026-08-05T01:00:00Z",
-          "html_url": "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3",
-          "assets": [
-            {"name": "Binvia-0.1.3-macos-arm64-x86_64.dmg", "browser_download_url": "https://github.com/wangbin3162/Binvia/releases/download/v0.1.3/Binvia-0.1.3-macos-arm64-x86_64.dmg"},
-            {"name": "Binvia-0.1.3-macos-arm64-x86_64.tar.gz", "browser_download_url": "https://github.com/wangbin3162/Binvia/releases/download/v0.1.3/Binvia-0.1.3-macos-arm64-x86_64.tar.gz"}
-          ]
+    URLProtocolMock.requestHandler = { request in
+        if request.url?.path == "/wangbin3162/Binvia/releases/latest" {
+            let response = HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: nil,
+                                           headerFields: ["Location": "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3"])!
+            return (response, Data())
         }
-        """
-        let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/wangbin3162/Binvia/releases/latest")!,
-                                       statusCode: 200, httpVersion: nil, headerFields: nil)!
-        return (response, Data(json.utf8))
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (response, Data())
     }
     let checker = UpdateChecker(session: URLProtocolMock.makeSession())
     do {
         let info = try await checker.fetchLatestRelease()
-        expectEqual(info.version, "0.1.3", "tag_name 去 v 前缀")
-        expectFalse(info.isPrerelease, "非预发布")
+        expectEqual(info.version, "0.1.3", "重定向解析出最新版本")
         expectEqual(info.htmlURL, "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3", "Release 页面")
-        expectTrue(info.dmgDownloadURL?.hasSuffix(".dmg") == true, "DMG 直链命中")
+        expectTrue(info.dmgDownloadURL?.hasSuffix(".dmg") == true, "DMG 直链按约定构造")
         expectTrue(UpdateChecker.isNewer(info.version, than: "0.1.2"), "0.1.3 更新于 0.1.2")
     } catch {
         expectEqual("\(error)", "不应抛错", "解析不应抛错")
@@ -3947,7 +3947,7 @@ func updateCheckerTests() async {
     // 404 → badResponse
     URLProtocolMock.reset()
     URLProtocolMock.requestHandler = { _ in
-        let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/wangbin3162/Binvia/releases/latest")!,
+        let response = HTTPURLResponse(url: URL(string: "https://github.com/wangbin3162/Binvia/releases/latest")!,
                                        statusCode: 404, httpVersion: nil, headerFields: nil)!
         return (response, Data())
     }

@@ -298,7 +298,8 @@ case "config":
     }
 
 case "serve":
-    let configPath = value(for: "--config")
+    // 注：serve 固定使用默认配置路径（ConfigStore.load() 内部处理 BINVIA_CONFIG 覆盖）
+    _ = value(for: "--config") // --config 参数预留；当前与 BinviaServer 行为保持一致
     let config = try ConfigStore.load()
     let port = value(for: "--port").flatMap(Int.init) ?? config.port
     ProviderCatalog.registerAll()

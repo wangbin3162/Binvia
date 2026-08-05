@@ -112,9 +112,27 @@ struct SettingsAboutPane: View {
                 } else {
                     checkState = .upToDate
                 }
+            } catch let urlError as URLError {
+                checkState = .failed(friendlyMessage(for: urlError))
             } catch {
                 checkState = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    /// 把常见网络错误映射为可读中文提示。
+    private func friendlyMessage(for error: URLError) -> String {
+        switch error.code {
+        case .timedOut:
+            return "连接超时，请检查网络后重试"
+        case .notConnectedToInternet:
+            return "无网络连接"
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return "无法连接更新服务器，请检查网络后重试"
+        case .networkConnectionLost:
+            return "网络连接中断，请重试"
+        default:
+            return error.localizedDescription
         }
     }
 

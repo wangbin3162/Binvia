@@ -20,22 +20,23 @@ permissions:
 jobs:
   release:
     name: universal 构建 + 发布
-    runs-on: macos-15
+    # macos-26（arm64 + SDK 26）：与本机开发环境一致，避免 SwiftUI 视觉差异
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # macos-15 runner 默认 Swift 6.1，低于 Package.swift 要求的 6.2，需固定工具链版本
-      - name: Setup Swift 6.2
+      # 固定工具链版本（与本地 Swift 6.3 一致）
+      - name: Setup Swift 6.3
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.3"
 
       - name: Cache SwiftPM 构建缓存
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-swift6.2-release-${{ hashFiles('Package.swift') }}
+          key: ${{ runner.os }}-swift6.3-release-${{ hashFiles('Package.swift') }}
           restore-keys: |
             ${{ runner.os }}-swift-
 

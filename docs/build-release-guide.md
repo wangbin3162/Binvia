@@ -173,9 +173,11 @@ CI 自动化签名需将证书导出为 .p12 加密后存为 repo secret。
 
 ### 6.2 CI 里没有 Xcode 也能跑？
 
-GitHub Actions 的 `macos-15` runner 自带 Xcode，`swift build` 直接可用。
-若未来 GitHub 下线该 runner 标签，把 `ci.yml` / `release.yml` 中的 `macos-15` 换成
-仍可用的标签（如 `macos-14`、`macos-26`）即可。
+GitHub Actions 的 `macos-26` runner 自带 Xcode，`swift build` 直接可用。
+选 `macos-26`（arm64 + SDK 26）是为了与本机开发环境（Swift 6.3 / SDK 26）一致：
+旧 SDK 编译的 app 在 macOS 26 上不会套用新的 SwiftUI 圆角/边框设计。
+若未来 GitHub 调整 runner 标签，把 `ci.yml` / `release.yml` 中的 `macos-26` 换成
+仍可用的同代标签即可（同时保持 setup-swift 版本与本机一致）。
 
 ### 6.3 多架构构建的 "swift-version file not registered" 错误
 
