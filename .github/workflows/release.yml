@@ -26,17 +26,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 固定工具链版本（与本地 Swift 6.3 一致）
-      - name: Setup Swift 6.3
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.3"
-
+      # macos-26 镜像自带 Xcode 26.5（Swift 6.3 + SDK 26），与本机一致，无需安装工具链
       - name: Cache SwiftPM 构建缓存
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-swift6.3-release-${{ hashFiles('Package.swift') }}
+          key: ${{ runner.os }}-macos26-release-${{ hashFiles('Package.swift') }}
           restore-keys: |
             ${{ runner.os }}-swift-
 
