@@ -423,7 +423,7 @@ struct SettingsProviderPane: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
-                    tokenRow(label: token.label, value: token.value, isPrimary: index == 0) {
+                    tokenRow(label: token.label, value: token.value, isPrimary: !isLoggedInViaOAuth && index == 0) {
                         draftTokens.remove(at: index)
                         persistDeviceTokens()
                     }
@@ -898,6 +898,14 @@ struct SettingsProviderPane: View {
 
     // MARK: - Actions
 
+    /// deviceFlow 是否处于「已登录」状态（credential 有主 token 且有登录账号标识）。
+    /// 已登录时主 token 由「已连接 · 账号 + 重新登录」管理，不再作为令牌列表条目展示。
+    private var isLoggedInViaOAuth: Bool {
+        guard let pc = appState.config.providers[providerID] else { return false }
+        guard !(pc.credential.accessToken ?? "").isEmpty else { return false }
+        return !(pc.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// 首次显示时加载已有配置：DeepSeek 的令牌列表、deviceFlow 多 Token、oauth 的 Token 草稿。
     private func loadDrafts() {
         let pc = appState.config.providers[providerID]
@@ -912,28 +920,31 @@ struct SettingsProviderPane: View {
         }
 
         // deviceFlow (CodeBuddy)：主 token（credential.accessToken）+ 轮换 token（apiKeys）
-        // 主 token 的标签：新配置同时存在 apiKeys[]（带用户标签）时优先复用；
-        // OAuth 登录后自动追加的主 token，用登录账号标识（credential.email）作标签
-        // （对齐 Antigravity 显示登录用户）；无账号标识回退掩码。按值去重避免主 token 重复。
+        // 已登录（OAuth 建立且有账号标识）：列表只装轮换 token，主 token 由「已连接」展示管理；
+        // 手动粘贴场景（无登录标识）：保留主 token 行（带「主」徽标）。
         if draftTokens.isEmpty {
-            var tokens: [KeyedToken] = []
-            var seen = Set<String>()
             let stored = pc?.apiKeys ?? []
-            if let access = pc?.credential.accessToken, !access.isEmpty {
-                seen.insert(access)
-                if let labeled = stored.first(where: { $0.value == access }) {
-                    tokens.append(labeled)
-                } else {
-                    let identity = (pc?.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let label = identity.isEmpty ? KeyedToken.defaultLabel(for: access) : identity
-                    tokens.append(KeyedToken(label: label, value: access))
+            if isLoggedInViaOAuth {
+                draftTokens = stored
+            } else {
+                var tokens: [KeyedToken] = []
+                var seen = Set<String>()
+                if let access = pc?.credential.accessToken, !access.isEmpty {
+                    seen.insert(access)
+                    if let labeled = stored.first(where: { $0.value == access }) {
+                        tokens.append(labeled)
+                    } else {
+                        let identity = (pc?.credential.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let label = identity.isEmpty ? KeyedToken.defaultLabel(for: access) : identity
+                        tokens.append(KeyedToken(label: label, value: access))
+                    }
                 }
-            }
-            for t in stored where !seen.contains(t.value) {
-                tokens.append(t)
-            }
-            if !tokens.isEmpty {
-                draftTokens = tokens
+                for t in stored where !seen.contains(t.value) {
+                    tokens.append(t)
+                }
+                if !tokens.isEmpty {
+                    draftTokens = tokens
+                }
             }
         }
 
@@ -982,7 +993,12 @@ struct SettingsProviderPane: View {
 
     private func persistDeviceTokens() {
         do {
-            try appState.setAccessTokens(draftTokens, refreshToken: manualRefreshToken, for: providerID)
+            if isLoggedInViaOAuth {
+                // 已登录：列表只含轮换 token，仅更新 apiKeys，不动主 token（登录凭据）
+                try appState.setRotationTokens(draftTokens, for: providerID)
+            } else {
+                try appState.setAccessTokens(draftTokens, refreshToken: manualRefreshToken, for: providerID)
+            }
             tokenSaveMessage = draftTokens.isEmpty ? nil : "已保存 \(draftTokens.count) 个 Token"
         } catch {
             tokenSaveMessage = "保存失败: \(error.localizedDescription)"

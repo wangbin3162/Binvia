@@ -104,6 +104,16 @@ final class AppState: ObservableObject {
         }
         ProviderCatalog.registerAll()
         ProviderCatalog.registerCustomProviders(from: loaded)
+
+        // 恢复 OAuth/设备码登录状态：有 accessToken 且带登录账号标识的 provider 标为已连接，
+        // 使「已连接 · 账号」在重启后仍然展示（否则按钮退回「登录」，造成未登录假象）。
+        for id in ["codebuddy-cn", "antigravity", "codex"] {
+            if let pc = loaded.providers[id],
+               !(pc.credential.accessToken ?? "").isEmpty,
+               !(pc.credential.email ?? "").isEmpty {
+                oauthStates[id] = .connected
+            }
+        }
     }
 
     // MARK: - 服务器生命周期
@@ -248,6 +258,19 @@ final class AppState: ObservableObject {
         providerConfig.credential = credential
         // 仅轮换 token 写入 apiKeys[]（主 token 只在 credential，避免重复存储）
         providerConfig.apiKeys = Array(cleaned.dropFirst())
+        config.providers[providerID] = providerConfig
+        try saveConfig()
+    }
+
+    /// 仅更新 deviceFlow provider 的轮换 token 列表（不动主 token）。
+    /// 用于已登录场景：主 token 由「已连接 · 账号 + 重新登录」管理，列表只含轮换 token。
+    func setRotationTokens(_ tokens: [KeyedToken], for providerID: String) throws {
+        let cleaned = tokens
+            .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { !$0.value.isEmpty }
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        providerConfig.apiKeys = cleaned
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
