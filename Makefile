@@ -1,6 +1,6 @@
 # Binvia 常用命令
 
-.PHONY: build test release run clean web
+.PHONY: build test release run clean web rust-build rust-test rust-release
 
 build:
 	swift build
@@ -22,3 +22,12 @@ clean:
 # 修改前端后必须运行此命令，并将生成的 WebPanelAssets.swift 一起提交
 web:
 	cd web && npm install && npm run build && node scripts/embed.mjs
+
+rust-build:
+	cargo build --manifest-path binvia-core/Cargo.toml
+
+rust-test:
+	cargo test --manifest-path binvia-core/Cargo.toml --workspace
+
+rust-release:
+	./Scripts/build-rust.sh

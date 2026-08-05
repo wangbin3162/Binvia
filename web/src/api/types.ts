@@ -52,6 +52,9 @@ export interface ProviderItem {
   enabled: boolean
   region: string | null
   modelCount: number
+  models: string[]
+  baseURL: string | null
+  isUserDefined: boolean
 }
 
 export interface ProvidersResponse {
@@ -101,8 +104,16 @@ export interface RouteConfig {
   apiKeys: GatewayKeyConfig[]
   providers: Record<string, ProviderConfig>
   providerOrder: string[]
+  customProviderDefs: CustomProviderDef[]
   webPanelEnabled: boolean
   adminPassword: string | null
+}
+
+export interface CustomProviderDef {
+  id: string
+  displayName: string
+  baseURL: string
+  models: string[]
 }
 
 export interface ProviderCredential {
@@ -111,6 +122,8 @@ export interface ProviderCredential {
   refreshToken: string | null
   email: string | null
   region: string | null
+  machineId?: string | null
+  workspaceId?: string | null
 }
 
 export interface ProviderConfig {

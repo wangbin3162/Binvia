@@ -9,3 +9,6 @@ config.json
 web/node_modules/
 web/dist/
 web/.vite/
+web/tsconfig.tsbuildinfo
+binvia-core/target/
+binvia-core/web/dist/

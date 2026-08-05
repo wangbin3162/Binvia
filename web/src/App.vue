@@ -41,7 +41,7 @@ async function doLogin() {
 
 const overviewData = ref<OverviewResponse | null>(null)
 
-async function fetchOverview() {
+async function fetchOverview(): Promise<boolean> {
   try {
     overviewData.value = await api.overview()
     if (overviewData.value) {
@@ -49,13 +49,15 @@ async function fetchOverview() {
       serverHost.value = overviewData.value.server.host
       serverPort.value = overviewData.value.server.port
     }
+    return true
   } catch {
-    // silent
+    return false
   }
 }
 
 function startPolling() {
-  fetchOverview()
+  if (pollTimer) clearInterval(pollTimer)
+  void fetchOverview()
   pollTimer = setInterval(fetchOverview, 2000)
 }
 
@@ -65,9 +67,8 @@ onMounted(async () => {
     startPolling()
   } else {
     try {
-      await fetchOverview()
-      needsLogin.value = false
-      startPolling()
+      needsLogin.value = !(await fetchOverview())
+      if (!needsLogin.value) startPolling()
     } catch {
       needsLogin.value = true
     }

@@ -38,7 +38,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     window.location.reload()
     throw new Error('Unauthorized')
   }
-  return res.json()
+  const payload = await res.json().catch(() => null)
+  if (!res.ok) {
+    const message = typeof payload?.error === 'string'
+      ? payload.error
+      : payload?.error?.message ?? `请求失败（HTTP ${res.status}）`
+    throw new Error(message)
+  }
+  return payload as T
 }
 
 export const api = {
@@ -74,7 +81,7 @@ export const api = {
     return request('/admin/api/config')
   },
 
-  async saveConfig(config: Partial<RouteConfig>): Promise<{ status: string }> {
+  async saveConfig(config: RouteConfig): Promise<{ status: string }> {
     return request('/admin/api/config', {
       method: 'POST',
       body: JSON.stringify(config),
