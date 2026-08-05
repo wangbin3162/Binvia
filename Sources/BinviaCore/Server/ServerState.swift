@@ -59,22 +59,20 @@ public final class ServerState: @unchecked Sendable {
 
     // MARK: - 面板认证
 
-    /// 验证面板密码：成功时轮换 admin token。
-    public func verifyPassword(_ password: String) -> Bool {
+    /// 验证面板密码：成功时轮换 admin token 并返回 token 字符串；失败返回 nil。
+    public func verifyPassword(_ password: String) -> String? {
         lock.lock()
         let stored = config.adminPassword
         lock.unlock()
         guard let stored, !stored.isEmpty else {
-            // 未设密码时不允许登录（返回 false，由 isAuthorized 放行无密码场景）
-            return false
+            return nil
         }
-        guard password == stored else { return false }
-        // 轮换 token
+        guard password == stored else { return nil }
         let newToken = UUID().uuidString
         lock.lock()
         adminToken = newToken
         lock.unlock()
-        return true
+        return newToken
     }
 
     /// 检查请求是否已授权：未设密码时全部放行。

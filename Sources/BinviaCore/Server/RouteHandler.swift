@@ -22,35 +22,17 @@ public struct RouteHandler: Sendable {
         // 面板开关：webPanelEnabled=false 时 / 与 /admin/* 返回 404
         let panelEnabled = state?.isWebPanelEnabled() ?? config.webPanelEnabled
 
-        switch (request.method, normalizePath(request.path, panelEnabled: panelEnabled)) {
-        case ("GET", "/"):
+        // 先匹配面道路由
+        let normalized = normalizePath(request.path, panelEnabled: panelEnabled)
+        if normalized == "/" {
             guard panelEnabled else { return HTTPResponse.text(404, "Not Found") }
             return webPanelResponse()
-        case ("GET", "/admin/api/overview"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminOverview() }
-        case ("GET", "/admin/api/entries"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminEntries(request) }
-        case ("GET", "/admin/api/providers"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminProviders() }
-        case ("GET", "/admin/api/snapshots"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminSnapshots() }
-        case ("GET", "/admin/api/config"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminGetConfig() }
-        case ("POST", "/admin/api/login"):
-            return adminLogin(request)
-        case ("POST", "/admin/api/config"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminSaveConfig(request) }
-        case ("POST", "/admin/api/usage/refresh"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminRefreshUsage() }
-        case ("POST", "/admin/api/providers/test"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try await adminTestProvider(request) }
-        case ("POST", "/admin/api/keys"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminCreateKey(request) }
-        case ("DELETE", "/admin/api/keys"):
-            return try await handleAdminAPI(request, panelEnabled: panelEnabled) { try adminDeleteKey(request) }
-        default:
-            return try await handleV1Route(request)
         }
+        if normalized.hasPrefix("/admin") {
+            return try await handleAdminRoute(request, panelEnabled: panelEnabled)
+        }
+        // /v1/* 路由
+        return try await handleV1Route(request)
     }
 
     /// /v1/* 路由
@@ -407,56 +389,351 @@ public struct RouteHandler: Sendable {
         return try await handler()
     }
 
-    // MARK: - admin API 端点（占位，S2 实现完整逻辑）
+    // MARK: - admin API 路由
 
-    private func adminOverview() async throws -> HTTPResponse {
-        try HTTPResponse.json(200, object: ["status": "ok", "message": "S2 实现"] as [String: String])
-    }
-
-    private func adminEntries(_ request: HTTPRequest) async throws -> HTTPResponse {
-        try HTTPResponse.json(200, object: ["entries": [] as [String]] as [String: [String]])
-    }
-
-    private func adminProviders() async throws -> HTTPResponse {
-        try HTTPResponse.json(200, object: ["providers": [] as [String]] as [String: [String]])
-    }
-
-    private func adminSnapshots() async throws -> HTTPResponse {
-        try HTTPResponse.json(200, object: ["snapshots": [:]] as [String: [String: String]])
-    }
-
-    private func adminGetConfig() async throws -> HTTPResponse {
-        guard let state else {
-            return try HTTPResponse.json(200, object: config)
+    /// 管理面板路由分发（含变量路径段提取）。
+    private func handleAdminRoute(_ request: HTTPRequest, panelEnabled: Bool) async throws -> HTTPResponse {
+        guard panelEnabled else {
+            return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
         }
-        return try HTTPResponse.json(200, object: state.get())
+        // 登录端点免认证
+        if request.method == "POST" && request.path == "/admin/api/login" {
+            return adminLogin(request)
+        }
+        guard state?.isAuthorized(request.authorizationToken) ?? true else {
+            return HTTPResponse.text(401, "{\"error\":\"Unauthorized\"}", contentType: "application/json")
+        }
+
+        let path = request.path
+        let method = request.method
+
+        switch (method, path) {
+        case ("GET", "/admin/api/overview"):
+            return try await adminOverview()
+        case ("GET", "/admin/api/entries"):
+            return try await adminEntries(request)
+        case ("GET", "/admin/api/providers"):
+            return try await adminProviders()
+        case ("GET", "/admin/api/snapshots"):
+            return try await adminSnapshots()
+        case ("GET", "/admin/api/config"):
+            return adminGetConfig()
+        case ("POST", "/admin/api/config"):
+            return try await adminSaveConfig(request)
+        case ("POST", "/admin/api/usage/refresh"):
+            return try await adminRefreshUsage()
+        case ("POST", "/admin/api/keys"):
+            return try await adminCreateKey(request)
+        case _ where method == "POST" && path.hasPrefix("/admin/api/providers/") && path.hasSuffix("/test"):
+            let providerID = String(path.dropFirst("/admin/api/providers/".count).dropLast("/test".count))
+            return try await adminTestProvider(providerID, request)
+        case _ where method == "DELETE" && path.hasPrefix("/admin/api/keys/"):
+            let key = String(path.dropFirst("/admin/api/keys/".count))
+            return try await adminDeleteKey(key)
+        default:
+            return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
+        }
     }
 
+    // MARK: - admin API 端点
+
+    /// 概览：服务器信息 + 请求聚合 + Token 用量。
+    private func adminOverview() async throws -> HTTPResponse {
+        struct OverviewResponse: Codable {
+            struct ServerInfo: Codable {
+                let running: Bool
+                let host: String
+                let port: Int
+            }
+            struct Summary: Codable {
+                let totalRequests: Int
+                let totalErrors: Int
+                let activeProviders: Int
+                let promptTokens: Int
+                let completionTokens: Int
+                let totalTokens: Int
+            }
+            struct ProviderHealth: Codable {
+                let id: String
+                let displayName: String
+                let configured: Bool
+                let enabled: Bool
+            }
+            let server: ServerInfo
+            let summary: Summary
+            let providers: [ProviderHealth]
+        }
+        let cfg = state?.get() ?? config
+        let summary = logger.summary()
+        var totalRequests = 0
+        var totalErrors = 0
+        var totalPrompt = 0
+        var totalCompletion = 0
+        var totalTokens = 0
+        for (_, usage) in summary.byProvider {
+            totalRequests += usage.requestCount
+            totalErrors += usage.errorCount
+            totalPrompt += usage.totalPromptTokens
+            totalCompletion += usage.totalCompletionTokens
+            totalTokens += usage.totalTokens
+        }
+        let activeProviders = registry.allDescriptors().filter { desc in
+            let pc = cfg.providers[desc.id]
+            return (pc?.enabled ?? ProviderCatalog.isEnabledByDefault(desc.id))
+                && cfg.credential(for: desc.id).hasAnyCredential
+        }.count
+        var providerHealths: [OverviewResponse.ProviderHealth] = []
+        for desc in registry.orderedDescriptors(cfg.providerOrder) {
+            let pc = cfg.providers[desc.id]
+            let enabled = pc?.enabled ?? ProviderCatalog.isEnabledByDefault(desc.id)
+            let configured = cfg.credential(for: desc.id).hasAnyCredential
+            providerHealths.append(OverviewResponse.ProviderHealth(
+                id: desc.id, displayName: desc.displayName,
+                configured: configured, enabled: enabled
+            ))
+        }
+        let response = OverviewResponse(
+            server: OverviewResponse.ServerInfo(running: true, host: cfg.host, port: cfg.port),
+            summary: OverviewResponse.Summary(
+                totalRequests: totalRequests, totalErrors: totalErrors,
+                activeProviders: activeProviders,
+                promptTokens: totalPrompt, completionTokens: totalCompletion,
+                totalTokens: totalTokens
+            ),
+            providers: providerHealths
+        )
+        return try HTTPResponse.json(200, object: response)
+    }
+
+    /// 请求日志（倒序，默认 50 条）。
+    private func adminEntries(_ request: HTTPRequest) async throws -> HTTPResponse {
+        struct EntriesResponse: Codable {
+            let entries: [RequestLogEntry]
+        }
+        let limitStr = request.queryItems["limit"] ?? "50"
+        let limit = max(1, min(Int(limitStr) ?? 50, 500))
+        let all = logger.allEntries()
+        let sliced = Array(all.reversed().prefix(limit))
+        return try HTTPResponse.json(200, object: EntriesResponse(entries: sliced))
+    }
+
+    /// Provider 列表（含配置状态）。
+    private func adminProviders() async throws -> HTTPResponse {
+        struct ProviderItem: Codable {
+            let id: String
+            let alias: String?
+            let displayName: String
+            let authType: String
+            let configured: Bool
+            let enabled: Bool
+            let region: String?
+            let modelCount: Int
+        }
+        struct ProvidersResponse: Codable {
+            let providers: [ProviderItem]
+        }
+        let cfg = state?.get() ?? config
+        var items: [ProviderItem] = []
+        for desc in registry.orderedDescriptors(cfg.providerOrder) {
+            let pc = cfg.providers[desc.id]
+            let enabled = pc?.enabled ?? ProviderCatalog.isEnabledByDefault(desc.id)
+            let configured = cfg.credential(for: desc.id).hasAnyCredential
+            items.append(ProviderItem(
+                id: desc.id, alias: desc.alias, displayName: desc.displayName,
+                authType: desc.metadata.authType.rawValue,
+                configured: configured, enabled: enabled,
+                region: pc?.region,
+                modelCount: desc.models.count
+            ))
+        }
+        return try HTTPResponse.json(200, object: ProvidersResponse(providers: items))
+    }
+
+    /// 用量快照（来自 UsageCache）。
+    private func adminSnapshots() async throws -> HTTPResponse {
+        struct SnapshotsResponse: Codable {
+            let snapshots: [String: ProviderUsageSnapshot]
+        }
+        // 从 UsageCache 收集所有已缓存的快照
+        var snapshots: [String: ProviderUsageSnapshot] = [:]
+        for desc in registry.allDescriptors() {
+            if let cached = await UsageCache.shared.get(desc.id) {
+                snapshots[desc.id] = cached
+            }
+        }
+        return try HTTPResponse.json(200, object: SnapshotsResponse(snapshots: snapshots))
+    }
+
+    /// 获取配置（凭据掩码）。
+    private func adminGetConfig() -> HTTPResponse {
+        let cfg = state?.get() ?? config
+        // 深拷贝配置并掩码凭据
+        var masked = cfg
+        for (id, var pc) in masked.providers {
+            var maskedCred = pc.credential
+            maskedCred.apiKey = maskCredential(pc.credential.apiKey)
+            maskedCred.accessToken = maskCredential(pc.credential.accessToken)
+            maskedCred.refreshToken = maskCredential(pc.credential.refreshToken)
+            pc.credential = maskedCred
+            // 掩码 apiKeys 的值
+            pc.apiKeys = pc.apiKeys.map { KeyedToken(label: $0.label, value: maskCredential($0.value)) }
+            masked.providers[id] = pc
+        }
+        // 掩码网关密码
+        if masked.adminPassword != nil {
+            masked.adminPassword = "••••••••"
+        }
+        return (try? HTTPResponse.json(200, object: masked))
+            ?? HTTPResponse.text(500, "{\"error\":\"encode failed\"}", contentType: "application/json")
+    }
+
+    /// 登录：验证密码，返回 token。
     private func adminLogin(_ request: HTTPRequest) -> HTTPResponse {
-        HTTPResponse.text(401, "{\"error\":\"Unauthorized\"}", contentType: "application/json")
+        guard let state else {
+            return HTTPResponse.text(200, "{\"token\":\"\"}", contentType: "application/json")
+        }
+        struct LoginRequest: Decodable {
+            let password: String
+        }
+        guard let body = request.body,
+              let loginReq = try? JSONDecoder().decode(LoginRequest.self, from: body) else {
+            return HTTPResponse.text(400, "{\"error\":\"invalid request\"}", contentType: "application/json")
+        }
+        guard let token = state.verifyPassword(loginReq.password) else {
+            return HTTPResponse.text(401, "{\"error\":\"Unauthorized\"}", contentType: "application/json")
+        }
+        let response = "{\"token\":\"\(token)\"}"
+        return HTTPResponse.text(200, response, contentType: "application/json")
     }
 
-    private func adminSaveConfig(_ request: HTTPRequest) throws -> HTTPResponse {
-        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    /// 保存配置（热更新）。
+    private func adminSaveConfig(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard let body = request.body else {
+            return HTTPResponse.text(400, "{\"error\":\"empty body\"}", contentType: "application/json")
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let newConfig = try? decoder.decode(RouteConfig.self, from: body) else {
+            return HTTPResponse.text(400, "{\"error\":\"invalid config\"}", contentType: "application/json")
+        }
+        if let state {
+            state.update { config in
+                config.webPanelEnabled = newConfig.webPanelEnabled
+                config.adminPassword = newConfig.adminPassword
+                config.host = newConfig.host
+                config.port = newConfig.port
+                config.providers = newConfig.providers
+                config.providerOrder = newConfig.providerOrder
+                config.apiKeys = newConfig.apiKeys
+                config.customProviderDefs = newConfig.customProviderDefs
+            }
+            try state.saveAndReload()
+        } else {
+            try ConfigStore.save(newConfig)
+        }
+        return HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
     }
 
+    /// 强制刷新全部用量。
     private func adminRefreshUsage() async throws -> HTTPResponse {
-        try HTTPResponse.json(200, object: ["snapshots": [:]] as [String: [String: String]])
+        struct SnapshotsResponse: Codable {
+            let snapshots: [String: ProviderUsageSnapshot]
+        }
+        var snapshots: [String: ProviderUsageSnapshot] = [:]
+        let cfg = state?.get() ?? config
+        for desc in registry.allDescriptors() {
+            guard let fetcher = desc.usageFetcherFactory() else { continue }
+            let credential = cfg.credential(for: desc.id)
+            do {
+                let snapshot = try await fetcher.fetchUsage(credential: credential)
+                await UsageCache.shared.set(snapshot)
+                snapshots[desc.id] = snapshot
+            } catch {
+                snapshots[desc.id] = ProviderUsageSnapshot(
+                    providerID: desc.id, fetchedAt: Date(), error: error.localizedDescription
+                )
+            }
+        }
+        return try HTTPResponse.json(200, object: SnapshotsResponse(snapshots: snapshots))
     }
 
-    private func adminTestProvider(_ request: HTTPRequest) async throws -> HTTPResponse {
-        struct TestResult: Codable {
+    /// 测试 Provider 连通性。
+    private func adminTestProvider(_ providerID: String, _ request: HTTPRequest) async throws -> HTTPResponse {
+        struct TestResponse: Codable {
             let success: Bool
             let message: String
         }
-        return try HTTPResponse.json(200, object: TestResult(success: false, message: "S2 实现"))
+        guard let provider = registry.provider(for: providerID) else {
+            return try HTTPResponse.json(200, object: TestResponse(success: false, message: "未找到 Provider: \(providerID)"))
+        }
+        let cfg = state?.get() ?? config
+        let credential = cfg.credential(for: providerID)
+        do {
+            let result = try await provider.testConnection(credential: credential)
+            return try HTTPResponse.json(200, object: TestResponse(success: result.success, message: result.message))
+        } catch {
+            return try HTTPResponse.json(200, object: TestResponse(success: false, message: error.localizedDescription))
+        }
     }
 
-    private func adminCreateKey(_ request: HTTPRequest) throws -> HTTPResponse {
-        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    /// 创建/更新网关 Key。
+    private func adminCreateKey(_ request: HTTPRequest) async throws -> HTTPResponse {
+        struct UpsertKeyRequest: Decodable {
+            let key: String?
+            let enabledModels: [String]?
+        }
+        guard let body = request.body,
+              let keyReq = try? JSONDecoder().decode(UpsertKeyRequest.self, from: body) else {
+            return HTTPResponse.text(400, "{\"error\":\"invalid request\"}", contentType: "application/json")
+        }
+        let newKey = keyReq.key ?? "sk-bv-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24)
+        let gatewayKey = GatewayKeyConfig(key: newKey, enabledModels: keyReq.enabledModels)
+        if let state {
+            state.update { config in
+                if let idx = config.apiKeys.firstIndex(where: { $0.key == gatewayKey.key }) {
+                    config.apiKeys[idx] = gatewayKey
+                } else {
+                    config.apiKeys.append(gatewayKey)
+                }
+            }
+            try state.saveAndReload()
+        } else {
+            var newConfig = config
+            if let idx = newConfig.apiKeys.firstIndex(where: { $0.key == gatewayKey.key }) {
+                newConfig.apiKeys[idx] = gatewayKey
+            } else {
+                newConfig.apiKeys.append(gatewayKey)
+            }
+            try ConfigStore.save(newConfig)
+        }
+        let response = try JSONEncoder().encode(gatewayKey)
+        return HTTPResponse.text(200, String(data: response, encoding: .utf8) ?? "{}", contentType: "application/json")
     }
 
-    private func adminDeleteKey(_ request: HTTPRequest) throws -> HTTPResponse {
-        HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    /// 删除网关 Key。
+    private func adminDeleteKey(_ key: String) async throws -> HTTPResponse {
+        if let state {
+            state.update { config in
+                config.apiKeys.removeAll { $0.key == key }
+            }
+            try state.saveAndReload()
+        } else {
+            var newConfig = config
+            newConfig.apiKeys.removeAll { $0.key == key }
+            try ConfigStore.save(newConfig)
+        }
+        return HTTPResponse.text(200, "{\"status\":\"ok\"}", contentType: "application/json")
+    }
+
+    /// 凭据掩码：只保留前 6 后 4，中间变 ••••。
+    private func maskCredential(_ value: String?) -> String? {
+        guard let value, value.count > 10 else { return value }
+        return "\(String(value.prefix(6)))••••\(String(value.suffix(4)))"
+    }
+
+    /// 非可选版本的凭据掩码。
+    private func maskCredential(_ value: String) -> String {
+        guard value.count > 10 else { return value }
+        return "\(String(value.prefix(6)))••••\(String(value.suffix(4)))"
     }
 }
