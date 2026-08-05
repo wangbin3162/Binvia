@@ -19,6 +19,7 @@ struct SettingsSidebarView: View {
                     paneRow(.gatewayKeys)
                     paneRow(.compatProviders)
                     paneRow(.test)
+                    paneRow(.about)
                 } header: {
                     Text("通用")
                 }

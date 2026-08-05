@@ -3901,6 +3901,71 @@ func requestLoggerTokenTests() {
     expectFalse(a.id == b.id, "RequestLogEntry 默认 id 各自唯一")
 }
 
+// MARK: - 在线更新检查（UpdateChecker）
+
+func updateCheckerTests() async {
+    // 版本号比较
+    expectTrue(UpdateChecker.isNewer("0.1.3", than: "0.1.2"), "0.1.3 > 0.1.2")
+    expectTrue(UpdateChecker.isNewer("0.1.10", than: "0.1.9"), "0.1.10 > 0.1.9（数字分段比较）")
+    expectTrue(UpdateChecker.isNewer("0.2.0", than: "0.1.99"), "0.2.0 > 0.1.99（跨次版本）")
+    expectFalse(UpdateChecker.isNewer("0.1.2", than: "0.1.2"), "相等不算更新")
+    expectFalse(UpdateChecker.isNewer("0.1.2", than: "0.1.10"), "0.1.2 < 0.1.10")
+    expectFalse(UpdateChecker.isNewer("0.1.3", than: "0.2.0"), "低版本不算更新")
+    expectFalse(UpdateChecker.isNewer("0.1.2", than: "0.1.2-beta"), "非数字段退化比较")
+
+    // GitHub releases/latest 响应解析（URLProtocolMock）
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { _ in
+        let json = """
+        {
+          "tag_name": "v0.1.3",
+          "prerelease": false,
+          "published_at": "2026-08-05T01:00:00Z",
+          "html_url": "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3",
+          "assets": [
+            {"name": "Binvia-0.1.3-macos-arm64-x86_64.dmg", "browser_download_url": "https://github.com/wangbin3162/Binvia/releases/download/v0.1.3/Binvia-0.1.3-macos-arm64-x86_64.dmg"},
+            {"name": "Binvia-0.1.3-macos-arm64-x86_64.tar.gz", "browser_download_url": "https://github.com/wangbin3162/Binvia/releases/download/v0.1.3/Binvia-0.1.3-macos-arm64-x86_64.tar.gz"}
+          ]
+        }
+        """
+        let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/wangbin3162/Binvia/releases/latest")!,
+                                       statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (response, Data(json.utf8))
+    }
+    let checker = UpdateChecker(session: URLProtocolMock.makeSession())
+    do {
+        let info = try await checker.fetchLatestRelease()
+        expectEqual(info.version, "0.1.3", "tag_name 去 v 前缀")
+        expectFalse(info.isPrerelease, "非预发布")
+        expectEqual(info.htmlURL, "https://github.com/wangbin3162/Binvia/releases/tag/v0.1.3", "Release 页面")
+        expectTrue(info.dmgDownloadURL?.hasSuffix(".dmg") == true, "DMG 直链命中")
+        expectTrue(UpdateChecker.isNewer(info.version, than: "0.1.2"), "0.1.3 更新于 0.1.2")
+    } catch {
+        expectEqual("\(error)", "不应抛错", "解析不应抛错")
+    }
+
+    // 404 → badResponse
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { _ in
+        let response = HTTPURLResponse(url: URL(string: "https://api.github.com/repos/wangbin3162/Binvia/releases/latest")!,
+                                       statusCode: 404, httpVersion: nil, headerFields: nil)!
+        return (response, Data())
+    }
+    do {
+        _ = try await checker.fetchLatestRelease()
+        expectEqual("未抛错", "404 应抛错", "404 应抛错")
+    } catch let error as UpdateCheckError {
+        if case let .badResponse(code) = error {
+            expectEqual(code, 404, "404 错误码透传")
+        } else {
+            expectEqual("\(error)", "badResponse", "应为 badResponse")
+        }
+    } catch {
+        expectEqual("\(error)", "badResponse", "应为 badResponse")
+    }
+    URLProtocolMock.reset()
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -3993,6 +4058,7 @@ await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)
 await run("ChatMessage 宽容解码（developer/content 数组）", chatMessageTolerantDecodeTests)
+await run("在线更新检查（版本比较 + GitHub API 解析）", updateCheckerTests)
 
 print("")
 print("========================================")
