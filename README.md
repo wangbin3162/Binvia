@@ -1,154 +1,140 @@
 # Binvia
 
-本地 AI 供应商聚合路由网关：连接 DeepSeek / 腾讯 CodeBuddy / Google Antigravity 等供应商，在本地端口提供 **OpenAI 兼容 API**，供 Claude Code、Codex、各类 SDK 通过 api-key 调用，并带请求监控。
+> 本地 AI 供应商聚合路由网关 —— 一个应用同时连接 DeepSeek、腾讯 CodeBuddy、Google Antigravity、OpenAI、Cursor 等 13 家供应商，在本地提供 **OpenAI 兼容 API**，并自带菜单栏监控面板。
 
-技术框架基于 [CodexBar](https://github.com/steipete/CodexBar)（Swift + 原生 socket，零外部服务器依赖），供应商注册/路由/代理设计借鉴 OmniRoute。
+Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后台服务），把多家 AI 供应商聚合到一个本地端点 `http://localhost:20427/v1`：
+
+- **Claude Code、Codex、opencode、Cursor** 等工具只需配置一个 OpenAI 兼容端点 + 一个网关 Key，即可调用所有供应商；
+- 一个面板统管全部供应商：余额/配额、请求统计、最近请求、一键测试连接；
+- 纯 Swift + 原生 socket 实现，**零第三方依赖**，所有请求只从你的机器直连上游，数据不出本机。
 
 ## 功能
 
-- **供应商注册**：`ProviderDescriptor` + `ProviderRegistry` 注册表，新增供应商只需一个文件 + 一行登记。
-- **模型路由**：`provider/model` 或别名（`ds`/`cbcn`/`agy`），支持裸模型名自动归属。
-- **OpenAI 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`。
-- **api-key 认证**：`Authorization: Bearer` / `x-api-key`，配置或环境变量 key 白名单。
-- **SSE 流式透传**：逐事件实时转发；强制流式上游（CodeBuddy/Antigravity）对非流式客户端自动 JSON 重聚合。
-- **上游重试**：`ProviderHTTPClient` 对 408/429/5xx 指数退避重试，尊重 `Retry-After`。
-- **动态模型 + 缓存**：`/v1/models` 合并静态目录与各供应商动态模型，`ModelCache` 300s TTL。
-- **多 api-key 轮换**：上游 401/403 时自动切换到下一个 key。
-- **监控**：`/v1/usage` 请求日志 + 按供应商/模型聚合统计。
-- **可用性测试**：`BinviaCLI test <provider>`。
+- **多供应商聚合**：一个 OpenAI 兼容端点路由到 DeepSeek / CodeBuddy / Antigravity / OpenAI / Cursor 等 13 家供应商
+- **模型路由**：`provider/model` 语法或别名（`ds` / `cbcn` / `agy`），裸模型名自动归属
+- **完整 OpenAI 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/usage`、`/v1/health`
+- **网关 Key 认证**：`sk-bv-` 开头网关 Key 白名单；上游多 Key 自动轮换（401/403 时切换）
+- **SSE 流式透传**：逐事件实时转发；强制流式上游对非流式客户端自动聚合为 JSON
+- **可靠重试**：408/429/5xx 指数退避重试，尊重 `Retry-After` 头
+- **OAuth 免 Key**：CodeBuddy / Antigravity / Codex 浏览器授权登录，无需手动填 Key；Cursor 自动读取 IDE 登录令牌
+- **菜单栏监控**：服务器启停、供应商健康度、余额/配额窗口、请求明细（时间/模型/token/耗时/状态）
+- **配置即改即生效**：设置面板改端口、加 Key、启停供应商，保存即热更新，无需重启
 
 ## 已接入供应商
 
-| Provider | 别名 | 认证 | 状态 |
-|---|---|---|---|
-| deepseek | `ds` | api-key | ✅ 可用（Phase 0/1） |
-| codebuddy-cn | `cbcn` | OAuth 设备码 | ✅ 已实现（Phase 2，需 `oauth login`） |
-| antigravity | `agy` | Google OAuth PKCE | ✅ 已实现（Phase 3，需 `oauth login`） |
-| openai | `openai` | api-key | ✅ 已实现（Phase 14） |
-| opencode | `oc` | api-key | ✅ 已实现（Phase 15） |
-| kimi | `kimi` | api-key | ✅ 已实现（Phase 15，强制流式） |
-| opencode-go | `ocgo` | api-key | ✅ 已实现（Phase 18） |
-| xiaomi-mimo | `mimo` | api-key | ✅ 已实现（Phase 18） |
-| qwen-cloud | `qwc` | api-key | ✅ 已实现（Phase 18） |
-| zai | `zai` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
-| minimax | `mm` | api-key | ✅ 已实现（Phase 18，Anthropic 兼容） |
-| codex | `cx` | OpenAI OAuth PKCE | ✅ 已实现（Phase 24，ChatGPT 订阅账号；Responses API 翻译 + 用量展示） |
-| cursor | `cu` | api-key / IDE 接入 | ✅ 已实现（Phase 19/20，OpenAI 兼容；Phase 20 支持从 Cursor IDE 自动读取登录令牌） |
+| 供应商 | 别名 | 认证方式 |
+|---|---|---|
+| DeepSeek | `ds` | API Key |
+| 腾讯 CodeBuddy | `cbcn` | OAuth 设备码 |
+| Google Antigravity | `agy` | Google OAuth PKCE |
+| OpenAI | `openai` | API Key |
+| opencode | `oc` | API Key |
+| Kimi（月之暗面） | `kimi` | API Key |
+| opencode-go | `ocgo` | API Key |
+| 小米 MiMo | `mimo` | API Key |
+| 通义千问 | `qwc` | API Key |
+| 智谱 z.ai | `zai` | API Key |
+| MiniMax | `mm` | API Key |
+| OpenAI Codex | `cx` | ChatGPT 订阅账号 OAuth |
+| Cursor | `cu` | IDE 登录令牌 / API Key |
+
+## 下载
+
+从 [GitHub Releases](https://github.com/wangbin3162/Binvia/releases) 下载最新版本：
+
+- `Binvia-<版本>-macos-arm64-x86_64.tar.gz` —— 通用包，同时支持 Apple Silicon（M 系列）与 Intel Mac
+- `SHA256SUMS` —— 校验和文件
+
+```bash
+# 校验下载完整性（可选，但推荐）
+shasum -a 256 -c SHA256SUMS
+```
+
+**系统要求**：macOS 14.0+（Sonoma 及以上）
+
+## 安装
+
+```bash
+# 1. 解压
+tar -xzf Binvia-<版本>-macos-arm64-x86_64.tar.gz
+
+# 2. 安装 GUI（拖入应用程序）
+mv Binvia.app /Applications/
+
+# 3.（可选）命令行工具放入 PATH
+sudo cp BinviaServer BinviaCLI /usr/local/bin/
+```
+
+> **首次打开提示**：Binvia 为 adhoc 签名、未做 Apple 公证，首次打开若被 Gatekeeper 拦截，
+> 请右键 Binvia.app → 打开 → 确认；或在「系统设置 → 隐私与安全性」中点击「仍要打开」。
 
 ## 快速开始
 
-### 构建
+### 方式一：菜单栏应用（推荐）
 
-```bash
-swift build
+1. 打开 `Binvia.app`，菜单栏出现 Binvia 图标；
+2. 点击图标 → 齿轮图标进入**设置** → **供应商**；
+3. 填入 API Key 或一键 OAuth 登录 → 点「测试连接」确认可用；
+4. 回到主面板点击 **Start** 启动服务器（默认端口 20427）；
+5. 在 Claude Code、opencode 等工具中配置：
+
+```
+API 端点: http://localhost:20427/v1
+API Key:  设置 → 网关密钥 中生成（sk-bv- 开头）
 ```
 
-### 启动服务器
+### 方式二：命令行
 
 ```bash
-# 方式一：默认配置（监听 localhost:20427，API 端点 http://localhost:20427/v1）
-swift run BinviaServer
+# 启动服务器（默认监听 http://localhost:20427/v1）
+BinviaServer
 
-# 方式二：指定配置/端口
-swift run BinviaServer --port 20427 --config ~/.config/binvia/config.json
+# 列出供应商与模型
+BinviaCLI providers list
+
+# 测试供应商可用性
+BinviaCLI test deepseek
+
+# OAuth 登录（CodeBuddy / Antigravity / Codex）
+BinviaCLI oauth login codebuddy-cn
+
+# Cursor IDE 令牌检测
+BinviaCLI cursor status
 ```
 
-### 登录供应商（OAuth）
-
-```bash
-# 腾讯 CodeBuddy（设备码：自动打开浏览器授权）
-swift run BinviaCLI oauth login codebuddy-cn
-
-# Google Antigravity（PKCE：打开浏览器授权后把重定向地址/code 粘贴回终端）
-swift run BinviaCLI oauth login antigravity
-
-# OpenAI Codex（ChatGPT 订阅账号，PKCE：打开浏览器授权后把重定向地址/code 粘贴回终端）
-swift run BinviaCLI oauth login codex
-```
-
-登录凭据自动写入 `~/.config/binvia/config.json`。
-
-### Cursor（IDE 接入）
-
-Cursor 支持两种认证方式，**无需单独购买 Cursor API key**（Pro/Max 订阅即可）：
-
-- **IDE 自动发现（默认）**：Binvia 请求时自动从 Cursor IDE 的本地数据库读取登录令牌
-  （`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`），携带 IDE 头走
-  `https://api2.cursor.sh/v1/chat/completions`。令牌约 24h 轮换，每次请求实时读取（TTL 缓存 4h），
-  无需手动维护。可在设置面板「Cursor IDE 接入」区块查看检测状态/过期时间，或用 CLI 排查：
-
-  ```bash
-  swift run BinviaCLI cursor status   # 检测 IDE 令牌：有无/过期时间/machineId
-  ```
-
-- **API Key 兜底**：设置 `CURSOR_API_KEY`（或 config `providers.cursor.credential.apiKey`）后，
-  走官方公开 REST `https://api.cursor.com/v1`，与 OpenAI 兼容供应商行为一致。
-
-> 说明：Cursor 上游为私有协议（Connect-RPC protobuf，需 HTTP/2），模型走其订阅后端；本实现仅支持 Chat Completions（无工具调用）。
-> **命名模型需要 Cursor Pro/Max 套餐**（免费套餐会被上游拒绝：`Free plans can only use Auto`）。
-> `CURSOR_BASE_URL` 环境变量可覆盖上游端点（测试/镜像场景）。
-
-### 调用
+### 调用示例
 
 ```bash
 # 健康检查
 curl http://localhost:20427/v1/health
 
-# 模型列表（含动态模型）
+# 模型列表（含各供应商动态模型）
 curl http://localhost:20427/v1/models
 
 # 聊天（流式）
 curl -N http://localhost:20427/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <your-api-key>" \
-  -d '{"model":"deepseek/deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"stream":true}'
+  -H "Authorization: Bearer sk-bv-xxx" \
+  -d '{"model":"ds/deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
-# 用量
+# 用量统计
 curl http://localhost:20427/v1/usage
 ```
 
-### CLI
+模型名支持三种写法：`供应商/模型`（`deepseek/deepseek-v4-pro`）、别名（`ds/deepseek-v4-pro`）、裸模型名（自动归属到唯一匹配的供应商）。
 
-```bash
-swift run BinviaCLI providers list            # 列出供应商与模型
-swift run BinviaCLI test deepseek             # 测试供应商可用性
-swift run BinviaCLI oauth login codebuddy-cn  # OAuth 登录
-swift run BinviaCLI cursor status             # Cursor IDE 令牌检测
-swift run BinviaCLI config path               # 配置文件路径
-swift run BinviaCLI serve                     # 启动服务器
-```
+### Cursor 接入说明
 
-### GUI（菜单栏应用，macOS 14+）
+Cursor 支持两种认证方式，**无需单独购买 API Key**（Pro/Max 订阅即可）：
 
-```bash
-# 开发运行（菜单栏出现 Binvia 图标）
-swift run BinviaApp
+- **IDE 自动发现（默认）**：自动从 Cursor IDE 本地数据库读取登录令牌（约 24h 轮换，每次请求实时读取），走 `api2.cursor.sh`；`BinviaCLI cursor status` 可查看令牌状态。
+- **API Key 兜底**：设置 `CURSOR_API_KEY` 后走官方 REST `api.cursor.com`，与普通供应商行为一致。
 
-# 无界面自检（配置读写 / 服务器启停 / 热更新）
-swift run BinviaApp --smoke-test
-
-# 打包（产物含 bin/Binvia.app）
-./Scripts/build.sh
-open bin/Binvia.app
-```
-
-菜单栏面板支持：
-
-- **概况 Tab**（默认页）：服务器启停（Start/Stop + 状态灯）、总请求/错误/活跃 provider/总 token 汇总、各已配置 provider 健康度列表（余额 / 配额 / token 一目了然，点击行直达对应 provider Tab）。
-- **Provider Tab**：顶部 SegmentedControl 切换已配置的供应商；每个 Tab 展示头部 + 用量卡片（余额 / 配额窗口 / 模型配额，5min 轮询 + 手动刷新）、本地请求统计、最近请求明细（时间 / 模型 / token / 耗时 / 状态）、测试连接与网页看板入口。
-- **网关密钥**：仅保留在设置面板；主面板右上角 `key.fill` 图标一键跳转。
-- **设置 / 退出**：主面板右上角 `gearshape` / `xmark.rectangle` 图标。
-
-**设置窗口**（点面板底部 Settings 打开）为 CodexBar 风格：左侧栏 + 右侧详情，全部配置均在面板中完成，无需手改文件：
-
-- **服务器**：监听地址固定为本机 localhost（不可修改）；端口默认 20427，可改，保存即热更新（运行中替换 handler，无需重启）。「API 端点」区展示 `http://localhost:<端口>/v1` 并提供一键复制，供 Claude Code / opencode / curl 等配置。
-- **供应商**：DeepSeek 填 API 令牌（支持带标签的多 Key 轮换，仿 CodexBar 令牌账户：标签 + 密钥 + 添加/移除）；CodeBuddy 一键设备码 OAuth 登录或粘贴 Access Token；Antigravity / Codex 一键 PKCE OAuth 登录（粘贴授权码）或粘贴 Access/Refresh Token。每个供应商支持「测试连接」与启用/停用开关。
-- **用量**：供应商面板自动展示用量——DeepSeek（多 Key 余额）、Kimi（余额）、Antigravity（模型配额 + 周窗口）、Codex（5h / 7d 双配额窗口）每 5 分钟轮询 + 手动「刷新用量」；z.ai、opencode、CodeBuddy CN 上游未提供可用的公开用量 API（CodeBuddy CN 官方接口返回 500），面板提供「在网页查看」跳转对应网页看板（智谱 `bigmodel.cn/finance-center/finance/overview`、opencode `opencode.ai/zh/zen`、CodeBuddy `codebuddy.cn/profile/usage`）。
-- **网关密钥**：生成/复制/删除 `sk-bv-` 网关 Key。
+> 注意：Cursor 上游为私有协议，仅支持 Chat Completions（无工具调用）；使用命名模型需要 Pro/Max 套餐。
 
 ## 配置
 
-配置文件：`~/.config/binvia/config.json`（`BINVIA_CONFIG` 可覆盖路径）。
+配置文件：`~/.config/binvia/config.json`（可用环境变量 `BINVIA_CONFIG` 覆盖路径）。日常配置推荐在 GUI 设置面板完成；文件格式示例：
 
 ```json
 {
@@ -159,56 +145,37 @@ open bin/Binvia.app
   "providers": {
     "deepseek": {
       "enabled": true,
-      "apiKeys": [{ "label": "主 Key", "value": "sk-..." }],
-      "credential": { "api_key": "sk-..." }
+      "apiKeys": [{ "label": "主 Key", "value": "sk-..." }]
     }
   }
 }
 ```
 
-`providers.<id>.apiKeys` 为带标签的令牌数组（`{label, value}`）；旧格式 `["sk-..."]` 纯字符串数组仍可正常读取，加载时自动迁移（标签为密钥掩码）。未配置 `apiKeys` 时允许匿名访问（开发模式）；配置后所有 `/v1/*` 端点需携带有效 key。为兼容未带 `/v1` 前缀的客户端，`/chat/completions`、`/models`、`/health`、`/usage` 等同路径也自动归一化到 `/v1/*`。
+环境变量：
 
-环境变量：`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（可指向自建网关/测试 mock）、`CODEBUDDY_CN_ACCESS_TOKEN`、`ANTIGRAVITY_ACCESS_TOKEN`、`BINVIA_API_KEY` / `ROUTER_API_KEY`（恒有效的网关 key）。
+| 变量 | 作用 |
+|---|---|
+| `DEEPSEEK_API_KEY` | DeepSeek API Key |
+| `CODEBUDDY_CN_ACCESS_TOKEN` | CodeBuddy Access Token |
+| `ANTIGRAVITY_ACCESS_TOKEN` | Antigravity Access Token |
+| `CURSOR_API_KEY` | Cursor API Key（走官方 REST 时） |
+| `BINVIA_API_KEY` / `ROUTER_API_KEY` | 恒有效的网关 Key |
+| `BINVIA_CONFIG` | 配置文件路径覆盖 |
 
-## 模块结构
+> 未配置任何 Key 时为开发模式（匿名访问）；配置后所有 `/v1/*` 端点均需携带有效网关 Key。
 
-```
-Sources/
-├── BinviaCore/               # 核心库
-│   ├── Model/Model.swift            # 模型元数据
-│   ├── Provider/                    # Provider 协议/描述符/注册表/Chat 模型
-│   ├── Router/Router.swift          # provider/model 路由
-│   ├── Networking/                  # ProviderHTTPClient（重试/流式）、SSEParser、SSEJSONAggregator、ModelCache
-│   ├── Config/                      # 配置读写
-│   ├── Auth/APIKeyAuthenticator.swift
-│   ├── Monitoring/RequestLogger.swift
-│   ├── Server/                      # 本地 HTTP 服务器 + 路由分发
-│   └── Providers/                   # deepseek / codebuddy-cn / antigravity / openai / opencode / kimi / opencode-go / xiaomi-mimo / qwen-cloud / zai / minimax / codex / cursor
-├── BinviaServer/             # 服务器入口
-├── BinviaCLI/                # CLI（含 oauth login）
-└── BinviaApp/                # 菜单栏 GUI（SwiftUI）
-    ├── AppState.swift               # 全局状态：配置/服务器生命周期/OAuth/Key/监控
-    ├── Views/                       # MenuPanelView、OverviewTabView、ProviderTabView、RecentRequestsView、ServerStatusView 等
-    └── Components/                  # StatusBadge、APIKeyInputField、OAuthLoginButton、ProviderUsageCard、ProviderHealthRow
-```
-
-## 测试与打包
+## 从源码构建
 
 ```bash
-make test       # swift run BinviaCheck（单元 + 集成，无需 Xcode）
-make release    # release 构建 + 拷贝到 bin/
-make run        # 运行服务器
+swift build          # 构建
+make test            # 运行全部测试（698 项断言，无需 Xcode）
+make run             # 启动服务器
+make release         # 完整打包（双架构 + 签名），产物在 bin/
 ```
 
-## 文档
+GUI 开发运行：`swift run BinviaApp`（菜单栏应用）；打包产物 `bin/Binvia.app`。正式发布流程见 `docs/build-release-guide.md`。
 
-改动借鉴自上游的代码前，先读对应工程分析文档；分析不足时再查上游源码（均在本机）：
+## 致谢
 
-- **CodexBar**（菜单栏 GUI 模式、`ProviderDescriptor`/注册表、`ProviderHTTPClient`、`ConfigStore` 的来源）→ [codexbar-analysis.md](docs/codexbar-analysis.md)，源码 `/Users/wangbin/workspace/temp/my-token-route/CodexBar`
-- **OmniRoute**（`provider/model` 路由、api-key 认证、SSE chat handler、供应商注册表、CodeBuddy/Antigravity 请求头与模型目录的来源）→ [omniroute-analysis.md](docs/omniroute-analysis.md)，源码 `/Users/wangbin/workspace/temp/my-token-route/OmniRoute`
-- **GUI 实现**（菜单栏应用、设置窗口、OAuth 流程、metrics 轮询）→ [gui-implementation-guide.md](docs/gui-implementation-guide.md)
-
-其余文档：
-
-- 实现计划：[implementation-plan.md](docs/implementation-plan.md)
-- 任务清单：[task.md](docs/task.md)
+- 菜单栏 GUI 模式与供应商注册表/HTTP 客户端模式借鉴 [CodexBar](https://github.com/steipete/CodexBar)
+- 模型路由语法与上游供应商请求头设计参考 OmniRoute
