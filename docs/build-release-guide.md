@@ -58,10 +58,13 @@ MARKETING_VERSION=0.2.0 BUILD_NUMBER=2 ./Scripts/build.sh   # 临时覆盖版本
 
 | 产物 | 说明 |
 |---|---|
-| `Binvia-<版本>-macos-arm64-x86_64.dmg` | **正式发布物**：拖入安装的 DMG（Binvia.app + 命令行工具 + Applications 快捷方式 + 安装说明） |
-| `Binvia-<版本>-macos-arm64-x86_64.tar.gz` | 免安装版备用包 |
-| `SHA256SUMS` | 两者校验和（发布时一并上传） |
+| `Binvia-<版本>-macos-arm64-x86_64.dmg` | **正式发布物**：带样式背景的拖入安装 DMG（仅 Binvia.app + Applications 快捷方式；布局模板 `Scripts/dmg-template.DS_Store` + 背景 `assets/dmg-background.png`，用 `Scripts/make_dmg_background.swift` 重新生成） |
+| `Binvia-<版本>-macos-arm64-x86_64.tar.gz` | 免安装版备用包（含 app + 命令行工具） |
+| `SHA256SUMS` | 校验和（发布时一并上传） |
 | `Binvia.app` / `BinviaServer` / `BinviaCLI` | 未打包的原始产物（universal，已签名） |
+
+命令行工具（BinviaServer / BinviaCLI）不再进 DMG，改为 curl 一键安装：
+`Scripts/install-cli.sh`（发布时作为 Release 资产上传，支持版本参数与 SHA256 校验）。
 
 验证打包结果：
 
@@ -117,12 +120,12 @@ git push origin v0.1.0   # 推送 tag 即触发 Release workflow
 
 1. 打开 https://github.com/wangbin3162/Binvia/actions → 看到 `Release` workflow 运行。
 2. 全部步骤绿后，打开 https://github.com/wangbin3162/Binvia/releases
-3. 确认：`Binvia-0.1.0-macos-arm64-x86_64.dmg` + tar.gz + `SHA256SUMS` 已上传，标题为 `Binvia 0.1.0`。
+3. 确认：`Binvia-0.1.x-macos-arm64-x86_64.dmg` + tar.gz + `install-cli.sh` + `SHA256SUMS` 已上传，标题为对应版本。
 4. （可选）下载 DMG，本地验证：
 
 ```bash
 shasum -a 256 -c SHA256SUMS        # 校验完整性
-open Binvia-0.1.0-macos-arm64-x86_64.dmg   # 打开确认内容与安装说明
+open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入安装
 ```
 
 **发布完成。** 下一版本只需重复步骤一~四（版本号递增）。
@@ -198,8 +201,9 @@ version.env 被覆盖）。本地构建则以 version.env 为准。所以**改�
 - [x] 版本号从 `version.env` 读取，注入 Info.plist（不再硬编码 0.1.0），附带 git commit / 构建时间
 - [x] 默认双架构构建（`ARCHES="arm64 x86_64"`），`lipo` 合成 universal 产物
 - [x] 签名双模式：adhoc（默认）/ developer（公证前置，hardened runtime）/ none
-- [x] **DMG 安装包**：`Scripts/make_dmg.sh`，拖入安装（Binvia.app + 命令行工具 + Applications 快捷方式 + 中文安装说明）
+- [x] **带样式 DMG**：背景图（`Scripts/make_dmg_background.swift` 生成）+ Finder 布局模板（`Scripts/dmg-template.DS_Store`），拖入安装；仅含 Binvia.app
+- [x] **命令行工具 curl 安装**：`Scripts/install-cli.sh`（版本参数 + SHA256 校验），Release 资产随版本发布
 - [x] tar.gz 备用包 + `SHA256SUMS`（含 DMG）
 - [x] 构建前清理 `bin/`，避免旧产物残留
 - [x] `.github/workflows/ci.yml`：push/PR 自动构建 + 测试 + 打包自检
-- [x] `.github/workflows/release.yml`：tag 触发，自动发布 DMG + tar.gz 到 GitHub Releases
+- [x] `.github/workflows/release.yml`：tag 触发，自动发布 DMG + tar.gz + install-cli.sh 到 GitHub Releases

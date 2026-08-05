@@ -74,9 +74,17 @@ jobs:
           echo "Binvia ${VERSION}（macOS universal：Apple Silicon + Intel）" > "$NOTES"
           echo "" >> "$NOTES"
           echo "## 下载与安装" >> "$NOTES"
-          echo "- **Binvia-${VERSION}-macos-arm64-x86_64.dmg（推荐）**：下载后打开，把 Binvia.app 拖入 Applications 即可；命令行工具安装方法见 DMG 内说明" >> "$NOTES"
+          echo "- **Binvia-${VERSION}-macos-arm64-x86_64.dmg（推荐）**：打开后把 Binvia.app 拖入 Applications 即可" >> "$NOTES"
           echo "- Binvia-${VERSION}-macos-arm64-x86_64.tar.gz：免安装版（解压即用）" >> "$NOTES"
+          echo "- install-cli.sh：命令行工具安装脚本（可选，见下方命令）" >> "$NOTES"
           echo "- SHA256SUMS：校验和" >> "$NOTES"
+          echo "" >> "$NOTES"
+          echo "## 可选：安装命令行工具（BinviaServer / BinviaCLI）" >> "$NOTES"
+          echo "日常使用只需 GUI 应用；无头部署或终端操作用到命令行工具时执行：" >> "$NOTES"
+          echo "" >> "$NOTES"
+          echo '```bash' >> "$NOTES"
+          echo 'curl -fsSL https://github.com/wangbin3162/Binvia/releases/latest/download/install-cli.sh | bash' >> "$NOTES"
+          echo '```' >> "$NOTES"
           echo "" >> "$NOTES"
           echo "## 构建信息" >> "$NOTES"
           echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 698 项断言 → GUI 无界面自检）" >> "$NOTES"
@@ -84,6 +92,7 @@ jobs:
           gh release create "$TAG" \
             "bin/Binvia-${VERSION}-macos-arm64-x86_64.dmg" \
             "bin/Binvia-${VERSION}-macos-arm64-x86_64.tar.gz" \
+            "${{ github.workspace }}/Scripts/install-cli.sh" \
             bin/SHA256SUMS \
             --title "Binvia ${VERSION}" \
             --notes-file "$NOTES"

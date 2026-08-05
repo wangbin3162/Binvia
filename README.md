@@ -44,6 +44,7 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 
 - `Binvia-<版本>-macos-arm64-x86_64.dmg`（**推荐**）—— 安装包：打开后拖入即安装，同时支持 Apple Silicon（M 系列）与 Intel Mac
 - `Binvia-<版本>-macos-arm64-x86_64.tar.gz` —— 免安装版（解压即用）
+- `install-cli.sh` —— 命令行工具安装脚本（可选，见下方「命令行工具」）
 - `SHA256SUMS` —— 校验和文件
 
 ```bash
@@ -59,15 +60,24 @@ shasum -a 256 -c SHA256SUMS
 
 1. 双击打开下载的 `.dmg` 文件；
 2. 把 **Binvia.app** 拖入窗口内的「Applications」快捷方式；
-3. 命令行工具（可选）：打开终端执行 `sudo cp BinviaServer BinviaCLI /usr/local/bin/`；
-4. 到「应用程序」中打开 Binvia 即可（首次打开如被拦截，右键 → 打开 → 确认）。
+3. 到「应用程序」中打开 Binvia 即可（首次打开如被拦截，右键 → 打开 → 确认）。
+
+> 只装 GUI 即可完整使用（服务器内嵌在应用中，菜单栏点 Start 即启动网关）。
 
 ### 方式二：免安装版（tar.gz）
 
 ```bash
 tar -xzf Binvia-<版本>-macos-arm64-x86_64.tar.gz
-mv Binvia.app /Applications/          # GUI
-sudo cp BinviaServer BinviaCLI /usr/local/bin/   # 命令行工具（可选）
+mv Binvia.app /Applications/
+```
+
+### 命令行工具（可选）
+
+`BinviaServer` / `BinviaCLI` 供无头部署、终端操作使用（日常使用无需安装）：
+
+```bash
+# 安装到 /usr/local/bin（需输入开机密码）
+curl -fsSL https://github.com/wangbin3162/Binvia/releases/latest/download/install-cli.sh | bash
 ```
 
 > **首次打开提示**：当前版本为 adhoc 签名、未做 Apple 公证，首次打开若被 Gatekeeper 拦截，

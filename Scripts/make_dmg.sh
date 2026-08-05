@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Binvia DMG 打包脚本：把 bin/ 下的产物（Binvia.app + BinviaServer + BinviaCLI）
-# 制作成拖入安装的 DMG 安装包（含 Applications 快捷方式与中文安装说明）。
+# Binvia DMG 打包脚本：把 bin/Binvia.app 制作成带样式的拖入安装 DMG。
+# - 只含 Binvia.app + Applications 快捷方式（CLI 工具改为 curl 安装，见 Scripts/install-cli.sh）
+# - 背景图 + 图标布局来自提交的模板（Scripts/dmg-template.DS_Store + assets/dmg-background.png）
 #
 # 用法：./Scripts/make_dmg.sh            # 需先运行 ./Scripts/build.sh 生成 bin/ 产物
 # 产物：bin/Binvia-<版本>-macos-<架构>.dmg
@@ -22,44 +23,24 @@ ARCHES="${ARCHES:-arm64 x86_64}"
 ARCHES_TAG="$(echo $ARCHES | tr ' ' '-')"
 
 # ---------- 前置检查 ----------
-for f in "$ROOT/bin/Binvia.app" "$ROOT/bin/BinviaServer" "$ROOT/bin/BinviaCLI"; do
-    [ -e "$f" ] || { echo "缺少产物：$f（请先运行 ./Scripts/build.sh）" >&2; exit 1; }
-done
+[ -d "$ROOT/bin/Binvia.app" ] || { echo "缺少产物：bin/Binvia.app（请先运行 ./Scripts/build.sh）" >&2; exit 1; }
+[ -f "$ROOT/Scripts/dmg-template.DS_Store" ] || { echo "缺少布局模板：Scripts/dmg-template.DS_Store" >&2; exit 1; }
+[ -f "$ROOT/assets/dmg-background.png" ] || { echo "缺少背景图：assets/dmg-background.png" >&2; exit 1; }
 
 DMG_NAME="Binvia-${MARKETING_VERSION}-macos-${ARCHES_TAG}.dmg"
 STAGING="$ROOT/build/dmg-staging"
 
 echo "==> 制作 DMG：${DMG_NAME}"
 
-# ---------- 组装 staging 目录 ----------
+# ---------- 组装 staging 目录（app + Applications 快捷方式 + 隐藏样式资源） ----------
 rm -rf "$STAGING"
-mkdir -p "$STAGING"
+mkdir -p "$STAGING/.background"
 cp -R "$ROOT/bin/Binvia.app" "$STAGING/"
-cp "$ROOT/bin/BinviaServer" "$ROOT/bin/BinviaCLI" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
+cp "$ROOT/assets/dmg-background.png" "$STAGING/.background/background.png"
+cp "$ROOT/Scripts/dmg-template.DS_Store" "$STAGING/.DS_Store"
 
-cat > "$STAGING/安装说明.txt" <<'TXT'
-Binvia 安装方法
-==================================================
-
-【1. Binvia.app（菜单栏应用，必装）】
-    把 Binvia.app 拖入左侧的「Applications」快捷方式即可。
-
-【2. BinviaServer / BinviaCLI（命令行工具，可选）】
-    打开「终端」，执行下面一行命令（需要输入开机密码）：
-
-        sudo cp BinviaServer BinviaCLI /usr/local/bin/
-
-    之后即可在终端使用 BinviaServer / BinviaCLI 命令。
-    不需要命令行工具的话，这两项可以忽略。
-
-【首次打开提示】
-    若系统提示「无法验证开发者」，请：
-    右键 Binvia.app → 打开 → 确认。
-    （后续公证版将不再出现该提示）
-TXT
-
-# ---------- 生成 DMG（UDZO 压缩格式） ----------
+# ---------- 生成 DMG（UDZO 压缩格式；布局由 .DS_Store 模板决定） ----------
 hdiutil create \
     -volname "Binvia ${MARKETING_VERSION}" \
     -srcfolder "$STAGING" \
