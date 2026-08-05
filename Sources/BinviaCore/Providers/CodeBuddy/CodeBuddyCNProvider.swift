@@ -242,7 +242,7 @@ public struct CodeBuddyCNProvider: Provider {
         guard !tokens.isEmpty else {
             return ConnectionTestResult(
                 success: false,
-                message: "请先配置模型调用 Token：在设置面板「模型调用 Access Token」中粘贴 Token，或设置 CODEBUDDY_CN_ACCESS_TOKEN 环境变量（OAuth 登录 token 仅用于积分查询）"
+                message: "请先配置 Access Token"
             )
         }
 
