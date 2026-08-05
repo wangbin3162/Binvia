@@ -42,7 +42,8 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 
 从 [GitHub Releases](https://github.com/wangbin3162/Binvia/releases) 下载最新版本：
 
-- `Binvia-<版本>-macos-arm64-x86_64.tar.gz` —— 通用包，同时支持 Apple Silicon（M 系列）与 Intel Mac
+- `Binvia-<版本>-macos-arm64-x86_64.dmg`（**推荐**）—— 安装包：打开后拖入即安装，同时支持 Apple Silicon（M 系列）与 Intel Mac
+- `Binvia-<版本>-macos-arm64-x86_64.tar.gz` —— 免安装版（解压即用）
 - `SHA256SUMS` —— 校验和文件
 
 ```bash
@@ -54,18 +55,22 @@ shasum -a 256 -c SHA256SUMS
 
 ## 安装
 
+### 方式一：DMG 安装包（推荐）
+
+1. 双击打开下载的 `.dmg` 文件；
+2. 把 **Binvia.app** 拖入窗口内的「Applications」快捷方式；
+3. 命令行工具（可选）：打开终端执行 `sudo cp BinviaServer BinviaCLI /usr/local/bin/`；
+4. 到「应用程序」中打开 Binvia 即可（首次打开如被拦截，右键 → 打开 → 确认）。
+
+### 方式二：免安装版（tar.gz）
+
 ```bash
-# 1. 解压
 tar -xzf Binvia-<版本>-macos-arm64-x86_64.tar.gz
-
-# 2. 安装 GUI（拖入应用程序）
-mv Binvia.app /Applications/
-
-# 3.（可选）命令行工具放入 PATH
-sudo cp BinviaServer BinviaCLI /usr/local/bin/
+mv Binvia.app /Applications/          # GUI
+sudo cp BinviaServer BinviaCLI /usr/local/bin/   # 命令行工具（可选）
 ```
 
-> **首次打开提示**：Binvia 为 adhoc 签名、未做 Apple 公证，首次打开若被 Gatekeeper 拦截，
+> **首次打开提示**：当前版本为 adhoc 签名、未做 Apple 公证，首次打开若被 Gatekeeper 拦截，
 > 请右键 Binvia.app → 打开 → 确认；或在「系统设置 → 隐私与安全性」中点击「仍要打开」。
 
 ## 快速开始
@@ -170,10 +175,10 @@ Cursor 支持两种认证方式，**无需单独购买 API Key**（Pro/Max 订�
 swift build          # 构建
 make test            # 运行全部测试（698 项断言，无需 Xcode）
 make run             # 启动服务器
-make release         # 完整打包（双架构 + 签名），产物在 bin/
+make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```
 
-GUI 开发运行：`swift run BinviaApp`（菜单栏应用）；打包产物 `bin/Binvia.app`。正式发布流程见 `docs/build-release-guide.md`。
+GUI 开发运行：`swift run BinviaApp`（菜单栏应用）；发布物为 `bin/Binvia-<版本>-macos-arm64-x86_64.dmg`。正式发布流程见 `docs/build-release-guide.md`。
 
 ## 致谢
 

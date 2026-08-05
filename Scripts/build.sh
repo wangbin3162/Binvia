@@ -151,22 +151,42 @@ PLIST
 }
 make_app_bundle
 
-# ---------- adhoc 代码签名 ----------
-echo "==> [6/6] adhoc 代码签名 + 清理扩展属性（xattr -cr）"
-codesign --force --deep --sign - "$ROOT/bin/Binvia.app"
-codesign --force --sign - "$ROOT/bin/BinviaServer"
-codesign --force --sign - "$ROOT/bin/BinviaCLI"
+# ---------- 代码签名（双模式） ----------
+# BINVIA_SIGNING=adhoc（默认）  ：本地自用，零证书成本
+# BINVIA_SIGNING=developer     ：Developer ID 签名（公证前置），需设置 DEVELOPER_ID_CERT
+#                                （如 "Developer ID Application: 名字 (TEAMID)"）
+# BINVIA_SIGNING=none          ：跳过签名（调试用）
+BINVIA_SIGNING="${BINVIA_SIGNING:-adhoc}"
+if [ "$BINVIA_SIGNING" = "developer" ]; then
+    : "${DEVELOPER_ID_CERT:?BINVIA_SIGNING=developer 需要设置 DEVELOPER_ID_CERT}"
+    SIGN_FLAGS=(--force --options runtime --sign "$DEVELOPER_ID_CERT")
+    echo "==> [6/6] Developer ID 签名（hardened runtime）"
+elif [ "$BINVIA_SIGNING" = "adhoc" ]; then
+    SIGN_FLAGS=(--force --sign -)
+    echo "==> [6/6] adhoc 代码签名"
+else
+    echo "==> [6/6] 跳过签名（BINVIA_SIGNING=none）"
+fi
+if [ "$BINVIA_SIGNING" != "none" ]; then
+    codesign "${SIGN_FLAGS[@]}" "$ROOT/bin/Binvia.app"
+    codesign "${SIGN_FLAGS[@]}" "$ROOT/bin/BinviaServer"
+    codesign "${SIGN_FLAGS[@]}" "$ROOT/bin/BinviaCLI"
+fi
 xattr -cr "$ROOT/bin/Binvia.app" "$ROOT/bin/BinviaServer" "$ROOT/bin/BinviaCLI"
 
 # ---------- 打包 ----------
-echo "==> 打包 tar.gz + SHA256"
+echo "==> 打包 tar.gz（备用）"
 TARBALL="Binvia-${MARKETING_VERSION}-macos-${ARCHES_TAG}.tar.gz"
-(cd "$ROOT/bin" && tar -czf "$TARBALL" Binvia.app BinviaServer BinviaCLI \
-    && shasum -a 256 "$TARBALL" > SHA256SUMS)
+(cd "$ROOT/bin" && tar -czf "$TARBALL" Binvia.app BinviaServer BinviaCLI)
+
+echo "==> 打包 DMG 安装包（正式发布物）"
+"$ROOT/Scripts/make_dmg.sh"
+
+echo "==> 生成 SHA256 校验和"
+(cd "$ROOT/bin" && shasum -a 256 Binvia-*.tar.gz Binvia-*.dmg > SHA256SUMS)
 
 echo ""
 echo "==> 产物清单"
 ls -lh "$ROOT/bin/"
 echo ""
-echo "打包完成：bin/ 下的可执行文件可直接运行；GUI 用 bin/Binvia.app。"
-echo "发布用压缩包：bin/${TARBALL}（校验和见 bin/SHA256SUMS）"
+echo "打包完成：发布用 DMG：bin/Binvia-${MARKETING_VERSION}-macos-${ARCHES_TAG}.dmg（校验和见 bin/SHA256SUMS）"

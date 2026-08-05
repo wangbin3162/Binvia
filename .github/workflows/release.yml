@@ -73,13 +73,16 @@ jobs:
           NOTES=/tmp/release-notes.md
           echo "Binvia ${VERSION}（macOS universal：Apple Silicon + Intel）" > "$NOTES"
           echo "" >> "$NOTES"
-          echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 698 项断言 → GUI 无界面自检 → adhoc 签名）" >> "$NOTES"
-          echo "- 产物校验：bin/SHA256SUMS" >> "$NOTES"
-          echo "- 使用：解压后把 Binvia.app 拖入「应用程序」；BinviaServer / BinviaCLI 可在终端直接运行" >> "$NOTES"
+          echo "## 下载与安装" >> "$NOTES"
+          echo "- **Binvia-${VERSION}-macos-arm64-x86_64.dmg（推荐）**：下载后打开，把 Binvia.app 拖入 Applications 即可；命令行工具安装方法见 DMG 内说明" >> "$NOTES"
+          echo "- Binvia-${VERSION}-macos-arm64-x86_64.tar.gz：免安装版（解压即用）" >> "$NOTES"
+          echo "- SHA256SUMS：校验和" >> "$NOTES"
           echo "" >> "$NOTES"
-          echo "> 说明：adhoc 签名仅保证包内完整性，未经 Apple 公证（notarization）。" >> "$NOTES"
-          echo "> 若 Gatekeeper 提示无法打开，请在「系统设置 → 隐私与安全性」中点击「仍要打开」" >> "$NOTES"
+          echo "## 构建信息" >> "$NOTES"
+          echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 698 项断言 → GUI 无界面自检）" >> "$NOTES"
+          echo "- 签名：当前为 adhoc 签名（未经 Apple 公证），首次打开若被拦截请右键 → 打开 → 确认" >> "$NOTES"
           gh release create "$TAG" \
+            "bin/Binvia-${VERSION}-macos-arm64-x86_64.dmg" \
             "bin/Binvia-${VERSION}-macos-arm64-x86_64.tar.gz" \
             bin/SHA256SUMS \
             --title "Binvia ${VERSION}" \

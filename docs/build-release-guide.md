@@ -58,18 +58,31 @@ MARKETING_VERSION=0.2.0 BUILD_NUMBER=2 ./Scripts/build.sh   # 临时覆盖版本
 
 | 产物 | 说明 |
 |---|---|
-| `Binvia.app` | 菜单栏 GUI（LSUIElement），**universal**（arm64 + x86_64），adhoc 签名 |
-| `BinviaServer` / `BinviaCLI` | 服务端与 CLI 可执行文件，universal，adhoc 签名 |
-| `Binvia-<版本>-macos-arm64-x86_64.tar.gz` | 三者打包，**发布用** |
-| `SHA256SUMS` | 压缩包校验和（发布时一并上传，用户可验证完整性） |
+| `Binvia-<版本>-macos-arm64-x86_64.dmg` | **正式发布物**：拖入安装的 DMG（Binvia.app + 命令行工具 + Applications 快捷方式 + 安装说明） |
+| `Binvia-<版本>-macos-arm64-x86_64.tar.gz` | 免安装版备用包 |
+| `SHA256SUMS` | 两者校验和（发布时一并上传） |
+| `Binvia.app` / `BinviaServer` / `BinviaCLI` | 未打包的原始产物（universal，已签名） |
 
 验证打包结果：
 
 ```bash
 lipo -info bin/BinviaApp          # 应输出 x86_64 arm64
-codesign -dv bin/Binvia.app       # 应显示 Signature=adhoc
+codesign -dv bin/Binvia.app       # adhoc 模式显示 Signature=adhoc；developer 模式显示 Developer ID
 plutil -p bin/Binvia.app/Contents/Info.plist   # 检查版本号
+hdiutil attach bin/Binvia-*.dmg   # 挂载检查 DMG 内容（检查完 detach）
 ```
+
+### 签名模式
+
+`build.sh` 支持三种签名模式（环境变量 `BINVIA_SIGNING`）：
+
+| 模式 | 用途 | 命令 |
+|---|---|---|
+| `adhoc`（默认） | 本地自用/未公证分发 | 零成本 |
+| `developer` | 正式公证分发 | `BINVIA_SIGNING=developer DEVELOPER_ID_CERT="Developer ID Application: 名字 (TEAMID)" ./Scripts/build.sh` |
+| `none` | 调试 | `BINVIA_SIGNING=none ./Scripts/build.sh` |
+
+`developer` 模式使用 hardened runtime（`--options runtime`），是 Apple 公证的硬性前置。
 
 ---
 
@@ -104,12 +117,12 @@ git push origin v0.1.0   # 推送 tag 即触发 Release workflow
 
 1. 打开 https://github.com/wangbin3162/Binvia/actions → 看到 `Release` workflow 运行。
 2. 全部步骤绿后，打开 https://github.com/wangbin3162/Binvia/releases
-3. 确认：`Binvia-0.1.0-macos-arm64-x86_64.tar.gz` + `SHA256SUMS` 已上传，标题为 `Binvia 0.1.0`。
-4. （可选）下载压缩包，本地解压验证：
+3. 确认：`Binvia-0.1.0-macos-arm64-x86_64.dmg` + tar.gz + `SHA256SUMS` 已上传，标题为 `Binvia 0.1.0`。
+4. （可选）下载 DMG，本地验证：
 
 ```bash
 shasum -a 256 -c SHA256SUMS        # 校验完整性
-open Binvia.app                    # 确认能启动
+open Binvia-0.1.0-macos-arm64-x86_64.dmg   # 打开确认内容与安装说明
 ```
 
 **发布完成。** 下一版本只需重复步骤一~四（版本号递增）。
@@ -139,8 +152,21 @@ Gatekeeper 可能提示"无法验证开发者"。这是个人项目的正常现�
 - 系统设置 → 隐私与安全性 → 点击「仍要打开」；或
 - 终端执行 `xattr -cr /Applications/Binvia.app` 清除隔离属性
 
-未来若需要无提示安装：购买 Apple Developer 证书（$99/年），在 build.sh 中增加
-Developer ID 签名 + notarization（参见 `docs/build-deploy-comparison.md` §3.3，当前有意不做）。
+**升级为公证版**（消除所有警告）：购买 Apple Developer 会员（$99/年）后：
+
+1. 在 developer.apple.com 创建 **Developer ID Application** 证书并装入钥匙串；
+2. 用 developer 模式重新打包：
+   `BINVIA_SIGNING=developer DEVELOPER_ID_CERT="Developer ID Application: 名字 (TEAMID)" ./Scripts/build.sh`
+3. 对 DMG 整体公证 + 装订：
+
+```bash
+xcrun notarytool submit bin/Binvia-<版本>-macos-arm64-x86_64.dmg \
+  --key AuthKey_XXXX.p8 --key-id XXXX --issuer-id XXXX-XXXX --wait
+xcrun stapler staple bin/Binvia-<版本>-macos-arm64-x86_64.dmg
+```
+
+公证后用户双击直接打开，无任何警告。证书与凭证均为私密资产，勿提交到仓库；
+CI 自动化签名需将证书导出为 .p12 加密后存为 repo secret。
 
 ### 6.2 CI 里没有 Xcode 也能跑？
 
@@ -171,8 +197,9 @@ version.env 被覆盖）。本地构建则以 version.env 为准。所以**改�
 
 - [x] 版本号从 `version.env` 读取，注入 Info.plist（不再硬编码 0.1.0），附带 git commit / 构建时间
 - [x] 默认双架构构建（`ARCHES="arm64 x86_64"`），`lipo` 合成 universal 产物
-- [x] adhoc 代码签名 + `xattr -cr`（零证书成本；未开 sandbox entitlement）
-- [x] 打包 `tar.gz` + `SHA256SUMS`，可直接上传发布
+- [x] 签名双模式：adhoc（默认）/ developer（公证前置，hardened runtime）/ none
+- [x] **DMG 安装包**：`Scripts/make_dmg.sh`，拖入安装（Binvia.app + 命令行工具 + Applications 快捷方式 + 中文安装说明）
+- [x] tar.gz 备用包 + `SHA256SUMS`（含 DMG）
 - [x] 构建前清理 `bin/`，避免旧产物残留
 - [x] `.github/workflows/ci.yml`：push/PR 自动构建 + 测试 + 打包自检
-- [x] `.github/workflows/release.yml`：tag 触发，自动发布 GitHub Release
+- [x] `.github/workflows/release.yml`：tag 触发，自动发布 DMG + tar.gz 到 GitHub Releases
