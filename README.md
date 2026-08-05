@@ -18,6 +18,20 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 - **可靠重试**：408/429/5xx 指数退避重试，尊重 `Retry-After` 头
 - **OAuth 免 Key**：CodeBuddy / Antigravity / Codex 浏览器授权登录，无需手动填 Key；Cursor 自动读取 IDE 登录令牌
 - **菜单栏监控**：服务器启停、供应商健康度、余额/配额窗口、请求明细（时间/模型/token/耗时/状态）
+- **Web 管理面板**：浏览器访问 `http://localhost:20427/` 即可监控、配置、测试、管理网关 Key（无需菜单栏 GUI）
+
+## Web 管理面板
+
+BinviaServer 内置 Web 管理面板，浏览器访问 `http://localhost:20427/` 即可使用：
+
+- **概览**：服务器状态、Summary 卡片（请求/错误/活跃 Provider/Token 用量）、Provider 健康度列表
+- **Provider**：Provider 卡片含认证类型、配置/启用状态、用量快照、一键测试连通性
+- **请求日志**：实时表格（2s 自动刷新），显示时间/方法/路径/Provider/模型/状态/耗时/Token
+- **网关 Keys**：Key 列表（掩码展示）+ 新建/删除 + 模型白名单编辑
+- **设置**：监听地址/端口、面板启用开关、管理员密码，保存即热更新
+
+面板默认无需密码（仅限 loopback 访问）；可在设置中配置 `admin_password` 启用密码保护。
+Web 面板与菜单栏 GUI 共享同一后端，配置即时同步。`web_panel_enabled: false` 时面板完全关闭，不影响 `/v1/*` 路由。
 - **配置即改即生效**：设置面板改端口、加 Key、启停供应商，保存即热更新，无需重启
 
 ## 已接入供应商
@@ -101,8 +115,11 @@ API Key:  设置 → 网关密钥 中生成（sk-bv- 开头）
 ### 方式二：命令行
 
 ```bash
-# 启动服务器（默认监听 http://localhost:20427/v1）
+# 启动服务器（默认监听 http://localhost:20427/v1，同时开放 Web 管理面板）
 BinviaServer
+
+# 浏览器打开管理面板
+open http://localhost:20427/
 
 # 列出供应商与模型
 BinviaCLI providers list
@@ -134,6 +151,11 @@ curl -N http://localhost:20427/v1/chat/completions \
 
 # 用量统计
 curl http://localhost:20427/v1/usage
+
+# Web 管理面板 API
+curl http://localhost:20427/admin/api/overview
+curl http://localhost:20427/admin/api/providers
+curl http://localhost:20427/admin/api/entries?limit=10
 ```
 
 模型名支持三种写法：`供应商/模型`（`deepseek/deepseek-v4-pro`）、别名（`ds/deepseek-v4-pro`）、裸模型名（自动归属到唯一匹配的供应商）。
@@ -149,13 +171,15 @@ Cursor 支持两种认证方式，**无需单独购买 API Key**（Pro/Max 订�
 
 ## 配置
 
-配置文件：`~/.config/binvia/config.json`（可用环境变量 `BINVIA_CONFIG` 覆盖路径）。日常配置推荐在 GUI 设置面板完成；文件格式示例：
+配置文件：`~/.config/binvia/config.json`（可用环境变量 `BINVIA_CONFIG` 覆盖路径）。日常配置推荐在 GUI 设置面板或 Web 管理面板完成；文件格式示例：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "host": "localhost",
   "port": 20427,
+  "web_panel_enabled": true,
+  "admin_password": null,
   "apiKeys": ["sk-local-xxx"],
   "providers": {
     "deepseek": {
@@ -183,12 +207,13 @@ Cursor 支持两种认证方式，**无需单独购买 API Key**（Pro/Max 订�
 
 ```bash
 swift build          # 构建
-make test            # 运行全部测试（698 项断言，无需 Xcode）
+make test            # 运行全部测试（737 项断言，无需 Xcode）
 make run             # 启动服务器
-make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
+make web             # 构建 Web 面板（npm install + build + embed）
+make release         # 完整打包（Web 面板构建 + 双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```
 
-GUI 开发运行：`swift run BinviaApp`（菜单栏应用）；发布物为 `bin/Binvia-<版本>-macos-arm64-x86_64.dmg`。正式发布流程见 `docs/build-release-guide.md`。
+GUI 开发运行：`swift run BinviaApp`（菜单栏应用）；Web 面板开发运行：`cd web && npm run dev`（热更新，需后端先启动）。发布物为 `bin/Binvia-<版本>-macos-arm64-x86_64.dmg`。正式发布流程见 `docs/build-release-guide.md`。
 
 ## 致谢
 
