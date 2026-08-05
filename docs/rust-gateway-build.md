@@ -1,5 +1,7 @@
 # Rust 网关构建
 
+> **约束**：Web + Rust 完成前，`Sources/`（macOS app 五个 target）冻结，禁止修改；详见 `docs/rust-gateway-roadmap.md` 与 `AGENTS.md`「Important Constraint」。
+
 Rust 网关位于 `binvia-core/`，可独立构建和运行：
 
 ```bash

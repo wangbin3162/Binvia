@@ -1,5 +1,7 @@
 # Rust 网关后续路线图（Roadmap）
 
+> **铁律**：Web + Rust 完成（本路线图 R1–R12 全部通过验收）之前，**禁止修改 `Sources/` 下任何 macOS app 代码**（BinviaCore / BinviaServer / BinviaCLI / BinviaApp / BinviaCheck）。`Sources/` 仅作为移植参考**只读**使用；确有必要改动须先征得用户明确同意。详见 `AGENTS.md`「Important Constraint」。
+
 > 制定日期：2026-08-05
 > 范围：`binvia-core/`（Rust 网关）+ `web/`（管理面板）在 S1-S5 之后的剩余工作。
 > 参考：`docs/web-panel-plan.md`（S1-S5 已完成）、`docs/rust-gateway-build.md`（构建与运行）。

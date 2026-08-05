@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Binvia：本地 AI 供应商聚合路由网关（macOS）。在本地端口提供 OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models` 等），连接 DeepSeek / 腾讯 CodeBuddy / Google Antigravity 上游，供 Claude Code、Codex、各类 SDK 通过 api-key 调用，带请求监控与菜单栏 GUI。纯 Swift + 原生 POSIX socket，零外部依赖（Package.swift 无任何第三方依赖）。
 
+# 铁律（最高优先级，先读）
+
+**Web 面板（`web/`）+ Rust 网关（`binvia-core/`）完成之前，禁止修改 `Sources/` 下任何 macOS app 代码**（BinviaCore / BinviaServer / BinviaCLI / BinviaApp / BinviaCheck 五个 target）。
+
+- 解除条件：`docs/rust-gateway-roadmap.md` 中 R1–R12 全部切片完成并通过验收标准；届时由用户明确宣布解冻。
+- `Sources/` **只可读**（作为 Rust 移植的对齐基线），**不可写**；确有必要改动时，必须先停下来征得用户明确同意。
+- 所有新功能一律落在 `binvia-core/`（Rust 网关）与 `web/`（管理面板）。
+- Rust 侧命令：`make rust-build` / `make rust-test` / `make rust-release`（见 `docs/rust-gateway-build.md`）。
+
 # 常用命令
 
 本机只有 CommandLineTools（无 Xcode/xctest），**`swift test` 不可用**，测试统一走自包含可执行 target。

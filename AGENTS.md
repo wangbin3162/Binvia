@@ -2,6 +2,14 @@
 
 Binvia is a macOS local AI-provider aggregation gateway. It exposes an OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, `/v1/usage`, `/v1/health`) on a local port and routes requests to DeepSeek, Tencent CodeBuddy, and Google Antigravity. Pure Swift + native POSIX sockets, **zero third-party dependencies**.
 
+## Important Constraint: Freeze Swift Sources (macOS app)
+
+**Do not modify any code under `Sources/` (the macOS app: `BinviaCore` / `BinviaServer` / `BinviaCLI` / `BinviaApp` / `BinviaCheck`) until the Rust gateway (`binvia-core/`) and the web panel (`web/`) are complete.**
+
+- The Rust/web migration is tracked in `docs/rust-gateway-roadmap.md` (slices R1–R12). This freeze is lifted only when all slices pass the acceptance criteria in that document.
+- Reading `Sources/` as the reference baseline for the Rust port is allowed and encouraged; **writing is not**.
+- All new feature work belongs in `binvia-core/` / `web/`. If a change to `Sources/` ever seems necessary, stop and ask the user for explicit approval first.
+
 ## Project Structure & Module Organization
 
 Swift Package (5 targets, `Package.swift`), all with `StrictConcurrency` enabled:

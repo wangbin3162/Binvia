@@ -2,6 +2,7 @@
 
 > 制定日期：2026-08-05
 > 范围：**仅 Web 管理面板**（原 Windows 支持计划已废弃，Windows 移植不再考虑）。
+> **约束**：Web + Rust 网关（`binvia-core/`）完成前，`Sources/`（macOS app）冻结、禁止修改；`Sources/` 仅只读参考。详见 `AGENTS.md`「Important Constraint」与 `docs/rust-gateway-roadmap.md`。
 > 形态：`BinviaServer` 内置管理面板 —— 浏览器访问 `http://localhost:<port>/` 完成监控、配置、测试、网关 Key 管理。
 > 前端技术：**Vite + Vue 3 + TypeScript**，独立 `web/` 目录；构建产物内嵌进 BinviaServer 二进制（单文件交付）。
 
