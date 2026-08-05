@@ -383,11 +383,19 @@ struct SettingsProviderPane: View {
     }
 
     /// 单个令牌行：图标 + 标签 + 掩码值 + 右侧「移除」按钮（对齐 CodexBar 令牌账户）。
-    private func tokenRow(label: String, value: String, onRemove: @escaping () -> Void) -> some View {
+    private func tokenRow(label: String, value: String, isPrimary: Bool = false, onRemove: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "key")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            if isPrimary {
+                Text("主")
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.16)))
+                    .foregroundStyle(Color.accentColor)
+            }
             Text(label)
                 .font(.footnote.weight(.medium))
                 .lineLimit(1)
@@ -415,7 +423,7 @@ struct SettingsProviderPane: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
-                    tokenRow(label: token.label, value: token.value) {
+                    tokenRow(label: token.label, value: token.value, isPrimary: index == 0) {
                         draftTokens.remove(at: index)
                         persistDeviceTokens()
                     }

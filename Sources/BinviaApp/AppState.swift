@@ -223,12 +223,12 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
-    /// 设置 deviceFlow 类型 provider 的多 AccessToken（主 token → credential.accessToken + apiKeys[0]，
-    /// 其余 → apiKeys[]）。配套的 refreshToken 保留在 credential 中。令牌带标签（CodexBar 令牌账户风格）。
+    /// 设置 deviceFlow 类型 provider 的多 AccessToken：首个 token 为主 token（→ credential.accessToken），
+    /// 其余为轮换 token（→ apiKeys[]）。配套的 refreshToken 保留在 credential 中。
     ///
-    /// 标签保留：全部令牌（含主 token）带标签写入 `apiKeys[]`，主 token 值同时同步到
-    /// `credential.accessToken` 供路由读取（`accessTokens(for:)` / provider 端按值去重，不重复）。
-    /// 此前主 token 只存 value、标签丢失，导致重开设置面板后自定义标签回退为掩码缩写。
+    /// 主 token **不写入 apiKeys**（历史版本双写导致同一 token 在 config 里存两份冗余；
+    /// 调用侧按值去重，双写无功能收益）。主 token 标签由 UI 从 `credential.email` 重建，
+    /// 轮换 token 标签存于 apiKeys 自身。
     func setAccessTokens(_ tokens: [KeyedToken], refreshToken: String?, for providerID: String) throws {
         let cleaned = tokens
             .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -246,8 +246,8 @@ final class AppState: ObservableObject {
             ? refreshToken!.trimmingCharacters(in: .whitespacesAndNewlines)
             : credential.refreshToken
         providerConfig.credential = credential
-        // 全部令牌（含主 token）带标签存入 apiKeys[]，保证标签跨会话保留
-        providerConfig.apiKeys = cleaned
+        // 仅轮换 token 写入 apiKeys[]（主 token 只在 credential，避免重复存储）
+        providerConfig.apiKeys = Array(cleaned.dropFirst())
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
