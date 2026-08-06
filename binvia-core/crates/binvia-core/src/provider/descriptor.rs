@@ -45,6 +45,8 @@ pub struct ProviderDescriptor {
     #[serde(default)]
     pub force_stream: bool,
     #[serde(default)]
+    pub anthropic_compat: bool,
+    #[serde(default)]
     pub regions: Vec<ProviderApiRegion>,
     pub usage_dashboard_url: Option<String>,
     #[serde(default)]

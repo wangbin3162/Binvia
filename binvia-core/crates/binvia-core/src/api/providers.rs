@@ -171,7 +171,7 @@ fn codebuddy_test_token(config: &RouteConfig) -> Option<String> {
 
 fn unsupported_protocol_message(provider_id: &str) -> Option<&'static str> {
     match provider_id {
-        "antigravity" | "zai" | "minimax" | "codex" | "cursor" => {
+        "antigravity" | "codex" | "cursor" => {
             Some("不支持专用协议/尚未实现连接测试")
         }
         _ => None,
@@ -248,11 +248,15 @@ mod tests {
 
     #[test]
     fn unsupported_protocols_are_not_reported_as_openai_tests() {
-        for provider_id in ["antigravity", "zai", "minimax", "codex", "cursor"] {
+        for provider_id in ["antigravity", "codex", "cursor"] {
             assert_eq!(
                 unsupported_protocol_message(provider_id),
                 Some("不支持专用协议/尚未实现连接测试")
             );
+        }
+        // zai / minimax 现已通过 Anthropic 兼容翻译支持。
+        for provider_id in ["zai", "minimax"] {
+            assert_eq!(unsupported_protocol_message(provider_id), None);
         }
     }
 

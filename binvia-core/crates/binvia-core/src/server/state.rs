@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 
 use crate::config::RouteConfig;
 use crate::monitor::{RequestLogger, UsageCache};
+use crate::networking::ModelCache;
 use crate::provider::catalog::builtin_providers;
 use crate::provider::descriptor::{Model, ProviderAuthType, ProviderDescriptor, ProviderMetadata};
 use crate::provider::registry::ProviderRegistry;
@@ -12,6 +13,7 @@ pub struct AppState {
     pub config: Arc<RwLock<RouteConfig>>,
     pub logger: Arc<RequestLogger>,
     pub usage_cache: Arc<UsageCache>,
+    pub model_cache: Arc<ModelCache>,
     pub admin_token: Arc<RwLock<Option<String>>>,
     pub registry: Arc<StdRwLock<ProviderRegistry>>,
     pub resolver: Arc<StdRwLock<RouteResolver>>,
@@ -26,6 +28,7 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             logger: Arc::new(RequestLogger::new()),
             usage_cache: Arc::new(UsageCache::new()),
+            model_cache: Arc::new(ModelCache::new()),
             admin_token: Arc::new(RwLock::new(None)),
             registry,
             resolver,
@@ -77,6 +80,7 @@ fn registry_for_config(config: &RouteConfig) -> ProviderRegistry {
             supports_streaming: true,
             models_url: None,
             force_stream: false,
+            anthropic_compat: custom.base_url.ends_with("/messages"),
             regions: Vec::new(),
             usage_dashboard_url: None,
             is_user_defined: true,

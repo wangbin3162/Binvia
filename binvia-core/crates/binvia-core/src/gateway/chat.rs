@@ -9,6 +9,7 @@ use futures::{StreamExt, stream};
 use serde_json::Value;
 
 use crate::auth;
+use crate::gateway::anthropic;
 use crate::gateway::sse_aggregator::SseAggregator;
 use crate::gateway::token_extractor::extract_from_json;
 use crate::monitor::{RequestLogEntry, TokenUsage};
@@ -397,6 +398,81 @@ pub async fn chat_handler(
     };
 
     request.model = model_id.clone();
+
+    // Anthropic 兼容上游（zai / minimax）：恒流式，SSE 翻译为 OpenAI chunk。
+    if descriptor.anthropic_compat {
+        let upstream_request = match anthropic::build_upstream_request(&base_url, &request, &credential) {
+            Ok(r) => r,
+            Err(error) => {
+                return failure_response(
+                    &state,
+                    started,
+                    Some(provider_id),
+                    Some(model_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.to_string(),
+                );
+            }
+        };
+        let response = match upstream_request.send().await {
+            Ok(r) => r,
+            Err(error) => {
+                return failure_response(
+                    &state,
+                    started,
+                    Some(provider_id),
+                    Some(model_id),
+                    StatusCode::BAD_GATEWAY,
+                    ProviderError::from(error).to_string(),
+                );
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let error = ProviderError::HttpStatus {
+                status,
+                body: body.clone(),
+            };
+            return failure_response(
+                &state,
+                started,
+                Some(provider_id),
+                Some(model_id),
+                provider_error_status(&error),
+                error.to_string(),
+            );
+        }
+        let translated = anthropic::translate_stream(response.bytes_stream(), model_id.clone());
+        let wants_stream = request.stream.unwrap_or(false);
+        if wants_stream {
+            return streaming_response(state, started, provider_id, model_id, translated);
+        }
+        // 非流式：聚合翻译后的 OpenAI SSE。
+        let mut upstream = translated;
+        let mut aggregator = SseAggregator::new(model_id.clone());
+        while let Some(result) = upstream.next().await {
+            match result {
+                Ok(chunk) => aggregator.push(&chunk),
+                Err(error) => {
+                    return provider_error_response(&state, started, provider_id, model_id, error);
+                }
+            }
+        }
+        let response = aggregator.finish();
+        let tokens = response.usage.as_ref().and_then(extract_from_json);
+        record_request(
+            &state,
+            started,
+            Some(provider_id),
+            Some(model_id),
+            StatusCode::OK,
+            None,
+            tokens,
+        );
+        return (StatusCode::OK, axum::Json(response)).into_response();
+    }
+
     let provider = if provider_id == "codebuddy-cn" {
         OpenAICompatibleProvider::with_headers(
             provider_id.clone(),

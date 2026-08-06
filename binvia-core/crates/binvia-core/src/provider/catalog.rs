@@ -23,6 +23,7 @@ fn descriptor(
     models: Vec<Model>,
     force_stream: bool,
 ) -> ProviderDescriptor {
+    let anthropic_compat = base_url.ends_with("/messages");
     ProviderDescriptor {
         metadata: ProviderMetadata {
             id: id.to_string(),
@@ -35,6 +36,7 @@ fn descriptor(
         supports_streaming: true,
         models_url: None,
         force_stream,
+        anthropic_compat,
         regions: Vec::new(),
         usage_dashboard_url: None,
         is_user_defined: false,

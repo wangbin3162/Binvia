@@ -57,6 +57,19 @@ async fn main() {
         std::process::exit(1);
     }
     let state = Arc::new(AppState::new(config));
+    // 启动 5min 用量定时刷新（首次立即刷新，之后每 5min 一次）。
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            binvia_core::api::usage::refresh_all(&state).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // 跳过首个立即触发点（已手动刷新）。
+            loop {
+                interval.tick().await;
+                binvia_core::api::usage::refresh_all(&state).await;
+            }
+        });
+    }
     if let Err(error) = server::start(state).await {
         eprintln!("gateway stopped: {error}");
         drop(pid_file);

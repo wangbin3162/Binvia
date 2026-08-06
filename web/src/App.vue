@@ -7,8 +7,9 @@ import ProvidersView from './views/ProvidersView.vue'
 import LogsView from './views/LogsView.vue'
 import KeysView from './views/KeysView.vue'
 import SettingsView from './views/SettingsView.vue'
+import PlaygroundView from './views/PlaygroundView.vue'
 
-const tabs = ['概览', 'Provider', '请求日志', '网关 Keys', '设置'] as const
+const tabs = ['概览', 'Provider', '试玩', '请求日志', '网关 Keys', '设置'] as const
 const activeTab = ref(0)
 const needsLogin = ref(false)
 const loginPassword = ref('')
@@ -135,9 +136,10 @@ onUnmounted(() => {
     <main class="p-6 max-w-6xl mx-auto">
       <OverviewView v-if="activeTab === 0" :overview="overviewData" />
       <ProvidersView v-else-if="activeTab === 1" />
-      <LogsView v-else-if="activeTab === 2" />
-      <KeysView v-else-if="activeTab === 3" />
-      <SettingsView v-else-if="activeTab === 4" />
+      <PlaygroundView v-else-if="activeTab === 2" />
+      <LogsView v-else-if="activeTab === 3" />
+      <KeysView v-else-if="activeTab === 4" />
+      <SettingsView v-else-if="activeTab === 5" />
     </main>
 
     <!-- Toast -->

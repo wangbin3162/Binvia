@@ -5,6 +5,7 @@ pub mod login;
 pub mod overview;
 pub mod providers;
 pub mod snapshots;
+pub mod test;
 pub mod usage;
 
 use std::sync::Arc;
@@ -25,6 +26,11 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
             "/providers/{provider_id}/test",
             post(providers::test_handler),
         )
+        .route(
+            "/providers/{provider_id}/test-model",
+            post(test::test_model_handler),
+        )
+        .route("/playground", post(test::playground_handler))
         .route("/snapshots", get(snapshots::snapshots_handler))
         .route("/config", get(config::get_config_handler))
         .route("/config", post(config::post_config_handler))

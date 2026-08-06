@@ -69,12 +69,22 @@ export interface KeyedBalance {
 
 export interface QuotaWindow {
   label: string
+  remainingRatio: number
   remainingFraction: number
+  remainingPercentage: number
   resetAt: string | null
+  resetsAt: string | null
   unlimited: boolean
   used: number
   total: number
+}
+
+export interface ModelQuota {
+  modelId: string
+  remainingFraction: number
   remainingPercentage: number
+  resetAt: string | null
+  unlimited: boolean
 }
 
 export interface ProviderUsageSnapshot {
@@ -83,6 +93,7 @@ export interface ProviderUsageSnapshot {
   currency: string | null
   balances: KeyedBalance[]
   quotaWindows: QuotaWindow[]
+  modelQuotas: ModelQuota[]
   rawJSON: string | null
   fetchedAt: string
   error: string | null
@@ -141,4 +152,27 @@ export interface LoginResponse {
 export interface TestResult {
   success: boolean
   message: string
+  latencyMs?: number
+}
+
+export interface OAuthStartResult {
+  providerID: string
+  authUrl: string
+  state?: string
+  interval?: number
+  expiresIn?: number
+  redirectUri?: string
+}
+
+export interface OAuthCredentialResult {
+  accessToken: string | null
+  refreshToken: string | null
+  email: string | null
+  expiresAt: string | null
+}
+
+export interface OAuthPollResult {
+  status: 'pending' | 'ok' | 'error'
+  message?: string
+  credential?: OAuthCredentialResult
 }

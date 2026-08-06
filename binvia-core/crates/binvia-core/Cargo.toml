@@ -20,4 +20,6 @@ rust-embed.workspace = true
 tower-http.workspace = true
 tower.workspace = true
 reqwest.workspace = true
+bytes.workspace = true
 mime_guess.workspace = true
+base64.workspace = true

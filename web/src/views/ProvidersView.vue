@@ -14,6 +14,9 @@ const saving = ref<Record<string, boolean>>({})
 const messages = ref<Record<string, string>>({})
 const testing = ref<Record<string, boolean>>({})
 const testResults = ref<Record<string, { success: boolean; message: string }>>({})
+const pingResults = ref<Record<string, { success: boolean; message: string; latencyMs?: number }>>({})
+const pinging = ref<Record<string, boolean>>({})
+const refreshingUsage = ref(false)
 
 function emptyProvider(): ProviderConfig {
   return {
@@ -182,6 +185,43 @@ async function testProvider(id: string) {
   }
 }
 
+async function pingModel(provider: ProviderItem, model: string) {
+  const key = `${provider.id}/${model}`
+  pinging.value[key] = true
+  try {
+    pingResults.value[key] = await api.testModel(provider.id, model)
+  } catch (error) {
+    pingResults.value[key] = {
+      success: false,
+      message: error instanceof Error ? error.message : '测试失败',
+    }
+  } finally {
+    pinging.value[key] = false
+  }
+}
+
+async function refreshUsage() {
+  refreshingUsage.value = true
+  try {
+    const response = await api.refreshUsage()
+    snapshots.value = response.snapshots
+  } catch {
+    // ignore
+  } finally {
+    refreshingUsage.value = false
+  }
+}
+
+function fmtPercent(window: { remainingPercentage: number }): string {
+  return `${window.remainingPercentage.toFixed(1)}%`
+}
+
+function quotaColor(remaining: number): string {
+  if (remaining >= 50) return 'var(--color-green)'
+  if (remaining >= 20) return 'var(--color-amber)'
+  return 'var(--color-red)'
+}
+
 function mask(value: string): string {
   if (value.length <= 10) return value
   return `${value.slice(0, 6)}••••${value.slice(-4)}`
@@ -197,10 +237,17 @@ onMounted(fetchData)
         <h3 class="text-sm font-medium">Provider 配置</h3>
         <p class="text-xs text-[var(--color-text-secondary)] mt-1">展开供应商，按 macOS 设置窗口方式管理凭据和模型。</p>
       </div>
-      <button
-        class="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg)]"
-        @click="fetchData"
-      >刷新</button>
+      <div class="flex gap-2">
+        <button
+          class="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg)] disabled:opacity-50"
+          :disabled="refreshingUsage"
+          @click="refreshUsage"
+        >{{ refreshingUsage ? '刷新中…' : '刷新用量' }}</button>
+        <button
+          class="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-bg)]"
+          @click="fetchData"
+        >刷新</button>
+      </div>
     </div>
 
     <div v-if="messages._global" class="mb-3 rounded-lg border border-[var(--color-red)]/30 bg-red-50 px-3 py-2 text-xs text-[var(--color-red)]">
@@ -225,6 +272,37 @@ onMounted(fetchData)
         </button>
 
         <div v-if="expanded[provider.id]" class="border-t border-[var(--color-border)] bg-[var(--color-bg)]/40 p-4 space-y-4">
+          <!-- 用量卡片 -->
+          <div v-if="snapshots[provider.id]" class="rounded-lg border border-[var(--color-border)] bg-white p-3 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium">用量 / 配额</span>
+              <span class="text-[11px] text-[var(--color-text-secondary)]">{{ snapshots[provider.id].fetchedAt ? new Date(snapshots[provider.id].fetchedAt).toLocaleString('zh-CN') : '' }}</span>
+            </div>
+            <div v-if="snapshots[provider.id].error" class="text-xs text-[var(--color-red)]">{{ snapshots[provider.id].error }}</div>
+            <template v-else>
+              <div v-if="snapshots[provider.id].balance !== null" class="text-sm">
+                余额 <span class="font-semibold">{{ snapshots[provider.id].balance?.toFixed(2) }}</span>
+                <span class="text-xs text-[var(--color-text-secondary)]">{{ snapshots[provider.id].currency ?? '' }}</span>
+              </div>
+              <div v-for="token in snapshots[provider.id].balances" :key="token.label" class="flex items-center justify-between text-xs">
+                <span class="text-[var(--color-text-secondary)]">{{ token.label }}</span>
+                <span class="font-mono">{{ token.balance.toFixed(2) }} {{ token.currency }}</span>
+              </div>
+              <div v-for="window in snapshots[provider.id].quotaWindows" :key="window.label" class="space-y-1">
+                <div class="flex items-center justify-between text-xs">
+                  <span>{{ window.label }}</span>
+                  <span :style="{ color: quotaColor(window.remainingPercentage) }">{{ fmtPercent(window) }} 剩余</span>
+                </div>
+                <div class="h-1.5 rounded-full bg-[var(--color-bg)] overflow-hidden">
+                  <div class="h-full rounded-full" :style="{ width: `${window.remainingPercentage}%`, backgroundColor: quotaColor(window.remainingPercentage) }"></div>
+                </div>
+                <div class="text-[11px] text-[var(--color-text-secondary)]">
+                  {{ window.used }} / {{ window.total }}{{ window.resetAt ? ` · 重置 ${new Date(window.resetAt).toLocaleString('zh-CN')}` : '' }}
+                </div>
+              </div>
+            </template>
+          </div>
+
           <div class="grid md:grid-cols-[1fr_auto] gap-4">
             <div>
               <div class="text-xs text-[var(--color-text-secondary)] mb-1">Base URL</div>
@@ -289,10 +367,27 @@ onMounted(fetchData)
               </label>
             </div>
             <div v-if="modelsFor(provider.id).length" class="grid sm:grid-cols-2 gap-1.5">
-              <label v-for="model in modelsFor(provider.id)" :key="model" class="flex items-center gap-2 rounded-lg px-2.5 py-2 bg-white border border-[var(--color-border)] text-xs cursor-pointer hover:border-[var(--color-blue)]">
+              <div
+                v-for="model in modelsFor(provider.id)"
+                :key="model"
+                class="flex items-center gap-2 rounded-lg px-2.5 py-2 bg-white border border-[var(--color-border)] text-xs hover:border-[var(--color-blue)]"
+              >
                 <input :checked="isModelEnabled(provider.id, model)" type="checkbox" class="rounded border-[var(--color-border)]" @change="onModelChange(provider.id, model, $event)" />
-                <span :class="isModelEnabled(provider.id, model) ? '' : 'line-through text-[var(--color-text-secondary)]'">{{ model }}</span>
-              </label>
+                <span :class="isModelEnabled(provider.id, model) ? 'flex-1' : 'flex-1 line-through text-[var(--color-text-secondary)]'">{{ model }}</span>
+                <button
+                  class="text-[11px] px-1.5 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-bg)] disabled:opacity-50"
+                  :disabled="pinging[`${provider.id}/${model}`]"
+                  @click="pingModel(provider, model)"
+                >{{ pinging[`${provider.id}/${model}`] ? '…' : 'ping' }}</button>
+              </div>
+            </div>
+            <div v-if="Object.keys(pingResults).length" class="space-y-1 mt-1">
+              <div
+                v-for="(result, key) in pingResults"
+                :key="key"
+                class="text-[11px]"
+                :class="result.success ? 'text-[var(--color-green)]' : 'text-[var(--color-red)]'"
+              >{{ key }}：{{ result.message }}{{ result.latencyMs ? ` · ${result.latencyMs.toFixed(0)}ms` : '' }}</div>
             </div>
             <div v-else class="text-xs text-[var(--color-text-secondary)]">暂无模型。自定义 Provider 可在下方添加。</div>
             <div v-if="provider.isUserDefined" class="grid md:grid-cols-[1fr_auto] gap-2 mt-2">

@@ -20,6 +20,23 @@ pub struct QuotaWindow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     pub unlimited: bool,
+    /// 归一化已用额度（unlimited 时为 0）。
+    #[serde(default)]
+    pub used: i64,
+    /// 归一化总配额（unlimited 时为 0）。
+    #[serde(default)]
+    pub total: i64,
+}
+
+impl QuotaWindow {
+    /// 剩余百分比（0...100），unlimited 时恒为 100。
+    pub fn remaining_percentage(&self) -> f64 {
+        if self.unlimited {
+            100.0
+        } else {
+            (self.remaining_ratio * 100.0).clamp(0.0, 100.0)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
