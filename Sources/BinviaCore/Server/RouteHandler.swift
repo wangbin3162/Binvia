@@ -136,9 +136,12 @@ public struct RouteHandler: Sendable {
 
             let alias = descriptor.alias ?? descriptor.id
 
-            // 尝试动态获取（失败静默回退静态目录）
+            // 尝试动态获取（失败静默回退静态目录）。
+            // 无凭据的 provider 直接跳过：不发起上游请求，避免 /v1/models 被不可达/慢上游拖住
+            // （AI 客户端每次启动都会拉模型列表，慢请求直接表现为「总感觉很慢」）。
             var dynamicModels: [Model]?
-            if let provider = registry.provider(for: descriptor.id) {
+            if config.hasCredential(for: descriptor.id),
+               let provider = registry.provider(for: descriptor.id) {
                 do {
                     dynamicModels = try await provider.listModels(credential: config.credential(for: descriptor.id))
                 } catch {

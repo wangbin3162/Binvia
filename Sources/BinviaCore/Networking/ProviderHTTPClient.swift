@@ -58,6 +58,12 @@ public struct ProviderHTTPRetryPolicy: Sendable {
 public struct ProviderHTTPClient: Sendable {
     public static let shared = ProviderHTTPClient()
 
+    /// 非流式请求（用量查询 / 模型列表 / 连通性探测）超时上限（秒）。
+    /// URLSession 默认 60s：上游不可达（如被墙域名）时会把调用方拖住分钟级
+    /// （实测 `/v1/models` 62s、用量轮询 hang）。统一封顶后最坏 12s 返回。
+    /// 流式请求走 `stream` / `streamThrowing`，不受影响。
+    public static let nonStreamingTimeout: TimeInterval = 12
+
     private let session: URLSession
 
     public init(session: URLSession = .shared) {
@@ -76,6 +82,11 @@ public struct ProviderHTTPClient: Sendable {
         for request: URLRequest,
         retryPolicy: ProviderHTTPRetryPolicy
     ) async throws -> (Data, HTTPURLResponse) {
+        var request = request
+        // 非流式请求超时封顶（12s）：显式设置过更短超时的请求保留原值。
+        if request.timeoutInterval > Self.nonStreamingTimeout {
+            request.timeoutInterval = Self.nonStreamingTimeout
+        }
         var attempt = 0
         while true {
             let (data, response) = try await session.data(for: request)

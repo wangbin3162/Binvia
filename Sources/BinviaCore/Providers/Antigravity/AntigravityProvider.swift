@@ -84,8 +84,11 @@ public struct AntigravityProvider: Provider {
             }
             return result
         } catch {
-            // best-effort：动态获取失败回退静态目录。
-            return AntigravityProviderDescriptor.descriptor.models
+            // best-effort：动态获取失败回退静态目录，并写缓存（300s TTL）避免每次 /v1/models
+            // 都重复打上游等待超时（上游不可达时实测每次卡 12s）。上游恢复后 TTL 过期自动重试。
+            let fallback = AntigravityProviderDescriptor.descriptor.models
+            await ModelCache.shared.set(id, models: fallback)
+            return fallback
         }
     }
 

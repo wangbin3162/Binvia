@@ -825,10 +825,17 @@ final class AppState: ObservableObject {
     }
 
     /// 全量刷新所有挂载了用量查询器的 provider。
+    /// 并行执行（withTaskGroup）：单个 provider 用量接口慢/超时不再串行拖住全部刷新。
+    /// 配合 ProviderHTTPClient 的 12s 非流式超时封顶，最坏 12s 内全部完成。
     private func refreshAllUsage() async {
-        for descriptor in ProviderRegistry.shared.allDescriptors() {
-            guard descriptor.usageFetcherFactory() != nil else { continue }
-            await refreshUsage(for: descriptor.id)
+        let fetcherDescriptors = ProviderRegistry.shared.allDescriptors()
+            .filter { $0.usageFetcherFactory() != nil }
+        await withTaskGroup(of: Void.self) { group in
+            for descriptor in fetcherDescriptors {
+                group.addTask { [weak self] in
+                    await self?.refreshUsage(for: descriptor.id)
+                }
+            }
         }
     }
 

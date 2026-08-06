@@ -303,6 +303,19 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         return ProviderCredential(apiKey: Self.envValue(["\(providerID.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"]))
     }
 
+    /// 某 provider 是否已配置凭据（apiKey / accessToken / refreshToken / apiKeys[] 任一非空）。
+    /// 用于 `/v1/models` 跳过无凭据 provider 的动态模型获取——避免无谓打上游拖慢列表响应
+    /// （AI 客户端每次启动都会拉模型列表）。CodeBuddy 模型调用 token 存 `apiKeys[]`，也已覆盖。
+    public func hasCredential(for providerID: String) -> Bool {
+        let cred = credential(for: providerID)
+        if !(cred.apiKey ?? "").isEmpty
+            || !(cred.accessToken ?? "").isEmpty
+            || !(cred.refreshToken ?? "").isEmpty {
+            return true
+        }
+        return !apiKeys(for: providerID).isEmpty
+    }
+
     /// 某 provider 的全部 api-key（用于轮换）：config 的 `apiKeys` 数组 + 环境变量 key
     /// （如 `DEEPSEEK_API_KEY`）。去重、过滤空值。
     public func apiKeys(for providerID: String) -> [String] {
