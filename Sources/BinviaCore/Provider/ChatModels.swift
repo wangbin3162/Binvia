@@ -214,7 +214,7 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
     /// Cursor 专用：IDE 登录 / 手动导入账号的 machineId（`x-cursor-checksum` 用）。
     /// 缺省 nil，旧配置向后兼容。
     public var machineId: String?
-    /// Codex 专用：OAuth 绑定的 workspace（`chatgpt-account-id` 头）。
+    /// 附加账号标识：CodeBuddy CN 企业 ID（积分查询 `x-enterprise-id`）。
     /// 缺省 nil，旧配置向后兼容。
     public var workspaceId: String?
 

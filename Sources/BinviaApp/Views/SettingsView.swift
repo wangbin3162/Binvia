@@ -56,8 +56,6 @@ struct SettingsView: View {
             SettingsTestPane()
         case .gatewayKeys:
             SettingsGatewayKeysPane()
-        case .compatProviders:
-            SettingsCompatProvidersPane()
         case .about:
             SettingsAboutPane()
         case let .provider(id):

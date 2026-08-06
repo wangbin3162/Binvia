@@ -52,7 +52,7 @@ final class AppState: ObservableObject {
     /// 各 provider 的 OAuth 登录状态。
     @Published var oauthStates: [String: OAuthFlowState] = [:]
 
-    /// OAuth 授权码输入（由 sheet 触发，PKCE 粘贴授权码；Antigravity / Codex）。
+    /// OAuth 授权码输入（由 sheet 触发，PKCE 粘贴授权码；Antigravity）。
     @Published var isShowingCodeInput = false
 
     private var server: HTTPServer?
@@ -107,7 +107,7 @@ final class AppState: ObservableObject {
 
         // 恢复 OAuth/设备码登录状态：有 accessToken 且带登录账号标识的 provider 标为已连接，
         // 使「已连接 · 账号」在重启后仍然展示（否则按钮退回「登录」，造成未登录假象）。
-        for id in ["codebuddy-cn", "antigravity", "codex"] {
+        for id in ["codebuddy-cn", "antigravity"] {
             if let pc = loaded.providers[id],
                !(pc.credential.accessToken ?? "").isEmpty,
                !(pc.credential.email ?? "").isEmpty {
@@ -398,15 +398,8 @@ final class AppState: ObservableObject {
         ProviderRegistry.shared.orderedDescriptors(config.providerOrder)
     }
 
-    /// 拖拽重排供应商顺序并持久化。
-    func moveProvider(fromOffsets: IndexSet, toOffset: Int) {
-        var order = config.providerOrder
-        let allIDs = ProviderRegistry.shared.allDescriptors().map(\.id)
-        // 合并尚未记录的 provider（保证 order 覆盖全部已知 id）
-        for id in allIDs where !order.contains(id) {
-            order.append(id)
-        }
-        order.move(fromOffsets: fromOffsets, toOffset: toOffset)
+    /// 直接设置供应商排序并持久化（侧栏拖拽排序用，自定义供应商分栏后按内置子集重排）。
+    func setProviderOrder(_ order: [String]) {
         config.providerOrder = order
         try? saveConfig()
     }
@@ -651,40 +644,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Codex PKCE 流登录（ChatGPT 订阅账号）。自动打开浏览器，等待用户在 GUI 粘贴授权码。
-    func loginCodex() async {
-        oauthStates["codex"] = .requestingCode
-        do {
-            let client = CodexOAuthClient(config: .live())
-            let credentials = try await client.login(
-                openURL: { url in
-                    Task { @MainActor in
-                        NSWorkspace.shared.open(url)
-                        self.oauthStates["codex"] = .waitingForAuth
-                    }
-                },
-                codeProvider: { _ in
-                    try await self.waitForAuthCode(for: "codex")
-                }
-            )
-            let credential = ProviderCredential(
-                accessToken: credentials.accessToken,
-                refreshToken: credentials.refreshToken,
-                email: credentials.email,
-                expiresAt: credentials.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-                workspaceId: credentials.workspaceId
-            )
-            try saveCredential(credential, for: "codex")
-            oauthStates["codex"] = .connected
-        } catch {
-            oauthStates["codex"] = .failed(error.localizedDescription)
-        }
-    }
-
     // MARK: - OAuth 状态引导 & token 刷新（Phase 20）
 
     /// 启动时恢复 OAuth 状态：已配置 accessToken 的 oauth provider 标记为已连接，
-    /// 并主动刷新一次 Antigravity / Codex token（避免启动后仍用已过期 token）。
+    /// 并主动刷新一次 Antigravity token（避免启动后仍用已过期 token）。
     func bootstrapOAuth() async {
         for (providerID, pc) in config.providers
         where ProviderRegistry.shared.descriptor(for: providerID)?.metadata.authType == .oauth {
@@ -693,7 +656,6 @@ final class AppState: ObservableObject {
             }
         }
         await refreshAntigravityToken()
-        await refreshCodexToken()
     }
 
     /// 启动 OAuth token 周期刷新（每 25 分钟，token 约 1 小时过期）。
@@ -703,7 +665,6 @@ final class AppState: ObservableObject {
         oauthRefreshTimer = Timer.scheduledTimer(withTimeInterval: 25 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.refreshAntigravityToken()
-                await self?.refreshCodexToken()
             }
         }
     }
@@ -737,37 +698,6 @@ final class AppState: ObservableObject {
         } catch {
             // invalid_grant / 网络失败：保留旧凭据，状态标为失败以便用户重新登录。
             oauthStates["antigravity"] = .failed(error.localizedDescription)
-        }
-    }
-
-    /// 用 refreshToken 主动刷新 Codex access token，并把旋转后的新 token（含新 refreshToken）、
-    /// 过期时间、邮箱（为空时补抓）持久化回 config。刷新失败不覆盖旧凭据。
-    /// Codex 的 refresh token 是一次性的（旋转），必须持久化新值，否则下次刷新会 invalid_grant。
-    func refreshCodexToken() async {
-        guard let pc = config.providers["codex"],
-              !(pc.credential.accessToken ?? "").isEmpty,
-              let refresh = pc.credential.refreshToken, !refresh.isEmpty else {
-            return
-        }
-        let client = CodexOAuthClient(config: .live())
-        do {
-            let refreshed = try await client.refreshAccessToken(refreshToken: refresh)
-            var credential = pc.credential
-            credential.accessToken = refreshed.accessToken
-            if let rt = refreshed.refreshToken, !rt.isEmpty {
-                credential.refreshToken = rt
-            }
-            if let exp = refreshed.expiresIn {
-                credential.expiresAt = Date().addingTimeInterval(TimeInterval(exp))
-            }
-            if (credential.email ?? "").isEmpty, let email = refreshed.email, !email.isEmpty {
-                credential.email = email
-            }
-            try saveCredential(credential, for: "codex")
-            oauthStates["codex"] = .connected
-        } catch {
-            // reauthRequired / 网络失败：保留旧凭据，状态标为失败以便用户重新登录。
-            oauthStates["codex"] = .failed(error.localizedDescription)
         }
     }
 

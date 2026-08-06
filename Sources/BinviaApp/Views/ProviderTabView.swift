@@ -14,6 +14,7 @@ struct ProviderTabView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     headerRow(descriptor)
                     Divider()
+                    codeBuddyCredentialsSection
                     usageSection
                     Divider()
                     localStatsSection
@@ -62,6 +63,24 @@ struct ProviderTabView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    // MARK: - CodeBuddy 积分凭据（独立分块，置于用量上方）
+
+    /// CodeBuddy 的积分查询凭据（登录 / 企业 ID / Refresh Token）独立成块，
+    /// 位于用量卡片上方，避免混入用量数据展示。
+    @ViewBuilder
+    private var codeBuddyCredentialsSection: some View {
+        if providerID == "codebuddy-cn" {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("积分凭据")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                CodeBuddyUsageCredentials()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
     }
 
     // MARK: - 用量卡片

@@ -76,20 +76,15 @@ public struct Router: Sendable {
 
     /// 前缀启发式：模型家族前缀 → 供应商映射。仅当对应供应商确实拥有该模型时生效。
     /// 映射规则（Phase 2 对齐）：`claude-*`/`gemini-*` → Antigravity（Claude/Gemini 系）、
-    /// `gpt-*`/`o3-*`/`o4-*` → OpenAI、`glm-*` → CodeBuddyCN/GLM 系、`deepseek-*` → DeepSeek、
-    /// `kimi-*` → Kimi、`qwen*` → QwenCloud、`minimax*` → MiniMax、`mimo-*` → XiaomiMiMo。
+    /// `glm-*` → CodeBuddyCN/GLM 系、`deepseek-*` → DeepSeek、`kimi-*` → Kimi、
+    /// `minimax*` → MiniMax、`mimo-*` → XiaomiMiMo。
     private func prefixHeuristicMatch(_ modelID: String, owners: [String]) -> String? {
         let rules: [(prefix: String, providerID: String)] = [
             ("claude", "antigravity"),   // Anthropic 系
             ("gemini", "antigravity"),   // Gemini 系
-            ("gpt", "openai"),           // OpenAI 系
-            ("o3", "openai"),
-            ("o4", "openai"),
-            ("o1", "openai"),
             ("glm", "codebuddy-cn"),     // GLM 系（CodeBuddyCN / z.ai）
             ("deepseek", "deepseek"),
             ("kimi", "kimi"),
-            ("qwen", "qwen-cloud"),
             ("minimax", "minimax"),
             ("mimo", "xiaomi-mimo"),
         ]

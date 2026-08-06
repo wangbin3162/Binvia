@@ -25,13 +25,6 @@ struct ProviderHealthRow: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 1) {
-                Text("\(requestCount) req")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-
             Button {
                 onSettings()
             } label: {
@@ -56,28 +49,16 @@ struct ProviderHealthRow: View {
 
     // MARK: - 副行
 
-    /// 副行：关键用量 + token 聚合（如「¥12.34 · prompt 12.4K」）。
+    /// 副行：仅展示关键用量（余额 / 配额窗口）。
     private var captionLine: some View {
         HStack(spacing: 4) {
             Text(keyUsageText)
                 .foregroundStyle(keyUsageTint)
-            if !tokenAggregateText.isEmpty {
-                Text("·")
-                Text(tokenAggregateText)
-            }
         }
         .font(.caption)
     }
 
     // MARK: - 数据派生
-
-    private var providerUsage: ProviderUsage? {
-        appState.usageSummary.byProvider[descriptor.id]
-    }
-
-    private var requestCount: Int {
-        providerUsage?.requestCount ?? 0
-    }
 
     /// 关键用量：余额 > 配额窗口首个 > 多 Key 余额首个 > 「—」。余额用币种符号 + 两位小数（¥120.50）。
     private var keyUsageText: String {
@@ -108,15 +89,6 @@ struct ProviderHealthRow: View {
     private var keyUsageIsError: Bool {
         guard let snapshot = appState.usageSnapshots[descriptor.id] else { return false }
         return !(snapshot.error ?? "").isEmpty
-    }
-
-    /// token 聚合文本（prompt/completion 均为 0 时不展示）。
-    private var tokenAggregateText: String {
-        guard let usage = providerUsage,
-              usage.totalPromptTokens > 0 || usage.totalCompletionTokens > 0 else { return "" }
-        let prompt = Self.compactTokenText(usage.totalPromptTokens)
-        let completion = Self.compactTokenText(usage.totalCompletionTokens)
-        return "prompt \(prompt) · completion \(completion)"
     }
 
     /// 把 token 数压缩为可读文本：≥1000 用「X.XK」，否则原样。

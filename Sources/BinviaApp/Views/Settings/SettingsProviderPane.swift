@@ -862,6 +862,10 @@ struct SettingsProviderPane: View {
     @ViewBuilder
     private var usageSection: some View {
         Section {
+            if providerID == "codebuddy-cn" {
+                // CodeBuddy：积分查询凭据独立成块，位于用量卡片上方
+                CodeBuddyUsageCredentials()
+            }
             ProviderUsageCard(providerID: providerID)
         } header: {
             Text("用量")

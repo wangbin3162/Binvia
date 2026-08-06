@@ -1,22 +1,22 @@
 # Binvia
 
-> 本地 AI 供应商聚合路由网关 —— 一个应用同时连接 DeepSeek、腾讯 CodeBuddy、Google Antigravity、OpenAI、Cursor 等 13 家供应商，在本地提供 **OpenAI 兼容 API**，并自带菜单栏监控面板。
+> 本地 AI 供应商聚合路由网关 —— 一个应用同时连接 DeepSeek、腾讯 CodeBuddy、Google Antigravity、Cursor 等 10 家供应商，在本地提供 **OpenAI 兼容 API**，并自带菜单栏监控面板。
 
 Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后台服务），把多家 AI 供应商聚合到一个本地端点 `http://localhost:20427/v1`：
 
-- **Claude Code、Codex、opencode、Cursor** 等工具只需配置一个 OpenAI 兼容端点 + 一个网关 Key，即可调用所有供应商；
+- **Claude Code、opencode、Cursor** 等工具只需配置一个 OpenAI 兼容端点 + 一个网关 Key，即可调用所有供应商；
 - 一个面板统管全部供应商：余额/配额、请求统计、最近请求、一键测试连接；
 - 纯 Swift + 原生 socket 实现，**零第三方依赖**，所有请求只从你的机器直连上游，数据不出本机。
 
 ## 功能
 
-- **多供应商聚合**：一个 OpenAI 兼容端点路由到 DeepSeek / CodeBuddy / Antigravity / OpenAI / Cursor 等 13 家供应商
+- **多供应商聚合**：一个 OpenAI 兼容端点路由到 DeepSeek / CodeBuddy / Antigravity / Cursor 等 10 家供应商
 - **模型路由**：`provider/model` 语法或别名（`ds` / `cbcn` / `agy`），裸模型名自动归属
 - **完整 OpenAI 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/usage`、`/v1/health`
 - **网关 Key 认证**：`sk-bv-` 开头网关 Key 白名单；上游多 Key 自动轮换（401/403 时切换）
 - **SSE 流式透传**：逐事件实时转发；强制流式上游对非流式客户端自动聚合为 JSON
 - **可靠重试**：408/429/5xx 指数退避重试，尊重 `Retry-After` 头
-- **OAuth 免 Key**：CodeBuddy / Antigravity / Codex 浏览器授权登录，无需手动填 Key；Cursor 自动读取 IDE 登录令牌
+- **OAuth 免 Key**：CodeBuddy / Antigravity 浏览器授权登录，无需手动填 Key；Cursor 自动读取 IDE 登录令牌
 - **菜单栏监控**：服务器启停、供应商健康度、余额/配额窗口、请求明细（时间/模型/token/耗时/状态）
 - **配置即改即生效**：设置面板改端口、加 Key、启停供应商，保存即热更新，无需重启
 
@@ -27,15 +27,12 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 | DeepSeek | `ds` | API Key |
 | 腾讯 CodeBuddy | `cbcn` | OAuth 设备码 |
 | Google Antigravity | `agy` | Google OAuth PKCE |
-| OpenAI | `openai` | API Key |
 | opencode | `oc` | API Key |
 | Kimi（月之暗面） | `kimi` | API Key |
 | opencode-go | `ocgo` | API Key |
 | 小米 MiMo | `mimo` | API Key |
-| 通义千问 | `qwc` | API Key |
 | 智谱 z.ai | `zai` | API Key |
 | MiniMax | `mm` | API Key |
-| OpenAI Codex | `cx` | ChatGPT 订阅账号 OAuth |
 | Cursor | `cu` | IDE 登录令牌 / API Key |
 
 ## 下载
@@ -110,7 +107,7 @@ BinviaCLI providers list
 # 测试供应商可用性
 BinviaCLI test deepseek
 
-# OAuth 登录（CodeBuddy / Antigravity / Codex）
+# OAuth 登录（CodeBuddy / Antigravity）
 BinviaCLI oauth login codebuddy-cn
 
 # Cursor IDE 令牌检测

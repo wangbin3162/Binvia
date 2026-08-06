@@ -6,7 +6,6 @@ enum SettingsPane: Hashable {
     case general
     case test
     case gatewayKeys
-    case compatProviders
     case about
     case provider(String)
 
@@ -16,7 +15,6 @@ enum SettingsPane: Hashable {
         case .general: return "服务器"
         case .test: return "测试"
         case .gatewayKeys: return "网关密钥"
-        case .compatProviders: return "自定义供应商"
         case .about: return "关于"
         case let .provider(id): return id
         }
@@ -28,7 +26,6 @@ enum SettingsPane: Hashable {
         case .general: return "gearshape"
         case .test: return "waveform"
         case .gatewayKeys: return "key.fill"
-        case .compatProviders: return "plus.rectangle.on.rectangle"
         case .about: return "info.circle"
         case .provider: return nil
         }
@@ -40,7 +37,6 @@ enum SettingsPane: Hashable {
         case .general: return .blue
         case .test: return .purple
         case .gatewayKeys: return .orange
-        case .compatProviders: return .green
         case .about: return .teal
         case .provider: return .accentColor
         }

@@ -8,7 +8,7 @@ import AppKit
 // 用法：
 //   BinviaCLI providers list
 //   BinviaCLI test <provider>
-//   BinviaCLI oauth login <codebuddy-cn|antigravity|codex>
+//   BinviaCLI oauth login <codebuddy-cn|antigravity>
 //   BinviaCLI cursor status
 //   BinviaCLI config path
 //   BinviaCLI serve [--port N] [--config PATH]
@@ -21,7 +21,7 @@ func usage() {
     Usage:
       BinviaCLI providers list
       BinviaCLI test <provider|alias>
-      BinviaCLI oauth login <codebuddy-cn|antigravity|codex>
+      BinviaCLI oauth login <codebuddy-cn|antigravity>
       BinviaCLI cursor status
       BinviaCLI config path
       BinviaCLI serve [--port N] [--config PATH]
@@ -114,7 +114,7 @@ case "test":
 
 case "oauth":
     guard args.count >= 3, args[1] == "login" else {
-        print("usage: BinviaCLI oauth login <codebuddy-cn|antigravity|codex>")
+        print("usage: BinviaCLI oauth login <codebuddy-cn|antigravity>")
         exit(1)
     }
     let providerName = args[2]
@@ -152,36 +152,8 @@ case "oauth":
         } else {
             print("Antigravity 登录成功（未获取到 projectId，运行时将自动发现）。")
         }
-    case "codex", "cx":
-        let client = CodexOAuthClient(config: .live())
-        let credentials = try await client.login(
-            openURL: { url in
-                print("请在浏览器中打开授权地址…")
-                openInBrowser(url)
-            },
-            codeProvider: { _ in
-                print("请在浏览器完成授权后，把重定向地址（或 authorization code）粘贴到这里：")
-                guard let line = readLine(), let code = extractAuthorizationCode(from: line) else {
-                    throw ProviderError.missingCredentials("未提供 authorization code")
-                }
-                return code
-            }
-        )
-        let credential = ProviderCredential(
-            accessToken: credentials.accessToken,
-            refreshToken: credentials.refreshToken,
-            email: credentials.email,
-            expiresAt: credentials.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-            workspaceId: credentials.workspaceId
-        )
-        try saveCredential(credential, for: "codex", configPath: value(for: "--config"))
-        if let workspaceId = credentials.workspaceId {
-            print("Codex 登录成功（workspaceId: \(workspaceId)）。可用 `BinviaCLI test codex` 验证。")
-        } else {
-            print("Codex 登录成功（未获取到 workspaceId，将使用默认账号）。可用 `BinviaCLI test codex` 验证。")
-        }
     default:
-        print("未知供应商：\(providerName)（支持 codebuddy-cn / antigravity / codex）")
+        print("未知供应商：\(providerName)（支持 codebuddy-cn / antigravity）")
         exit(1)
     }
 

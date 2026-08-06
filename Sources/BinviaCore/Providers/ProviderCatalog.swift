@@ -7,18 +7,15 @@ public enum ProviderCatalog {
         ProviderRegistry.shared.register(DeepSeekProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(CodeBuddyCNProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(AntigravityProviderDescriptor.descriptor)
-        ProviderRegistry.shared.register(OpenAIProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(OpenCodeProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(KimiProviderDescriptor.descriptor)
-        // Phase 18：OpenAI 兼容（opencode-go / xiaomi-mimo / qwen-cloud）
+        // Phase 18：OpenAI 兼容（opencode-go / xiaomi-mimo）
         ProviderRegistry.shared.register(OpenCodeGoProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(XiaomiMimoProviderDescriptor.descriptor)
-        ProviderRegistry.shared.register(QwenCloudProviderDescriptor.descriptor)
         // Phase 18：Anthropic 兼容（zai / minimax）
         ProviderRegistry.shared.register(ZaiProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(MiniMaxProviderDescriptor.descriptor)
-        // Phase 19：codex / cursor（参考 OmniRoute）
-        ProviderRegistry.shared.register(CodexProviderDescriptor.descriptor)
+        // Phase 19：cursor（参考 OmniRoute）
         ProviderRegistry.shared.register(CursorProviderDescriptor.descriptor)
     }
 
