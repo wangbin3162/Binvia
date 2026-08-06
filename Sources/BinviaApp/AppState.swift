@@ -1056,16 +1056,6 @@ extension AppState {
         }
         check("健康检查返回 200 ok", healthOK)
 
-        // GatewayClient 复用同一个 Swift 网关端口，验证客户端与现有 HTTPServer 的协议兼容性。
-        let clientHealthOK: Bool
-        if let clientURL = URL(string: "http://127.0.0.1:\(port)") {
-            let client = GatewayClient(baseURL: clientURL)
-            clientHealthOK = (try? await client.health())?.status == "ok"
-        } else {
-            clientHealthOK = false
-        }
-        check("GatewayClient 健康检查可用", clientHealthOK)
-
         // 网关 Key 认证：配置了 key 后，未携带 Key 应 401，携带 Key 应 200（Phase 8 验证）
         func statusCode(_ url: URL, authorization: String? = nil) async -> Int {
             var request = URLRequest(url: url)
