@@ -9,7 +9,6 @@ import AppKit
 //   BinviaCLI providers list
 //   BinviaCLI test <provider>
 //   BinviaCLI oauth login <codebuddy-cn|antigravity>
-//   BinviaCLI cursor status
 //   BinviaCLI config path
 //   BinviaCLI serve [--port N] [--config PATH]
 
@@ -22,7 +21,6 @@ func usage() {
       BinviaCLI providers list
       BinviaCLI test <provider|alias>
       BinviaCLI oauth login <codebuddy-cn|antigravity>
-      BinviaCLI cursor status
       BinviaCLI config path
       BinviaCLI serve [--port N] [--config PATH]
     """)
@@ -154,109 +152,6 @@ case "oauth":
         }
     default:
         print("未知供应商：\(providerName)（支持 codebuddy-cn / antigravity）")
-        exit(1)
-    }
-
-case "cursor":
-    guard args.count >= 2 else {
-        print("usage: BinviaCLI cursor <status|add|list|remove>")
-        exit(1)
-    }
-    switch args[1] {
-    case "status":
-        let detection = await CursorCredentialStore.shared.refresh()
-        switch detection {
-        case .found(let identity):
-            print("✅ 已检测到 Cursor IDE 登录")
-            print("accessToken: \(identity.accessToken.prefix(16))•••（长度 \(identity.accessToken.count)）")
-            if let expiresAt = identity.expiresAt {
-                print("过期时间: \(expiresAt.formatted())（IDE 会自动轮换）")
-            } else {
-                print("过期时间: 未知（JWT 不含 exp 或格式异常）")
-            }
-            if let machineId = identity.machineId {
-                print("machineId: \(machineId)")
-            }
-        case .noInstallation:
-            print("❌ 未检测到 Cursor IDE（未找到 state.vscdb）")
-            print("查找路径:")
-            for path in await CursorCredentialStore().candidatePaths() {
-                print("  \(path)")
-            }
-        case .notSignedIn:
-            print("❌ Cursor 已安装但未登录（state.vscdb 中无 cursorAuth/accessToken）")
-            print("请先打开 Cursor IDE 并登录账号。")
-        case .unreadable(let message):
-            print("❌ 无法读取 Cursor 数据库: \(message)")
-        }
-    case "add":
-        // 手动导入账号：BinviaCLI cursor add <accessToken> [machineId]
-        guard args.count >= 3 else {
-            print("usage: BinviaCLI cursor add <accessToken> [machineId]")
-            exit(1)
-        }
-        let token = args[2].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else {
-            print("❌ accessToken 不能为空")
-            exit(1)
-        }
-        let machineId = args.count >= 4
-            ? args[3].trimmingCharacters(in: .whitespacesAndNewlines)
-            : ""
-        var config = try ConfigStore.load()
-        var providerConfig = config.providers["cursor"] ?? ProviderConfig()
-        providerConfig.enabled = true
-        var credential = providerConfig.credential
-        if credential.accessToken == nil || credential.accessToken!.isEmpty {
-            // 首次添加：写入主账号（credential）
-            credential.accessToken = token
-            credential.machineId = machineId.isEmpty ? credential.machineId : machineId
-        } else {
-            // 追加为轮换账号（apiKeys[]，machineId 编码进标签前缀 `mid:`）
-            var tokens = providerConfig.apiKeys
-            let label = machineId.isEmpty ? KeyedToken.defaultLabel(for: token) : "mid:\(machineId)"
-            tokens.append(KeyedToken(label: label, value: token))
-            providerConfig.apiKeys = tokens
-        }
-        providerConfig.credential = credential
-        config.providers["cursor"] = providerConfig
-        try ConfigStore.save(config, to: nil)
-        print("✅ 已添加 Cursor 账号（token 长度 \(token.count)）")
-    case "list":
-        let config = try ConfigStore.load()
-        guard let pc = config.providers["cursor"] else {
-            print("未配置 Cursor 账号")
-            exit(0)
-        }
-        var index = 1
-        if let access = pc.credential.accessToken, !access.isEmpty {
-            print("\(index). 主账号: \(access.prefix(16))•••（长度 \(access.count)）")
-            if let mid = pc.credential.machineId {
-                print("   machineId: \(mid)")
-            }
-            index += 1
-        }
-        for token in pc.apiKeys where !token.value.isEmpty {
-            var label = token.label
-            if label.hasPrefix("mid:") { label = "账号" }
-            print("\(index). \(label): \(token.value.prefix(16))•••（长度 \(token.value.count)）")
-            index += 1
-        }
-        if index == 1 {
-            print("未配置 Cursor 账号")
-        }
-    case "remove":
-        // 清空全部手动导入账号：BinviaCLI cursor remove
-        var config = try ConfigStore.load()
-        var providerConfig = config.providers["cursor"] ?? ProviderConfig()
-        providerConfig.credential.accessToken = nil
-        providerConfig.credential.machineId = nil
-        providerConfig.apiKeys = []
-        config.providers["cursor"] = providerConfig
-        try ConfigStore.save(config, to: nil)
-        print("✅ 已移除全部 Cursor 手动账号（IDE 自动发现仍可用）")
-    default:
-        print("usage: BinviaCLI cursor <status|add|list|remove>")
         exit(1)
     }
 

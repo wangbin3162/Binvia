@@ -1,7 +1,5 @@
 import Foundation
 import BinviaCore
-import SQLite3
-import zlib
 
 // BinviaCheck — 自包含可运行测试（无 XCTest 依赖）。
 // 本机仅安装 CommandLineTools（无 xctest），`swift test` 不可用，
@@ -1691,11 +1689,11 @@ func antigravityUsageFetcherTests() async throws {
     }
 }
 
-// MARK: - Phase 18: Anthropic 信封翻译器（纯单测）
+// MARK: - Phase 18: zai / minimax 集成（URLProtocol mock，无本地 HTTPServer）
 
-/// Anthropic 兼容上游请求体记录器（锁保护），供 zai / minimax 测试断言。
-private final class AnthropicMockState: @unchecked Sendable {
-    static let shared = AnthropicMockState()
+/// OpenAI 兼容上游请求体记录器（锁保护），供 zai / minimax 测试断言。
+private final class OpenAIPassthroughMockState: @unchecked Sendable {
+    static let shared = OpenAIPassthroughMockState()
     private let lock = NSLock()
     private var bodies: [String] = []
 
@@ -1720,146 +1718,23 @@ private final class AnthropicMockState: @unchecked Sendable {
     }
 }
 
-/// 构造带 `event:` 行的 Anthropic SSE 事件。
-func anthropicEvent(_ type: String, _ payload: String) -> String {
-    "event: \(type)\ndata: \(payload)\n\n"
+/// 构造 OpenAI 格式 SSE 数据事件。
+func openAIEvent(_ json: String) -> String {
+    "data: \(json)\n\n"
 }
 
-func anthropicTranslatorTests() {
-    // —— 请求方向 ——
-    let requestMessages: [ChatMessage] = [
-        ChatMessage(role: .system, content: "You are helpful"),
-        ChatMessage(role: .user, content: "Hello"),
-        ChatMessage(role: .assistant, content: "Hi there"),
-        ChatMessage(role: .tool, content: "tool result"),
-        ChatMessage(role: .user, content: "again"),
-    ]
-    let body = AnthropicEnvelopeTranslator.makeAnthropicRequest(
-        model: "glm-5.2", messages: requestMessages, system: "sys", maxTokens: nil, stream: true
-    )
-    expectEqual(body["model"] as? String, "glm-5.2", "Anthropic body model")
-    expectEqual(body["max_tokens"] as? Int, 4096, "Anthropic max_tokens 未传时默认 4096")
-    expectEqual(body["stream"] as? Bool, true, "Anthropic stream 透传")
-    expectEqual(body["system"] as? String, "sys", "Anthropic system 独立提取")
-    if let msgs = body["messages"] as? [[String: Any]] {
-        expectEqual(msgs.count, 4, "Anthropic messages 排除 system 且保留顺序")
-        expectEqual(msgs[0]["role"] as? String, "user", "user role 映射")
-        expectEqual(msgs[0]["content"] as? String, "Hello", "user content 保留")
-        expectEqual(msgs[1]["role"] as? String, "assistant", "assistant role 映射")
-        expectEqual(msgs[2]["role"] as? String, "user", "tool role 映射为 user")
-        expectEqual(msgs[3]["role"] as? String, "user", "尾部 user 保留")
-    } else {
-        failed += 1
-        print("FAIL: Anthropic messages 结构解析失败")
-    }
-
-    // 显式 max_tokens；无 system 时省略 system 字段
-    let body2 = AnthropicEnvelopeTranslator.makeAnthropicRequest(
-        model: "m", messages: [ChatMessage(role: .user, content: "hi")], system: nil, maxTokens: 128, stream: false
-    )
-    expectEqual(body2["max_tokens"] as? Int, 128, "Anthropic max_tokens 显式值")
-    expectEqual(body2["stream"] as? Bool, false, "Anthropic stream=false 透传")
-    expectNil(body2["system"], "无 system 消息时省略 system 字段")
-
-    // —— 响应方向 ——
-    var hasRole = false
-    var lastStop: String?
-
-    // message_start 忽略
-    let start = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "message_start", "message": ["id": "msg_1"]],
-        model: "glm-5.2", id: "msg_1", created: 1,
-        hasEmittedRole: &hasRole, lastStopReason: &lastStop
-    )
-    expectNil(start, "message_start 忽略")
-
-    // content_block_delta → 内容块（首个带 role）
-    let delta1 = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "content_block_delta", "delta": ["type": "text_delta", "text": "Hello"]],
-        model: "glm-5.2", id: "msg_1", created: 1,
-        hasEmittedRole: &hasRole, lastStopReason: &lastStop
-    )
-    expectTrue(delta1 != nil, "text_delta 产出 chunk")
-    if let delta1 {
-        expectEqual(delta1["object"] as? String, "chat.completion.chunk", "chunk object")
-        expectEqual(delta1["model"] as? String, "glm-5.2", "chunk model")
-        if let choices = delta1["choices"] as? [[String: Any]], let first = choices.first {
-            let d = first["delta"] as? [String: Any]
-            expectEqual(d?["role"] as? String, "assistant", "首个内容块发射 role")
-            expectEqual(d?["content"] as? String, "Hello", "内容块 content")
-        } else {
-            failed += 1
-            print("FAIL: chunk choices 结构")
-        }
-    }
-
-    // 第二个内容块不再发射 role
-    let delta2 = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "content_block_delta", "delta": ["type": "text_delta", "text": " world"]],
-        model: "glm-5.2", id: "msg_1", created: 1,
-        hasEmittedRole: &hasRole, lastStopReason: &lastStop
-    )
-    if let delta2, let choices = delta2["choices"] as? [[String: Any]], let first = choices.first {
-        let d = first["delta"] as? [String: Any]
-        expectNil(d?["role"], "第二个内容块不再发射 role")
-        expectEqual(d?["content"] as? String, " world", "第二个内容块 content")
-    } else {
-        failed += 1
-        print("FAIL: 第二个内容块结构")
-    }
-
-    // message_delta end_turn → finish_reason stop
-    let stop = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "message_delta", "delta": ["stop_reason": "end_turn"]],
-        model: "glm-5.2", id: "msg_1", created: 1,
-        hasEmittedRole: &hasRole, lastStopReason: &lastStop
-    )
-    if let stop, let choices = stop["choices"] as? [[String: Any]], let first = choices.first {
-        expectEqual(first["finish_reason"] as? String, "stop", "end_turn → stop")
-        expectEqual((first["delta"] as? [String: Any])?.isEmpty, true, "finish chunk delta 为空")
-    } else {
-        failed += 1
-        print("FAIL: message_delta chunk 结构")
-    }
-    expectEqual(lastStop, "stop", "lastStopReason 记录 stop")
-
-    // message_delta max_tokens → length
-    var hasRole2 = true
-    var lastStop2: String?
-    let length = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "message_delta", "delta": ["stop_reason": "max_tokens"]],
-        model: "m", id: "x", created: 1, hasEmittedRole: &hasRole2, lastStopReason: &lastStop2
-    )
-    if let length, let choices = length["choices"] as? [[String: Any]], let first = choices.first {
-        expectEqual(first["finish_reason"] as? String, "length", "max_tokens → length")
-    } else {
-        failed += 1
-        print("FAIL: max_tokens chunk 结构")
-    }
-    expectEqual(lastStop2, "length", "lastStopReason 记录 length")
-
-    // message_stop 忽略
-    var hasRole3 = false
-    var lastStop3: String?
-    let stopEvent = AnthropicEnvelopeTranslator.translateSSEPayload(
-        ["type": "message_stop"], model: "m", id: "x", created: 1,
-        hasEmittedRole: &hasRole3, lastStopReason: &lastStop3
-    )
-    expectNil(stopEvent, "message_stop 忽略")
-}
-
-// MARK: - Phase 18: zai / minimax 集成（URLProtocol mock，无本地 HTTPServer）
-
-/// zai / minimax 共享集成测试：stream=true 透传 OpenAI SSE，stream=false 聚合，
-/// 并断言上游请求体（恒 stream:true + max_tokens + 正确 roles）。
-func runAnthropicCompatSuite(
+/// zai / minimax 共享集成测试（OpenAI 兼容透传模式）：
+/// stream=true 透传 OpenAI SSE，stream=false 同样透传（客户端 stream 标志原样转发，
+/// 上游返回单 JSON 时即单 JSON）；断言 Bearer 认证头 + rawBody 透传
+/// `tools` / `tool_calls` / `tool_result` —— 工具调用正常的关键回归用例。
+func runOpenAIPassthroughSuite(
     providerID: String,
     makeProvider: () -> any Provider,
     apiKeyEnv: String,
     baseURLEnv: String,
     chatModel: String
 ) async throws {
-    AnthropicMockState.shared.reset()
+    OpenAIPassthroughMockState.shared.reset()
     unsetenv(apiKeyEnv)
     unsetenv(baseURLEnv)
     defer {
@@ -1867,7 +1742,7 @@ func runAnthropicCompatSuite(
         unsetenv(baseURLEnv)
     }
     setenv(apiKeyEnv, "mock-key", 1)
-    setenv(baseURLEnv, "https://mock.test/anthropic/v1/messages", 1)
+    setenv(baseURLEnv, "https://mock.test/v1", 1)
 
     URLProtocol.registerClass(URLProtocolMock.self)
     defer {
@@ -1876,23 +1751,26 @@ func runAnthropicCompatSuite(
     }
 
     let sse =
-        anthropicEvent("message_start", #"{"type":"message_start","message":{"id":"msg_\#(providerID)_1","role":"assistant","content":[],"model":"\#(chatModel)","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}"#)
-        + anthropicEvent("content_block_start", #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#)
-        + anthropicEvent("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
-        + anthropicEvent("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#)
-        + anthropicEvent("message_delta", #"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#)
-        + anthropicEvent("message_stop", #"{"type":"message_stop"}"#)
+        openAIEvent(#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"\#(chatModel)","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}"#)
+        + openAIEvent(#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"\#(chatModel)","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}"#)
+        + openAIEvent(#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"\#(chatModel)","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#)
+        + "data: [DONE]\n\n"
 
     URLProtocolMock.reset()
     URLProtocolMock.requestHandler = { request in
         expectEqual(
             request.url?.absoluteString,
-            "https://mock.test/anthropic/v1/messages?beta=true",
-            "\(providerID) 请求 URL 带 ?beta=true"
+            "https://mock.test/v1/chat/completions",
+            "\(providerID) 请求 OpenAI 兼容 /chat/completions 端点"
         )
-        expectEqual(request.value(forHTTPHeaderField: "x-api-key"), "mock-key", "\(providerID) x-api-key 头")
-        expectEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01", "\(providerID) anthropic-version 头")
-        AnthropicMockState.shared.record(body: Data((requestBodyString(request) ?? "").utf8))
+        expectEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer mock-key",
+            "\(providerID) Bearer 认证头"
+        )
+        expectNil(request.value(forHTTPHeaderField: "x-api-key"), "\(providerID) 不应带 x-api-key 头")
+        expectNil(request.value(forHTTPHeaderField: "anthropic-version"), "\(providerID) 不应带 anthropic-version 头")
+        OpenAIPassthroughMockState.shared.record(body: Data((requestBodyString(request) ?? "").utf8))
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: nil,
             headerFields: ["Content-Type": "text/event-stream"]
@@ -1900,45 +1778,61 @@ func runAnthropicCompatSuite(
         return (response, Data(sse.utf8))
     }
 
-    // 1) 客户端 stream=true：OpenAI 格式 SSE 透传（内容 + role + finish_reason + [DONE]）
+    // 1) 客户端 stream=true：OpenAI SSE 透传（内容 + role + finish_reason + [DONE]）
     let streamReq = ChatRequest(model: chatModel, messages: [ChatMessage(role: .user, content: "hi")], stream: true)
     let stream = try await makeProvider().chat(request: streamReq, rawBody: nil, credential: nil)
     var collected = Data()
     for try await chunk in stream { collected.append(chunk) }
     let text = String(data: collected, encoding: .utf8) ?? ""
-    expectTrue(text.contains(#""content":"Hello""#), "\(providerID) 流式翻译内容块 Hello，实际: \(text)")
-    expectTrue(text.contains(#""content":" world""#), "\(providerID) 流式翻译内容块 world")
-    expectTrue(text.contains(#""role":"assistant""#), "\(providerID) 首个内容块带 role")
-    expectTrue(text.contains(#""finish_reason":"stop""#), "\(providerID) 流式 finish_reason stop")
-    expectTrue(text.contains("[DONE]"), "\(providerID) 流式以 [DONE] 结束")
+    expectTrue(text.contains(#""content":"Hello""#), "\(providerID) 透传内容块 Hello，实际: \(text)")
+    expectTrue(text.contains(#""content":" world""#), "\(providerID) 透传内容块 world")
+    expectTrue(text.contains(#""role":"assistant""#), "\(providerID) 透传 role")
+    expectTrue(text.contains(#""finish_reason":"stop""#), "\(providerID) 透传 finish_reason stop")
+    expectTrue(text.contains("[DONE]"), "\(providerID) 以 [DONE] 结束")
 
-    // 上游请求体断言：恒 stream:true + max_tokens + messages 正确 roles
-    expectEqual(AnthropicMockState.shared.requestCount, 1, "\(providerID) chat 请求上游一次")
-    let upstreamBody = AnthropicMockState.shared.lastBody ?? ""
-    expectTrue(upstreamBody.contains("\"stream\":true"), "\(providerID) 上游请求体恒 stream=true，实际: \(upstreamBody)")
-    expectTrue(upstreamBody.contains("\"max_tokens\":4096"), "\(providerID) 上游请求体默认 max_tokens=4096，实际: \(upstreamBody)")
-    expectTrue(upstreamBody.contains("\"model\":\"\(chatModel)\""), "\(providerID) 上游请求体 model")
-    expectTrue(upstreamBody.contains("\"role\":\"user\""), "\(providerID) 上游请求体 user role，实际: \(upstreamBody)")
-
-    // 2) 客户端 stream=false：聚合成单个 OpenAI JSON
-    AnthropicMockState.shared.reset()
+    // 2) 客户端 stream=false：透传（不聚合、不强制改 stream），stream 标志原样转发
+    OpenAIPassthroughMockState.shared.reset()
     let nonStreamReq = ChatRequest(model: chatModel, messages: [ChatMessage(role: .user, content: "hi")], stream: false)
     let nonStream = try await makeProvider().chat(request: nonStreamReq, rawBody: nil, credential: nil)
-    var chunks: [Data] = []
-    for try await chunk in nonStream { chunks.append(chunk) }
-    expectEqual(chunks.count, 1, "\(providerID) 非流式客户端拿单个聚合 JSON 块")
-    if let json = try? JSONSerialization.jsonObject(with: chunks[0]) as? [String: Any],
-       let choices = json["choices"] as? [[String: Any]],
-       let first = choices.first,
-       let message = first["message"] as? [String: Any] {
-        expectEqual(message["content"] as? String, "Hello world", "\(providerID) 聚合内容")
-        expectEqual(first["finish_reason"] as? String, "stop", "\(providerID) 聚合 finish_reason")
-        expectEqual(json["model"] as? String, chatModel, "\(providerID) 聚合 model")
-    } else {
-        failed += 1
-        print("FAIL: \(providerID) 聚合 JSON 结构解析失败")
-    }
-    expectEqual(AnthropicMockState.shared.requestCount, 1, "\(providerID) 非流式也请求一次（恒 stream:true）")
+    var raw = Data()
+    for try await chunk in nonStream { raw.append(chunk) }
+    let rawText = String(data: raw, encoding: .utf8) ?? ""
+    expectTrue(rawText.contains(#""content":"Hello""#), "\(providerID) 非流式同样透传内容块 Hello")
+    expectTrue(rawText.contains("[DONE]"), "\(providerID) 非流式同样透传 [DONE]")
+    let nonStreamBody = OpenAIPassthroughMockState.shared.lastBody ?? ""
+    expectTrue(nonStreamBody.contains("\"stream\":false"), "\(providerID) 非流式请求体透传 stream=false，实际: \(nonStreamBody)")
+
+    // 3) 工具调用回归：rawBody 透传 tools / tool_calls / tool_result，上游原样收到
+    OpenAIPassthroughMockState.shared.reset()
+    let toolRequestJSON: [String: Any] = [
+        "model": chatModel,
+        "stream": true,
+        "messages": [
+            ["role": "user", "content": "查询北京天气"],
+            [
+                "role": "assistant",
+                "content": NSNull(),
+                "tool_calls": [
+                    ["id": "call_1", "type": "function", "function": ["name": "get_weather", "arguments": "{\"city\":\"北京\"}"]],
+                ],
+            ],
+            ["role": "tool", "tool_call_id": "call_1", "content": "晴，25°C"],
+            ["role": "user", "content": "然后呢"],
+        ],
+        "tools": [
+            ["type": "function", "function": ["name": "get_weather", "description": "查询天气", "parameters": ["type": "object", "properties": ["city": ["type": "string"]]]]],
+        ],
+    ]
+    let toolRawBody = try JSONSerialization.data(withJSONObject: toolRequestJSON)
+    let toolReq = ChatRequest(model: chatModel, messages: [], stream: true)
+    let toolStream = try await makeProvider().chat(request: toolReq, rawBody: toolRawBody, credential: nil)
+    _ = try? await toolStream.first(where: { _ in true })
+    let toolBody = OpenAIPassthroughMockState.shared.lastBody ?? ""
+    expectTrue(toolBody.contains(#""tools""#), "\(providerID) 透传请求体保留 tools，实际: \(toolBody)")
+    expectTrue(toolBody.contains(#""get_weather""#), "\(providerID) 透传请求体保留工具定义，实际: \(toolBody)")
+    expectTrue(toolBody.contains(#""tool_calls""#), "\(providerID) 透传请求体保留 tool_calls，实际: \(toolBody)")
+    expectTrue(toolBody.contains(#""tool_call_id""#), "\(providerID) 透传请求体保留 tool 结果，实际: \(toolBody)")
+    expectEqual(OpenAIPassthroughMockState.shared.requestCount, 1, "\(providerID) 工具请求上游一次")
 }
 
 func zaiIntegrationTests() async throws {
@@ -1957,7 +1851,7 @@ func zaiIntegrationTests() async throws {
         )
     }, "zai 无凭据时 chat 抛 missingCredentials")
 
-    try await runAnthropicCompatSuite(
+    try await runOpenAIPassthroughSuite(
         providerID: "zai",
         makeProvider: { ZaiProvider() },
         apiKeyEnv: "ZAI_API_KEY",
@@ -1992,23 +1886,23 @@ func zaiIntegrationTests() async throws {
 
     let globalURL = await captureURL(ProviderCredential(apiKey: "mock-key", region: "global"))
     expectTrue(
-        globalURL.hasPrefix("https://api.z.ai/api/anthropic/v1/messages?beta=true"),
-        "zai region=global → api.z.ai，实际: \(globalURL)")
+        globalURL.hasPrefix("https://api.z.ai/api/coding/paas/v4/chat/completions"),
+        "zai region=global → api.z.ai/coding/paas/v4，实际: \(globalURL)")
 
     let cnURL = await captureURL(ProviderCredential(apiKey: "mock-key", region: "bigmodel-cn"))
     expectTrue(
-        cnURL.hasPrefix("https://open.bigmodel.cn/api/anthropic/v1/messages?beta=true"),
-        "zai region=bigmodel-cn → open.bigmodel.cn，实际: \(cnURL)")
+        cnURL.hasPrefix("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
+        "zai region=bigmodel-cn → open.bigmodel.cn/coding/paas/v4，实际: \(cnURL)")
 
     let nilURL = await captureURL(ProviderCredential(apiKey: "mock-key"))
     expectTrue(
-        nilURL.hasPrefix("https://open.bigmodel.cn/api/anthropic/v1/messages?beta=true"),
+        nilURL.hasPrefix("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
         "zai 缺省 region → 默认 BigModel CN，实际: \(nilURL)")
     unsetenv("ZAI_API_KEY")
 }
 
 func minimaxIntegrationTests() async throws {
-    try await runAnthropicCompatSuite(
+    try await runOpenAIPassthroughSuite(
         providerID: "minimax",
         makeProvider: { MiniMaxProvider() },
         apiKeyEnv: "MINIMAX_API_KEY",
@@ -2100,407 +1994,6 @@ func xiaomiMimoIntegrationTests() async throws {
         baseURLEnv: "XIAOMI_MIMO_BASE_URL",
         chatModel: "MiMo-V2.5"
     )
-}
-
-// MARK: - Phase 19: cursor 集成（URLProtocol mock，OpenAI 兼容）
-
-func cursorIntegrationTests() async throws {
-    try await runOpenAICompatSuite(
-        providerID: "cursor",
-        makeProvider: { CursorProvider() },
-        apiKeyEnv: "CURSOR_API_KEY",
-        baseURLEnv: "CURSOR_BASE_URL",
-        chatModel: "claude-sonnet-4-5"
-    )
-}
-
-// MARK: - Phase 20: Cursor IDE 接入（凭据发现 + IDE 模式 Provider）
-
-/// 造一个临时的 Cursor state.vscdb fixture（itemTable + 指定键值）。
-func makeCursorFixtureDB(at path: String, token: String?, machineId: String?) {
-    try? FileManager.default.removeItem(atPath: path)
-    var db: OpaquePointer?
-    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { return }
-    defer { sqlite3_close(db) }
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS itemTable (key TEXT PRIMARY KEY, value TEXT);", nil, nil, nil)
-    func insert(_ key: String, _ value: String) {
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO itemTable (key, value) VALUES (?1, ?2);", -1, &stmt, nil) == SQLITE_OK else { return }
-        value.withCString { v in
-            sqlite3_bind_text(stmt, 1, key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            sqlite3_bind_text(stmt, 2, v, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        }
-        sqlite3_step(stmt)
-    }
-    if let token { insert("cursorAuth/accessToken", token) }
-    if let machineId { insert("storage.serviceMachineId", machineId) }
-}
-
-func cursorCredentialStoreTests() async throws {
-    // 环境隔离：清掉可能影响本机真实凭据的变量
-    unsetenv("CURSOR_STATE_DB_PATH")
-    unsetenv("CURSOR_TOKEN")
-    let dir = NSTemporaryDirectory() + "binvia-cursor-\(UUID().uuidString)"
-    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let dbPath = dir + "/state.vscdb"
-    defer {
-        unsetenv("CURSOR_STATE_DB_PATH")
-        unsetenv("CURSOR_TOKEN")
-        try? FileManager.default.removeItem(atPath: dir)
-    }
-
-    // 1) 正常读取：token + machineId
-    setenv("CURSOR_STATE_DB_PATH", dbPath, 1)
-    makeCursorFixtureDB(at: dbPath, token: "eyJ.payload.sig", machineId: "MACHINE-1")
-    let d1 = await CursorCredentialStore().detect()
-    guard case .found(let id1) = d1 else {
-        expectTrue(false, "正常 fixture 应检测到凭据")
-        return
-    }
-    expectEqual(id1.accessToken, "eyJ.payload.sig", "accessToken 解析")
-    expectEqual(id1.machineId, "MACHINE-1", "machineId 解析")
-
-    // 2) `{userId}::{jwt}` 双段格式 → 剥离前缀
-    makeCursorFixtureDB(at: dbPath, token: "user-123::eyJ.payload.sig", machineId: nil)
-    let d2 = await CursorCredentialStore().detect()
-    guard case .found(let id2) = d2 else {
-        expectTrue(false, "双段格式应检测到凭据")
-        return
-    }
-    expectEqual(id2.accessToken, "eyJ.payload.sig", "剥离 userId:: 前缀")
-
-    // 3) `"..."` JSON 字符串包裹 → 解包
-    makeCursorFixtureDB(at: dbPath, token: #""eyJ.payload.sig""#, machineId: nil)
-    let d3 = await CursorCredentialStore().detect()
-    guard case .found(let id3) = d3 else {
-        expectTrue(false, "JSON 包裹格式应检测到凭据")
-        return
-    }
-    expectEqual(id3.accessToken, "eyJ.payload.sig", "JSON 字符串包裹解包")
-
-    // 4) JWT exp 解析（payload 段含 exp 秒级时间戳）
-    // base64url("{\"exp\": 1893456000}") = eyJleHAiOiAxODkzNDU2MDAwfQ
-    makeCursorFixtureDB(at: dbPath, token: "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOiAxODkzNDU2MDAwfQ.sig", machineId: nil)
-    let d4 = await CursorCredentialStore().detect()
-    guard case .found(let id4) = d4 else {
-        expectTrue(false, "JWT fixture 应检测到凭据")
-        return
-    }
-    expectEqual(id4.expiresAt, Date(timeIntervalSince1970: 1_893_456_000), "JWT exp 解析")
-
-    // 5) 无 accessToken → notSignedIn
-    makeCursorFixtureDB(at: dbPath, token: nil, machineId: "M")
-    let d5 = await CursorCredentialStore().detect()
-    expectEqual(d5, .notSignedIn, "无 accessToken → notSignedIn")
-
-    // 6) 路径不存在 → noInstallation
-    setenv("CURSOR_STATE_DB_PATH", dir + "/missing.vscdb", 1)
-    let d6 = await CursorCredentialStore().detect()
-    expectEqual(d6, .noInstallation, "路径不存在 → noInstallation")
-
-    // 7) CURSOR_TOKEN 环境覆盖（跳过 DB 读取）
-    setenv("CURSOR_TOKEN", "env-user::env-jwt", 1)
-    let d7 = await CursorCredentialStore().detect()
-    guard case .found(let id7) = d7 else {
-        expectTrue(false, "CURSOR_TOKEN 覆盖应生效")
-        return
-    }
-    expectEqual(id7.accessToken, "env-jwt", "CURSOR_TOKEN 规范化（双段剥离）")
-    unsetenv("CURSOR_TOKEN")
-
-    // 8) 缓存 TTL：fresh 缓存命中，过期后重新探测
-    setenv("CURSOR_STATE_DB_PATH", dbPath, 1)
-    makeCursorFixtureDB(at: dbPath, token: "tok-a", machineId: nil)
-    let store = CursorCredentialStore()
-    _ = await store.refresh()  // 缓存 tok-a
-    makeCursorFixtureDB(at: dbPath, token: "tok-b", machineId: nil)  // DB 更新为 tok-b
-    let cached = await store.identity()
-    expectEqual(cached?.accessToken, "tok-a", "缓存命中：返回缓存 token")
-    await store.setCacheTTL(0)  // 缓存立即过期
-    let refreshed = await store.identity()
-    expectEqual(refreshed?.accessToken, "tok-b", "缓存过期后重新探测")
-}
-
-/// Cursor 官方模型目录静态断言（防回归：auto 存在、无重复、数量与 OmniRoute 同步）。
-func cursorModelsCatalogTests() async throws {
-    let models = CursorModels.all
-    let ids = models.map(\.id)
-    // 1. 关键模型存在（用户报告缺失的）
-    for required in ["auto", "composer-2.5", "composer-2", "gpt-5.5-extra-high", "gpt-5.2-xhigh", "claude-opus-4-8-thinking-max", "claude-sonnet-5-thinking-max", "grok-4.5-xhigh", "kimi-k2.5"] {
-        expectTrue(ids.contains(required), "Cursor 目录应含 \(required)")
-    }
-    // 2. auto 排最前
-    expectEqual(ids.first, "auto", "auto 应排在最前")
-    // 3. 无重复 id
-    expectEqual(Set(ids).count, ids.count, "Cursor 目录无重复模型 id")
-    // 4. 数量与 OmniRoute 官方目录一致（2026-05 快照 123 个）
-    expectEqual(ids.count, 123, "Cursor 目录共 123 个模型（对齐 OmniRoute）")
-    // 5. 每个模型都有非空展示名
-    for m in models {
-        expectTrue(!(m.name ?? "").isEmpty, "模型 \(m.id) 应有展示名")
-    }
-}
-
-func cursorUsageFetcherTests() async throws {
-    let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMyJ9.sig"
-    setenv("CURSOR_USAGE_URL", "https://mock.test/api/dashboard/get-current-period-usage", 1)
-    setenv("CURSOR_TOKEN", token, 1)
-    defer {
-        unsetenv("CURSOR_USAGE_URL")
-        unsetenv("CURSOR_TOKEN")
-    }
-
-    try await withGlobalURLProtocolMock {
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            expectEqual(
-                request.url?.absoluteString,
-                "https://mock.test/api/dashboard/get-current-period-usage",
-                "Cursor 用量请求 URL")
-            expectEqual(
-                request.value(forHTTPHeaderField: "Cookie"),
-                "WorkosCursorSessionToken=user-123::\(token)",
-                "Cursor 用量 WorkOS Cookie")
-            expectEqual(request.value(forHTTPHeaderField: "Origin"), "https://cursor.com", "Cursor 用量 Origin")
-            expectEqual(request.value(forHTTPHeaderField: "Referer"), "https://cursor.com/dashboard/spending", "Cursor 用量 Referer")
-            expectEqual(requestBodyString(request), "{}", "Cursor 用量 POST body")
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            let body = #"{"planUsage":{"totalPercentUsed":46.5,"autoPercentUsed":93,"apiPercentUsed":0,"totalSpend":93},"billingCycleEnd":1893456000000}"#
-            return (response, Data(body.utf8))
-        }
-
-        let snapshot = try await CursorUsageFetcher().fetchUsage(credential: ProviderCredential())
-        expectEqual(snapshot.providerID, "cursor", "Cursor 用量快照 providerID")
-        expectEqual(snapshot.quotaWindows.count, 3, "Cursor 用量含三个窗口")
-        expectEqual(snapshot.quotaWindows[0].label, "总用量", "Cursor 总用量窗口")
-        expectEqual(snapshot.quotaWindows[1].label, "Auto + Composer", "Cursor Auto + Composer 窗口")
-        expectEqual(snapshot.quotaWindows[2].label, "API", "Cursor API 窗口")
-        expectEqual(snapshot.quotaWindows[0].remainingFraction, 0.535, "Cursor 总用量剩余比例")
-        expectEqual(snapshot.quotaWindows[1].remainingFraction, 0.07, "Cursor Auto + Composer 剩余比例")
-        expectEqual(snapshot.quotaWindows[2].remainingFraction, 1.0, "Cursor API 剩余比例")
-        expectEqual(snapshot.quotaWindows[0].resetAt, Date(timeIntervalSince1970: 1_893_456_000), "Cursor 计费周期重置时间")
-    }
-}
-
-func cursorIDEModeTests() async throws {
-    // IDE 模式：无 API key，走 CursorCredentialStore（CURSOR_TOKEN 注入）+ protobuf RPC 端点
-    unsetenv("CURSOR_API_KEY")
-    setenv("CURSOR_BASE_URL", "https://mock.test", 1)
-    setenv("CURSOR_TOKEN", "ide-jwt-token", 1)
-    defer {
-        unsetenv("CURSOR_API_KEY")
-        unsetenv("CURSOR_BASE_URL")
-        unsetenv("CURSOR_TOKEN")
-        unsetenv("CURSOR_STATE_DB_PATH")
-    }
-    await ModelCache.shared.invalidate("cursor")
-
-    try await withGlobalURLProtocolMock {
-        // 构造 Cursor 二进制响应：protobuf 帧（text="Hi"）+ JSON 空帧（流结束）
-        let mockBody = cursorTextFrame("Hi") + cursorEndFrame()
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            expectEqual(
-                request.url?.absoluteString,
-                "https://mock.test/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
-                "IDE 模式请求 URL（Connect-RPC 端点）")
-            expectEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/connect+proto", "IDE 模式 Content-Type")
-            expectEqual(request.value(forHTTPHeaderField: "Connect-Protocol-Version"), "1", "IDE 模式 connect-protocol-version")
-            expectEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer ide-jwt-token", "IDE 模式 Bearer 用 IDE 令牌")
-            expectEqual(request.value(forHTTPHeaderField: "x-cursor-client-type"), "ide", "IDE 头 x-cursor-client-type")
-            expectEqual(request.value(forHTTPHeaderField: "x-cursor-client-os"), "macos", "IDE 头 x-cursor-client-os")
-            expectEqual(request.value(forHTTPHeaderField: "x-cursor-client-arch"), CursorArch.current, "IDE 头 x-cursor-client-arch")
-            expectTrue(request.value(forHTTPHeaderField: "x-client-key") != nil, "IDE 头 x-client-key")
-            expectTrue(request.value(forHTTPHeaderField: "x-session-id") != nil, "IDE 头 x-session-id")
-            expectTrue(request.value(forHTTPHeaderField: "x-cursor-checksum") == nil, "CURSOR_TOKEN 注入时无 machineId → 无 checksum")
-            // 请求体：帧头 0x00 + 4 字节大端长度 + protobuf，且含模型名
-                if let body = requestBodyData(request) {
-                    expectEqual(body.first, 0x00, "IDE 请求帧类型未压缩")
-                    if body.count >= 5 {
-                        let len = Int(body[1]) << 24 | Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
-                        expectEqual(len, body.count - 5, "IDE 请求帧长度字段")
-                    }
-                    // 二进制 protobuf 不能整体转 String，直接在原始字节中搜模型名
-                    expectTrue(body.range(of: Data("claude-sonnet-4-5".utf8)) != nil, "IDE 请求含模型名")
-                } else {
-                    expectTrue(false, "IDE 请求应有二进制 body")
-                }
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil,
-                headerFields: ["Content-Type": "application/connect+proto"]
-            )!
-            return (response, mockBody)
-        }
-
-        let provider = CursorProvider()
-        let request = ChatRequest(model: "claude-sonnet-4-5", messages: [ChatMessage(role: .user, content: "hi")], stream: true)
-
-        // 1) IDE 模式：protobuf 帧 → SSE 透传（含 [DONE]）
-        let stream = try await provider.chat(request: request, rawBody: nil, credential: nil)
-        var text = ""
-        for try await chunk in stream { text += String(data: chunk, encoding: .utf8) ?? "" }
-        expectTrue(text.contains(#""content":"Hi""#), "IDE 模式 SSE 透传 text，实际: \(text)")
-        expectTrue(text.contains("[DONE]"), "IDE 模式 SSE 含 [DONE]")
-
-        // 2) gzip 帧解压 + 多消息转换（system 合并进 user）
-        let gzipMock = cursorTextFrame("gzip ok", gzipped: true) + cursorEndFrame()
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil,
-                headerFields: ["Content-Type": "application/connect+proto"]
-            )!
-            return (response, gzipMock)
-        }
-        let rawBody = Data(#"{"model":"old","messages":[{"role":"system","content":"你是助手"},{"role":"user","content":"hi"}]}"#.utf8)
-        let stream2 = try await provider.chat(request: request, rawBody: rawBody, credential: nil)
-        var text2 = ""
-        for try await chunk in stream2 { text2 += String(data: chunk, encoding: .utf8) ?? "" }
-        expectTrue(text2.contains("gzip ok"), "IDE 模式 gzip 帧解压，实际: \(text2)")
-
-        // 3) 非流式客户端：聚合为 OpenAI 单 JSON
-        let nonStream = ChatRequest(model: "claude-sonnet-4-5", messages: [ChatMessage(role: .user, content: "hi")], stream: false)
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil,
-                headerFields: ["Content-Type": "application/connect+proto"]
-            )!
-            return (response, mockBody)
-        }
-        let stream3 = try await provider.chat(request: nonStream, rawBody: nil, credential: nil)
-        var aggregated = ""
-        for try await chunk in stream3 { aggregated += String(data: chunk, encoding: .utf8) ?? "" }
-        expectTrue(aggregated.contains(#""content":"Hi""#), "IDE 模式非流式聚合 content，实际: \(aggregated)")
-        expectTrue(aggregated.contains(#"chat.completion"#), "IDE 模式非流式聚合为 OpenAI JSON")
-    }
-
-    // 4) 无任何凭据（无 API key、无 IDE 令牌、无 DB）→ 抛 missingCredentials
-    unsetenv("CURSOR_TOKEN")
-    setenv("CURSOR_STATE_DB_PATH", "/nonexistent/state.vscdb", 1)
-    await CursorCredentialStore.shared.clearCache()  // 清掉前面用例留下的缓存
-    let provider = CursorProvider()
-    let request = ChatRequest(model: "claude-sonnet-4-5", messages: [ChatMessage(role: .user, content: "hi")], stream: true)
-    do {
-        _ = try await provider.chat(request: request, rawBody: nil, credential: nil)
-        expectTrue(false, "无任何凭据时应抛 missingCredentials")
-    } catch {
-        expectTrue(error is ProviderError, "抛 ProviderError")
-    }
-
-    // 5) 手动导入账号优先：credential.accessToken + machineId → IDE 请求（不走 CursorCredentialStore）
-    setenv("CURSOR_BASE_URL", "https://mock.test", 1)
-    setenv("CURSOR_STATE_DB_PATH", "/nonexistent/state.vscdb", 1)  // 确保 IDE 自动发现不可用
-    await CursorCredentialStore.shared.clearCache()
-    defer {
-        unsetenv("CURSOR_BASE_URL")
-        unsetenv("CURSOR_STATE_DB_PATH")
-    }
-    let manualCred = ProviderCredential(accessToken: "manual-account-token", machineId: "manual-mid-123")
-    try await withGlobalURLProtocolMock {
-        URLProtocolMock.reset()
-        URLProtocolMock.requestHandler = { request in
-            expectEqual(
-                request.value(forHTTPHeaderField: "Authorization"),
-                "Bearer manual-account-token",
-                "手动账号 Bearer 用 credential.accessToken")
-            expectEqual(request.value(forHTTPHeaderField: "x-cursor-checksum"),
-                       CursorChecksum.generate(machineId: "manual-mid-123"),
-                       "手动账号 machineId 生成 checksum")
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil,
-                headerFields: ["Content-Type": "application/connect+proto"]
-            )!
-            return (response, cursorTextFrame("manual ok") + cursorEndFrame())
-        }
-        let stream = try await provider.chat(
-            request: ChatRequest(model: "gpt-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true),
-            rawBody: nil,
-            credential: manualCred)
-        var text = ""
-        for try await chunk in stream { text += String(data: chunk, encoding: .utf8) ?? "" }
-        expectTrue(text.contains("manual ok"), "手动账号模式 SSE 透传，实际: \(text)")
-    }
-
-    // 6) listModels：IDE 模式（无 API key）返回官方静态目录，含 auto / composer-*
-    unsetenv("CURSOR_API_KEY")
-    let models = try await provider.listModels(credential: nil)
-    let ids = models.map(\.id)
-    expectTrue(ids.contains("auto"), "listModels 含 auto")
-    expectTrue(ids.contains("composer-2.5"), "listModels 含 composer-2.5")
-    expectTrue(ids.contains("claude-opus-4-8-thinking-max"), "listModels 含 effort 变体")
-    expectEqual(models.count, CursorModels.all.count, "listModels 返回完整官方目录")
-    expectEqual(ids.first, "auto", "auto 排在最前")
-}
-
-// MARK: - Cursor IDE 测试辅助（手搓 Cursor 响应帧）
-
-/// 构造 Cursor protobuf 文本帧：`StreamUnifiedChatResponseWithTools.field2.text = text`。
-/// `gzipped` 时用 zlib 压缩（type=0x01，测试 gunzip 路径）。
-func cursorTextFrame(_ text: String, gzipped: Bool = false) -> Data {
-    let content = [UInt8](text.utf8)
-    // StreamUnifiedChatResponse: field 1 (string) = content
-    var chatResp = Data([0x0a, UInt8(content.count)])
-    chatResp.append(contentsOf: content)
-    // StreamUnifiedChatResponseWithTools: field 2 (message) = chatResp
-    var payload = Data([0x12, UInt8(chatResp.count)])
-    payload.append(chatResp)
-    if gzipped, let compressed = zlibCompress(payload) {
-        return Data([0x01]) + cursorLengthBytes(compressed) + compressed
-    }
-    return Data([0x00]) + cursorLengthBytes(payload) + payload
-}
-
-/// zlib 压缩（`compress2`，产生 RFC1950 zlib 流，供 gunzip 测试）。
-func zlibCompress(_ data: Data) -> Data? {
-    let src = [UInt8](data)
-    guard !src.isEmpty else { return nil }
-    var dst = [UInt8](repeating: 0, count: Int(compressBound(uLong(src.count))))
-    var dstLen = uLong(dst.count)
-    let status = src.withUnsafeBytes { (srcPtr: UnsafeRawBufferPointer) -> Int32 in
-        guard let base = srcPtr.baseAddress else { return Z_DATA_ERROR }
-        return compress2(&dst, &dstLen, base.assumingMemoryBound(to: Bytef.self), uLong(src.count), Z_BEST_SPEED)
-    }
-    guard status == Z_OK else { return nil }
-    return Data(dst.prefix(Int(dstLen)))
-}
-
-/// Cursor 流结束帧：JSON 空对象 `{}`（type=0x02）。
-func cursorEndFrame() -> Data {
-    Data([0x02, 0x00, 0x00, 0x00, 0x02]) + Data("{}".utf8)
-}
-
-/// 4 字节大端长度。
-func cursorLengthBytes(_ data: Data) -> Data {
-    let n = data.count
-    return Data([
-        UInt8((n >> 24) & 0xff),
-        UInt8((n >> 16) & 0xff),
-        UInt8((n >> 8) & 0xff),
-        UInt8(n & 0xff),
-    ])
-}
-
-/// 读取 URLRequest 的原始 body 字节（httpBody 或 httpBodyStream）。
-func requestBodyData(_ request: URLRequest) -> Data? {
-    if let body = request.httpBody { return body }
-    guard let stream = request.httpBodyStream else { return nil }
-    stream.open()
-    defer { stream.close() }
-    var data = Data()
-    let bufferSize = 4096
-    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-    defer { buffer.deallocate() }
-    while stream.hasBytesAvailable {
-        let count = stream.read(buffer, maxLength: bufferSize)
-        if count <= 0 { break }
-        data.append(buffer, count: count)
-    }
-    return data
 }
 
 // MARK: - Phase 18: Kimi 用量查询（URLProtocol mock）
@@ -3476,16 +2969,10 @@ await run("testAllModels 串行批量测试", testAllModelsSuite)
 await run("modelsURL 动态模型兜底", dynamicModelsURLSuite)
 await run("DeepSeek 用量查询（URLProtocol mock）", deepSeekUsageFetcherTests)
 await run("Antigravity 用量查询（URLProtocol mock）", antigravityUsageFetcherTests)
-await run("Anthropic 信封翻译器", anthropicTranslatorTests)
-await run("zai 集成（Anthropic SSE→OpenAI，URLProtocol mock）", zaiIntegrationTests)
-await run("minimax 集成（Anthropic SSE→OpenAI，URLProtocol mock）", minimaxIntegrationTests)
+await run("zai 集成（OpenAI 兼容透传，URLProtocol mock）", zaiIntegrationTests)
+await run("minimax 集成（OpenAI 兼容透传，URLProtocol mock）", minimaxIntegrationTests)
 await run("opencode-go 集成（URLProtocol mock）", opencodeGoIntegrationTests)
 await run("xiaomi-mimo 集成（URLProtocol mock）", xiaomiMimoIntegrationTests)
-await run("cursor 集成（URLProtocol mock）", cursorIntegrationTests)
-await run("Cursor IDE 凭据发现", cursorCredentialStoreTests)
-await run("Cursor 官方模型目录", cursorModelsCatalogTests)
-await run("Cursor 用量查询（URLProtocol mock）", cursorUsageFetcherTests)
-await run("cursor IDE 模式（URLProtocol mock）", cursorIDEModeTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
 await run("OpenCode Go 用量查询（URLProtocol mock）", openCodeGoUsageFetcherTests)
 await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFetcherTests)

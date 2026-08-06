@@ -15,8 +15,6 @@ public enum ProviderCatalog {
         // Phase 18：Anthropic 兼容（zai / minimax）
         ProviderRegistry.shared.register(ZaiProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(MiniMaxProviderDescriptor.descriptor)
-        // Phase 19：cursor（参考 OmniRoute）
-        ProviderRegistry.shared.register(CursorProviderDescriptor.descriptor)
     }
 
     /// 注册用户自定义的 OpenAI 兼容 Provider（来自 `RouteConfig.customProviderDefs`）。

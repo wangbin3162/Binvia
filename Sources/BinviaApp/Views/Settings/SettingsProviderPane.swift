@@ -29,15 +29,6 @@ struct SettingsProviderPane: View {
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
     @State private var isManualTokenExpanded = false
 
-    /// Cursor IDE 接入检测状态（providerID == "cursor" 时展示）。
-    @State private var cursorDetection: CursorDetection?
-    @State private var checkingCursor = false
-
-    /// Cursor 手动导入账号草稿（token + machineId）与账号列表。
-    @State private var cursorAccounts: [AppState.CursorAccount] = []
-    @State private var newCursorToken = ""
-    @State private var newCursorMachineID = ""
-
     /// 模型列表与模型级测试状态。
     @State private var models: [Model] = []
     @State private var loadingModels = false
@@ -82,8 +73,6 @@ struct SettingsProviderPane: View {
                     usageSection
                 }
                 connectionSection(descriptor)
-                cursorAccountsSection
-                cursorIDESection
                 // 自定义 provider：可编辑模型列表（替代只读连通性 Section）
                 if descriptor.isUserDefined {
                     customModelsSection
@@ -98,8 +87,6 @@ struct SettingsProviderPane: View {
                 if !descriptor.isUserDefined {
                     loadModels()
                 }
-                loadCursorDetection()
-                loadCursorAccounts()
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
                 // 凭据变更时刷新模型列表与令牌草稿（OAuth 登录后令牌列表即时反映新 token）
@@ -171,144 +158,13 @@ struct SettingsProviderPane: View {
 
     @ViewBuilder
     private func connectionSection(_ descriptor: ProviderDescriptor) -> some View {
-        if providerID == "cursor" {
-            // Cursor 使用 IDE 登录态 / 手动导入账号，不在这里展示容易误导的 API 令牌输入区。
-            EmptyView()
-        } else {
-            switch descriptor.metadata.authType {
-            case .apiKey, .localProbe:
-                apiKeyConnectionSection
-            case .deviceFlow:
-                deviceFlowConnectionSection
-            case .oauth:
-                oauthConnectionSection
-            }
-        }
-    }
-
-    // MARK: - Cursor IDE 接入（Phase 20）
-
-    /// Cursor 手动导入账号区块（多账号，token + machineId）。
-    /// 对齐 OmniRoute `CursorAuthModal`：IDE 自动探测之外，支持手动粘贴 token（+ 可选 machineId）
-    /// 保存为独立账号；请求时优先使用手动导入账号，其次 IDE 自动发现。
-    @ViewBuilder
-    private var cursorAccountsSection: some View {
-        if providerID == "cursor" {
-            Section {
-                if cursorAccounts.isEmpty {
-                    Text("暂无手动导入账号")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(cursorAccounts.enumerated()), id: \.offset) { index, account in
-                        HStack(spacing: 8) {
-                            Image(systemName: "person.crop.circle")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(account.label)
-                                    .font(.footnote.weight(.medium))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Text(account.machineId.map { "machineId: \($0)" } ?? "无 machineId")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer(minLength: 8)
-                            Button("移除") {
-                                cursorAccounts.remove(at: index)
-                                persistCursorAccounts()
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    SecureField("", text: $newCursorToken, prompt: Text("粘贴 Cursor Access Token"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .font(.footnote)
-                    TextField("", text: $newCursorMachineID, prompt: Text("machineId（可选）"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .font(.footnote)
-                        .frame(maxWidth: 180)
-                    Button("添加账号") { addCursorAccount() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(newCursorToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            } header: {
-                Text("手动导入账号")
-            } footer: {
-                Text("从 Cursor IDE 的 state.vscdb 读取 accessToken 与 machineId（或直接粘贴）；多账号时请求优先用第一个。token 约 24h 轮换，手动导入需自行更新。")
-            }
-        }
-    }
-
-    /// Cursor 专属「Cursor IDE 接入」区块：显示 IDE 令牌检测状态，无需 API Key 即可启用。
-    @ViewBuilder
-    private var cursorIDESection: some View {
-        if providerID == "cursor" {
-            Section {
-                if checkingCursor {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("检测中…").foregroundStyle(.secondary)
-                    }
-                } else {
-                    switch cursorDetection {
-                    case .found(let identity):
-                        Label("已检测到 Cursor IDE 登录", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        if let expiresAt = identity.expiresAt {
-                            Text("令牌过期时间：\(expiresAt.formatted(date: .omitted, time: .shortened))（IDE 会自动轮换）")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("machineId: \(identity.machineId ?? "—")")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    case .noInstallation:
-                        Label("未检测到 Cursor IDE", systemImage: "xmark.circle")
-                            .foregroundStyle(.secondary)
-                        Text("未找到 state.vscdb。请先安装并登录 Cursor。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    case .notSignedIn:
-                        Label("Cursor 已安装但未登录", systemImage: "xmark.circle.fill")
-                            .foregroundStyle(.orange)
-                        Text("请打开 Cursor IDE 登录账号后重新检测。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    case .unreadable(let message):
-                        Label("无法读取 Cursor 数据库", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    case nil:
-                        Text("尚未检测")
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Spacer()
-                        Button("重新检测") { loadCursorDetection() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .pointingHandCursor()
-                    }
-                }
-            } header: {
-                Text("Cursor IDE 接入")
-            } footer: {
-                Text("请求时自动读取 Cursor IDE 的登录令牌（约 24h 轮换）；也可在上方手动导入 Cursor 账号。")
-            }
+        switch descriptor.metadata.authType {
+        case .apiKey, .localProbe:
+            apiKeyConnectionSection
+        case .deviceFlow:
+            deviceFlowConnectionSection
+        case .oauth:
+            oauthConnectionSection
         }
     }
 
@@ -828,7 +684,7 @@ struct SettingsProviderPane: View {
                 .truncationMode(.middle)
         }
         LabeledContent("认证方式") {
-            Text(providerID == "cursor" ? "Cursor IDE 登录" : authTypeLabel(descriptor.metadata.authType))
+            Text(authTypeLabel(descriptor.metadata.authType))
                 .foregroundStyle(.secondary)
         }
         LabeledContent("已配置") {
@@ -838,12 +694,9 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 已配置判定：cursor 额外把「IDE 检测成功」视为已配置（无需 API Key）。
+    /// 已配置判定。
     private var isConfigured: Bool {
-        if providerID == "cursor", case .found = cursorDetection {
-            return true
-        }
-        return appState.isProviderConfigured(providerID)
+        appState.isProviderConfigured(providerID)
     }
 
     private func authTypeLabel(_ type: ProviderAuthType) -> String {
@@ -959,58 +812,6 @@ struct SettingsProviderPane: View {
 
     private func startTest() {
         Task { await appState.testProvider(providerID) }
-    }
-
-    // MARK: - Cursor IDE 检测
-
-    /// 刷新 Cursor IDE 检测状态（进入面板与「重新检测」按钮共用，顺带预热凭据缓存）。
-    @MainActor
-    private func loadCursorDetection() {
-        guard providerID == "cursor" else { return }
-        checkingCursor = true
-        Task {
-            let detection = await CursorCredentialStore.shared.refresh()
-            cursorDetection = detection
-            checkingCursor = false
-        }
-    }
-
-    // MARK: - Cursor 手动账号
-
-    /// 加载已保存的 Cursor 账号列表。
-    @MainActor
-    private func loadCursorAccounts() {
-        guard providerID == "cursor" else { return }
-        cursorAccounts = appState.cursorAccounts(for: "cursor")
-    }
-
-    /// 从添加行取 token + machineId 构造账号，并清空添加行。
-    private func makeCursorAccountFromAddRow() -> AppState.CursorAccount? {
-        let token = newCursorToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let machineId = newCursorMachineID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return nil }
-        newCursorToken = ""
-        newCursorMachineID = ""
-        return AppState.CursorAccount(
-            label: KeyedToken.defaultLabel(for: token),
-            accessToken: token,
-            machineId: machineId.isEmpty ? nil : machineId
-        )
-    }
-
-    private func addCursorAccount() {
-        guard let account = makeCursorAccountFromAddRow() else { return }
-        cursorAccounts.append(account)
-        persistCursorAccounts()
-    }
-
-    private func persistCursorAccounts() {
-        do {
-            try appState.setCursorAccounts(cursorAccounts, for: "cursor")
-            tokenSaveMessage = cursorAccounts.isEmpty ? nil : "已保存 \(cursorAccounts.count) 个 Cursor 账号"
-        } catch {
-            tokenSaveMessage = "保存失败: \(error.localizedDescription)"
-        }
     }
 
     // MARK: - 模型列表 & 模型级测试

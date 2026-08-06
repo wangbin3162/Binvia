@@ -73,7 +73,7 @@ public enum ChatContent: Sendable, Equatable {
     case parts([ChatContentPart])
 
     /// 纯文本表示：`text` 原样返回；`parts` 拼接全部 `text` 块。
-    /// 供 Anthropic / Gemini / Cursor 等需要纯文本内容的翻译器使用（图片等非文本块被丢弃）。
+    /// 供 Anthropic / Gemini 等需要纯文本内容的翻译器使用（图片等非文本块被丢弃）。
     public var textValue: String {
         switch self {
         case .text(let value):
@@ -211,9 +211,6 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
     public var expiresAt: Date?
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。
     public var region: String?
-    /// Cursor 专用：IDE 登录 / 手动导入账号的 machineId（`x-cursor-checksum` 用）。
-    /// 缺省 nil，旧配置向后兼容。
-    public var machineId: String?
     /// 附加账号标识：CodeBuddy CN 企业 ID（积分查询 `x-enterprise-id`）。
     /// 缺省 nil，旧配置向后兼容。
     public var workspaceId: String?
@@ -225,7 +222,6 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         email: String? = nil,
         expiresAt: Date? = nil,
         region: String? = nil,
-        machineId: String? = nil,
         workspaceId: String? = nil
     ) {
         self.apiKey = apiKey
@@ -234,7 +230,6 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         self.email = email
         self.expiresAt = expiresAt
         self.region = region
-        self.machineId = machineId
         self.workspaceId = workspaceId
     }
 }

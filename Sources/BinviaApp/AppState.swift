@@ -271,65 +271,7 @@ final class AppState: ObservableObject {
         return result.filter { seen.insert($0).inserted }
     }
 
-    // MARK: - Cursor 多账号（token + machineId）
-
-    /// Cursor 账号 = (label, accessToken, machineId)。主账号来自 `credential`，
-    /// 其余来自 `apiKeys[]`（machineId 存于标签，格式 `mid:<machineId>`）。
-    struct CursorAccount: Equatable {
-        var label: String
-        var accessToken: String
-        var machineId: String?
-    }
-
-    /// 读取全部 Cursor 账号（主 + 轮换）。无账号返回空数组。
-    func cursorAccounts(for providerID: String = "cursor") -> [CursorAccount] {
-        guard let pc = config.providers[providerID] else { return [] }
-        var result: [CursorAccount] = []
-        if let access = pc.credential.accessToken, !access.isEmpty {
-            result.append(CursorAccount(
-                label: "主账号",
-                accessToken: access,
-                machineId: pc.credential.machineId
-            ))
-        }
-        for token in pc.apiKeys {
-            guard !token.value.isEmpty else { continue }
-            // machineId 编码在标签前缀 `mid:` 中（KeyedToken 只有 label+value 两字段）。
-            var machineId: String?
-            var label = token.label
-            if label.hasPrefix("mid:") {
-                machineId = String(label.dropFirst(4))
-                label = "账号"
-            }
-            result.append(CursorAccount(label: label, accessToken: token.value, machineId: machineId))
-        }
-        return result
-    }
-
-    /// 保存全部 Cursor 账号：首账号 → `credential.accessToken/machineId`，其余 → `apiKeys[]`。
-    func setCursorAccounts(_ accounts: [CursorAccount], for providerID: String = "cursor") throws {
-        let cleaned = accounts
-            .map { CursorAccount(label: $0.label, accessToken: $0.accessToken.trimmingCharacters(in: .whitespacesAndNewlines), machineId: $0.machineId) }
-            .filter { !$0.accessToken.isEmpty }
-        var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        providerConfig.enabled = true
-        var credential = providerConfig.credential
-        if let primary = cleaned.first {
-            credential.accessToken = primary.accessToken
-            credential.machineId = primary.machineId
-        } else {
-            credential.accessToken = nil
-            credential.machineId = nil
-        }
-        // 其余账号：machineId 编码进标签前缀 `mid:`。
-        providerConfig.credential = credential
-        providerConfig.apiKeys = Array(cleaned.dropFirst()).map {
-            let label = $0.machineId.map { "mid:\($0)" } ?? $0.label
-            return KeyedToken(label: label, value: $0.accessToken)
-        }
-        config.providers[providerID] = providerConfig
-        try saveConfig()
-    }
+    // MARK: - 手动 token 凭据
 
     /// 保存手动粘贴的 token 凭据（CodeBuddy / Antigravity 的“手动配置 Token”）。
     func saveManualToken(accessToken: String, refreshToken: String?, for providerID: String) throws {
@@ -512,28 +454,8 @@ final class AppState: ObservableObject {
     // MARK: - Provider 状态摘要
 
     /// 某 provider 是否已配置凭据（按认证类型判断）。
-    /// cursor 特判：IDE 检测成功（`CursorCredentialStore` 缓存命中）即视为已配置，无需 API Key。
     func isProviderConfigured(_ providerID: String) -> Bool {
         guard let descriptor = ProviderRegistry.shared.descriptor(for: providerID) else { return false }
-        if providerID == "cursor" {
-            // 缓存命中（IDE 登录令牌）→ 已配置；未探测过时返回 false（由 refresh 后重算）。
-            if let identity = CursorCredentialStore.shared.peekCachedIdentity() {
-                return !identity.accessToken.isEmpty
-            }
-            // 缓存未命中：若配置里显式存过 token（手动导入账号），也算已配置。
-            if let pc = config.providers["cursor"] {
-                let hasToken = !(pc.credential.accessToken ?? "").isEmpty
-                    || !pc.apiKeys.isEmpty
-                if hasToken { return true }
-            }
-            // 未探测过 → 异步刷新缓存后再判定（避免首次打开密钥面板看不到 cursor）。
-            Task { @MainActor in
-                if case .found = await CursorCredentialStore.shared.refresh() {
-                    self.objectWillChange.send()
-                }
-            }
-            return false
-        }
         let pc = config.providers[providerID]
         switch descriptor.metadata.authType {
         case .apiKey, .localProbe:
@@ -824,12 +746,13 @@ final class AppState: ObservableObject {
         usageRefreshTimer = nil
     }
 
-    /// 全量刷新所有挂载了用量查询器的 provider。
+    /// 全量刷新所有「已启用」provider 的用量（禁用的不获取，避免无效上游调用与无谓错误快照）。
     /// 并行执行（withTaskGroup）：单个 provider 用量接口慢/超时不再串行拖住全部刷新。
     /// 配合 ProviderHTTPClient 的 12s 非流式超时封顶，最坏 12s 内全部完成。
     private func refreshAllUsage() async {
         let fetcherDescriptors = ProviderRegistry.shared.allDescriptors()
             .filter { $0.usageFetcherFactory() != nil }
+            .filter { isProviderEnabled($0.id) }
         await withTaskGroup(of: Void.self) { group in
             for descriptor in fetcherDescriptors {
                 group.addTask { [weak self] in
@@ -881,9 +804,14 @@ final class AppState: ObservableObject {
         usageSummary.byProvider.values.reduce(0) { $0 + $1.errorCount }
     }
 
-    /// 活跃（已配置凭据）的 provider 数。
+    /// provider 是否启用：config 显式值优先，回退默认策略（与 RouteHandler `/v1/models` 判定一致）。
+    func isProviderEnabled(_ providerID: String) -> Bool {
+        config.providers[providerID]?.enabled ?? ProviderCatalog.isEnabledByDefault(providerID)
+    }
+
+    /// 活跃（已启用且已配置凭据）的 provider 数。
     var activeProviderCount: Int {
-        orderedProviderDescriptors().filter { isProviderConfigured($0.id) }.count
+        orderedProviderDescriptors().filter { isProviderEnabled($0.id) && isProviderConfigured($0.id) }.count
     }
 
     /// 总 prompt token（Phase 22 采集）。
@@ -901,9 +829,12 @@ final class AppState: ObservableObject {
         usageSummary.byProvider.values.reduce(0) { $0 + $1.totalTokens }
     }
 
-    /// 已配置凭据的 provider 描述符（按 providerOrder 排序）。主面板 Tab 与健康度列表共用。
+    /// 已配置凭据且已启用的 provider 描述符（按 providerOrder 排序）。主面板 Tab 与健康度列表共用。
+    /// 禁用的 provider 不显示在 Tab / 健康度列表（仍可在设置面板重新启用）。
     var configuredProviders: [ProviderDescriptor] {
-        orderedProviderDescriptors().filter { isProviderConfigured($0.id) }
+        orderedProviderDescriptors().filter {
+            isProviderEnabled($0.id) && isProviderConfigured($0.id)
+        }
     }
 
     // MARK: - 菜单栏图标
