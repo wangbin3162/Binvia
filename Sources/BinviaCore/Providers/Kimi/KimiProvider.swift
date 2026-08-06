@@ -55,16 +55,25 @@ public struct KimiProvider: Provider {
     }
 
     /// 构建上游请求体：强制 `stream=true`（保留 rawBody 未知字段 / 其他字段名）。
+    /// 角色归一化：Moonshot 上游不认 `developer` 角色（OpenAI 新版约定），收到会返回 400
+    /// `Invalid request: role 'developer' is not allowed`（实测 pi 报错），与 DeepSeek/Generic/CodeBuddy
+    /// 同型处理，转发前统一改写为 `system`（语义等价）。
     private func makeBody(request: ChatRequest, rawBody: Data?) throws -> Data {
         if let rawBody {
             guard var json = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any] else {
                 throw ProviderError.invalidResponse("invalid request body")
             }
+            json = RoleNormalizer.normalizeDeveloperRole(json, providerID: id)
             json["stream"] = true
             json["model"] = request.model
             return try JSONSerialization.data(withJSONObject: json)
         }
         var upstreamBody = request
+        upstreamBody.messages = upstreamBody.messages.map { message in
+            message.role == .developer
+                ? ChatMessage(role: .system, content: message.content, name: message.name, toolCallID: message.toolCallID)
+                : message
+        }
         upstreamBody.stream = true
         return try JSONEncoder().encode(upstreamBody)
     }

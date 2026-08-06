@@ -1319,6 +1319,35 @@ func kimiIntegrationTests() async throws {
     expectTrue(text.contains("[DONE]"), "Kimi SSE 透传应包含 [DONE]")
     expectTrue(KimiMockState.shared.lastBody?.contains("\"stream\":true") ?? false, "Kimi 流式请求上游 body 也应强制 stream=true")
 
+    // 3) developer 角色归一化：ChatRequest 路径 developer→system（Moonshot 上游不认 developer）
+    KimiMockState.shared.reset()
+    let devRequest = ChatRequest(
+        model: "kimi-k3",
+        messages: [
+            ChatMessage(role: .developer, content: "be helpful"),
+            ChatMessage(role: .user, content: "hi"),
+        ],
+        stream: true
+    )
+    let devStream = try await KimiProvider().chat(request: devRequest, rawBody: nil, credential: nil)
+    for try await _ in devStream {}
+    let devBody = KimiMockState.shared.lastBody ?? ""
+    expectTrue(devBody.contains("\"role\":\"system\""), "Kimi ChatRequest 路径 developer→system，实际: \(devBody)")
+    expectFalse(devBody.contains("developer"), "Kimi ChatRequest 路径不应残留 developer 角色，实际: \(devBody)")
+
+    // 4) developer 角色归一化：rawBody 透传路径同样改写 developer→system
+    KimiMockState.shared.reset()
+    let devRaw = Data(#"{"model":"kimi-k3","messages":[{"role":"developer","content":"be helpful"},{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+    let rawStream = try await KimiProvider().chat(
+        request: ChatRequest(model: "kimi-k3", messages: [], stream: true),
+        rawBody: devRaw,
+        credential: nil
+    )
+    for try await _ in rawStream {}
+    let devRawBody = KimiMockState.shared.lastBody ?? ""
+    expectTrue(devRawBody.contains("\"role\":\"system\""), "Kimi rawBody 路径 developer→system，实际: \(devRawBody)")
+    expectFalse(devRawBody.contains("developer"), "Kimi rawBody 路径不应残留 developer 角色，实际: \(devRawBody)")
+
     await ModelCache.shared.invalidate("kimi")
 }
 

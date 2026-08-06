@@ -1,7 +1,7 @@
 import Foundation
 
 /// CodeBuddy CN 供应商描述符。已注册进 ProviderCatalog（勿改 ProviderCatalog.swift）。
-/// 模型目录抄自 OmniRoute `open-sse/config/providers/registry/codebuddy-cn/index.ts`（15 个模型）。
+/// 模型目录抄自 OmniRoute `open-sse/config/providers/registry/codebuddy-cn/index.ts`（16 个模型）。
 public enum CodeBuddyCNProviderDescriptor {
     public static let descriptor = ProviderDescriptor(
         metadata: ProviderMetadata(
@@ -20,6 +20,7 @@ public enum CodeBuddyCNProviderDescriptor {
             Model(id: "glm-4.7", name: "GLM-4.7", contextLength: 200_000, supportsReasoning: true),
             Model(id: "minimax-m3", name: "MiniMax-M3", contextLength: 512_000, supportsReasoning: true, supportsVision: true),
             Model(id: "minimax-m2.7", name: "MiniMax-M2.7", contextLength: 200_000, supportsReasoning: true, supportsVision: true),
+            Model(id: "kimi-k3", name: "Kimi-K3", contextLength: 1_048_576, supportsReasoning: true, supportsVision: true),
             Model(id: "kimi-k2.7", name: "Kimi-K2.7-Code", contextLength: 256_000, supportsReasoning: true, supportsVision: true),
             Model(id: "kimi-k2.6", name: "Kimi-K2.6", contextLength: 256_000, supportsReasoning: true, supportsVision: true),
             Model(id: "kimi-k2.5", name: "Kimi-K2.5", contextLength: 164_000, supportsReasoning: true, supportsVision: true),
