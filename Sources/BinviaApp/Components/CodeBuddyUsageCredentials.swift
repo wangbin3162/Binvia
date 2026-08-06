@@ -6,7 +6,8 @@ import BinviaCore
 ///
 /// 说明：OAuth 登录 token 仅支持积分查询（企业账号），不参与模型调用——
 /// 模型调用 token 在设置面板「模型调用 Access Token」中配置。
-/// 主面板 CodeBuddy Tab 中置于「用量」卡片上方，设置面板同样渲染在用量 Section 顶部。
+/// 主面板 CodeBuddy Tab 中置于「用量」卡片上方；设置面板独立成「积分凭据」Section，
+/// 同样位于「用量」Section 上方。
 struct CodeBuddyUsageCredentials: View {
     @EnvironmentObject private var appState: AppState
 

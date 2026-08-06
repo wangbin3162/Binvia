@@ -5,7 +5,8 @@ import BinviaCore
 /// 固定应用面板（服务器 / 网关密钥）+ 供应商列表（品牌图标 + 配置状态圆点）。
 ///
 /// 自定义供应商管理直接内嵌侧栏：
-/// - 「供应商」区块右侧的「+」按钮 → 在下方「自定义供应商」区块末尾新增一个自定义供应商；
+/// - 「供应商」区块右侧显示「已配置/内置」数量统计；
+/// - 「自定义供应商」区块右侧的「+」按钮 → 在列表末尾新增一个自定义供应商；
 /// - 自定义供应商行的别名 / Base URL 支持内联编辑（铅笔）与移除（垃圾桶，移除时清除相关模型与令牌）；
 /// - 不再需要单独的「自定义供应商」配置面板。
 struct SettingsSidebarView: View {
@@ -51,20 +52,10 @@ struct SettingsSidebarView: View {
                     HStack(spacing: 4) {
                         Text("供应商")
                         Spacer()
-                        Button {
-                            isAddingCustomProvider = true
-                            editingCustomID = nil
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 18, height: 18)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .hoverHighlight(cornerRadius: 4)
-                        .help("新增自定义供应商")
-                        .padding(.trailing, 4)
+                        Text("\(configuredBuiltInCount)/\(builtInDescriptors.count)")
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                            .padding(.trailing, 4)
                     }
                 }
 
@@ -84,10 +75,20 @@ struct SettingsSidebarView: View {
                     HStack(spacing: 4) {
                         Text("自定义供应商")
                         Spacer()
-                        Text("\(customDefs.count)")
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                            .padding(.trailing, 6)
+                        Button {
+                            isAddingCustomProvider = true
+                            editingCustomID = nil
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .hoverHighlight(cornerRadius: 4)
+                        .help("新增自定义供应商")
+                        .padding(.trailing, 4)
                     }
                 }
             }
@@ -114,6 +115,11 @@ struct SettingsSidebarView: View {
     /// 用户自定义供应商定义（按添加顺序）。
     private var customDefs: [CustomProviderDef] {
         appState.config.customProviderDefs
+    }
+
+    /// 已配置凭据的内置供应商数（「供应商」标题右侧统计）。
+    private var configuredBuiltInCount: Int {
+        builtInDescriptors.filter { appState.isProviderConfigured($0.id) }.count
     }
 
     private func paneRow(_ pane: SettingsPane) -> some View {

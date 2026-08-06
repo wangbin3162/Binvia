@@ -78,6 +78,7 @@ struct SettingsProviderPane: View {
 
                 // 自定义 provider 无用量查询，隐藏用量 Section
                 if !descriptor.isUserDefined {
+                    codeBuddyCredentialsSection
                     usageSection
                 }
                 connectionSection(descriptor)
@@ -856,16 +857,24 @@ struct SettingsProviderPane: View {
 
     // MARK: - 用量 Section（Phase 16 / Phase 23.1）
 
+    /// CodeBuddy 积分查询凭据：独立成「积分凭据」Section，置于「用量」上方。
+    @ViewBuilder
+    private var codeBuddyCredentialsSection: some View {
+        if providerID == "codebuddy-cn" {
+            Section {
+                CodeBuddyUsageCredentials()
+            } header: {
+                Text("积分凭据")
+            }
+        }
+    }
+
     /// 用量卡片：余额 / 配额窗口 / 模型配额。无快照时不展示（「有则展示无则隐藏」）；
     /// 供应商声明了 `usageDashboardURL` 且无公开用量 API 时，显示「官网」入口。
     /// Phase 23.1：渲染逻辑抽取到共享组件 `ProviderUsageCard`，行为与原实现一致。
     @ViewBuilder
     private var usageSection: some View {
         Section {
-            if providerID == "codebuddy-cn" {
-                // CodeBuddy：积分查询凭据独立成块，位于用量卡片上方
-                CodeBuddyUsageCredentials()
-            }
             ProviderUsageCard(providerID: providerID)
         } header: {
             Text("用量")
