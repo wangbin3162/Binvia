@@ -3348,6 +3348,37 @@ func updateCheckerTests() async {
     URLProtocolMock.reset()
 }
 
+/// CodeBuddy 上游请求体卫生化测试（developer→system 角色改写，规避腾讯内容审核误报）。
+func codeBuddySanitizeBodyTests() {
+    let json: [String: Any] = [
+        "model": "glm-5.2",
+        "stream": true,
+        "reasoning_effort": "high",
+        "reasoning_summary": "auto",
+        "max_completion_tokens": 131072,
+        "messages": [
+            ["role": "developer", "content": "be helpful"],
+            ["role": "user", "content": "hi"],
+        ],
+    ]
+    let out = CodeBuddyCNProvider.sanitizeBody(json)
+    expectEqual(out["model"] as? String, "glm-5.2", "model 保留")
+    expectEqual(out["stream"] as? Bool, true, "stream 保留")
+    expectEqual(out["max_completion_tokens"] as? Int, 131072, "max_completion_tokens 保留")
+    let messages = out["messages"] as! [[String: Any]]
+    expectEqual(messages[0]["role"] as? String, "system", "developer 角色改写为 system")
+    expectEqual(messages[1]["role"] as? String, "user", "user 角色不动")
+    expectEqual(messages[0]["content"] as? String, "be helpful", "消息内容保留")
+    expectEqual(messages.count, 2, "messages 保留")
+
+    // ChatRequest 路径：normalizeRoles 同样改写 developer→system
+    let dev = ChatMessage(role: .developer, content: "be helpful")
+    let usr = ChatMessage(role: .user, content: "hi")
+    let normalized = CodeBuddyCNProvider.normalizeRoles([dev, usr])
+    expectEqual(normalized[0].role, .system, "ChatRequest 路径 developer→system")
+    expectEqual(normalized[1].role, .user, "ChatRequest 路径 user 不动")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -3357,6 +3388,7 @@ unsetenv("BINVIA_CONFIG")
 setenv("BINVIA_CONFIG", checkConfigPath, 1)
 
 // 清理可能残留的环境变量
+unsetenv("BINVIA_DEBUG_BODY")
 unsetenv("DEEPSEEK_API_KEY")
 unsetenv("DEEPSEEK_BASE_URL")
 unsetenv("CODEBUDDY_CN_ACCESS_TOKEN")
@@ -3434,6 +3466,7 @@ await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)
 await run("ChatMessage 宽容解码（developer/content 数组）", chatMessageTolerantDecodeTests)
+await run("CodeBuddy 角色改写 developer→system", codeBuddySanitizeBodyTests)
 await run("在线更新检查（版本比较 + GitHub API 解析）", updateCheckerTests)
 
 print("")

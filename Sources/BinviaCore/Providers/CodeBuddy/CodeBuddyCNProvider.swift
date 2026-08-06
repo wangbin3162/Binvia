@@ -103,6 +103,16 @@ public struct CodeBuddyCNProvider: Provider {
         return statusCode == 401 || statusCode == 403
     }
 
+    /// ChatRequest 路径的角色归一化：`developer` → `system`（CodeBuddy 对 developer 角色误判内容审核）。
+    public static func normalizeRoles(_ messages: [ChatMessage]) -> [ChatMessage] {
+        messages.map { msg in
+            guard msg.role == .developer else { return msg }
+            var m = msg
+            m.role = .system
+            return m
+        }
+    }
+
     // MARK: - 请求头（抄自 OmniRoute registry/codebuddy-cn）
 
     private func applyCodeBuddyHeaders(to request: inout URLRequest, token: String) {
@@ -114,6 +124,28 @@ public struct CodeBuddyCNProvider: Provider {
         request.setValue("CLI", forHTTPHeaderField: "X-IDE-Name")
         request.setValue("XMLHttpRequest", forHTTPHeaderField: "x-requested-with")
         request.setValue("1", forHTTPHeaderField: "x-codebuddy-request")
+    }
+
+    // MARK: - 请求体卫生化
+
+    /// 把 `role: "developer"` 改写成 `role: "system"`。
+    ///
+    /// 腾讯 CodeBuddy 后端对 developer 角色会走更严格的内容审核路径，即使内容无害也返回
+    /// `finish_reason: content_filter`（"敏感内容"误报，流式中途终止）；同内容用 system
+    /// 角色则正常（实测 pi 用 developer 报错、opencode 用 system 正常）。两者在 OpenAI
+    /// 规范里语义等价，转发前统一改写为 system。
+    public static func sanitizeBody(_ json: [String: Any]) -> [String: Any] {
+        var out = json
+        if var messages = out["messages"] as? [[String: Any]] {
+            messages = messages.map { msg in
+                guard (msg["role"] as? String) == "developer" else { return msg }
+                var m = msg
+                m["role"] = "system"
+                return m
+            }
+            out["messages"] = messages
+        }
+        return out
     }
 
     // MARK: - Provider
@@ -140,13 +172,20 @@ public struct CodeBuddyCNProvider: Provider {
             guard var json = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any] else {
                 throw ProviderError.invalidResponse("invalid request body")
             }
+            // developer→system 角色改写（CodeBuddy 对 developer 角色误判内容审核）
+            json = Self.sanitizeBody(json)
             json["stream"] = true
             json["model"] = request.model
             bodyData = try JSONSerialization.data(withJSONObject: json)
         } else {
             var upstreamBody = request
+            upstreamBody.messages = Self.normalizeRoles(upstreamBody.messages)
             upstreamBody.stream = true
             bodyData = try JSONEncoder().encode(upstreamBody)
+        }
+        // BINVIA_DEBUG_BODY=1：打印发往上游的原始 body（含 system prompt），用于排查上游误报
+        if RouteConfig.envValue(["BINVIA_DEBUG_BODY"]) != nil {
+            print("[codebuddy-cn:debug] upstream body: \(String(data: bodyData, encoding: .utf8) ?? "<non-utf8>")")
         }
 
         // 客户端 stream=false：上游强制流式，聚合成 JSON。需要在轮换循环内完成聚合。
