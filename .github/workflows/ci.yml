@@ -32,7 +32,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-swift-
 
-      # build.sh 内部依次执行：release 构建 → BinviaCheck（698 项断言）
+      # build.sh 内部依次执行：release 构建 → BinviaCheck（647 项断言）
       # → BinviaApp --smoke-test → adhoc 签名 → tar.gz 打包
       - name: 构建 + 测试 + 打包
         run: ARCHES="$(uname -m)" ./Scripts/build.sh

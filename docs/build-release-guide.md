@@ -1,13 +1,13 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.1.5）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
 ## 1. 发布链路总览
 
 ```
-开发 → push main → CI 自动验证（构建 + 698 项测试 + GUI 自检）
+开发 → push main → CI 自动验证（构建 + 647 项测试 + GUI 自检）
                      ↓
             打 tag v0.1.0 → push tag → Release workflow 自动：
             双架构构建(arm64+x86_64) → 测试 → adhoc 签名 → tar.gz + SHA256 → GitHub Release
@@ -42,7 +42,7 @@ Release workflow 会**以 tag 为准覆盖** version.env，但本地构建前请
 | 命令 | 作用 |
 |---|---|
 | `make build` | 快速 debug 构建 |
-| `make test` | 跑全部测试（BinviaCheck，698 项断言） |
+| `make test` | 跑全部测试（BinviaCheck，647 项断言） |
 | `make run` | 启动本地网关服务器 |
 | `make release` | **完整打包**：双架构 release 构建 + 测试 + GUI 自检 + adhoc 签名 + tar.gz + SHA256，产物在 `bin/` |
 | `make clean` | 清空 `.build` 和 `bin/` |
@@ -144,9 +144,29 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 ---
 
-## 6. 注意事项与常见问题
+## 6. 版本发布记录
 
-### 6.1 Gatekeeper 拦截（预期行为）
+| 版本 | 日期 | 内容 | 产物（bin/） |
+|---|---|---|---|
+| v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.1.5 优化内容
+
+针对「开启服务后总觉得慢」的根因修复（实测数据）：
+
+- **`/v1/models` 跳无凭据 provider 动态获取**：`RouteHandler.handleModels` 仅对有凭据的 provider
+  调 `listModels`，无凭据直接静态目录。实测 `62s → 冷 14.6s → 热 0.008s`。
+- **非流式请求 12s 超时封顶**：`ProviderHTTPClient.data` 对用量查询/模型列表/探测统一超时封顶
+  （URLSession 默认 60s，上游不可达时会拖住分钟级）；流式请求不受影响。
+- **用量刷新并行化**：`AppState.refreshAllUsage` 改为 `withTaskGroup`，单个用量接口慢不再拖住全部。
+- **Antigravity 失败缓存**：动态模型获取失败时写缓存（300s TTL），避免每次 `/v1/models` 重复打上游；
+  TTL 过期自动重试上游。
+
+---
+
+## 7. 注意事项与常见问题
+
+### 7.1 Gatekeeper 拦截（预期行为）
 
 产物是 **adhoc 签名、未经过 Apple 公证**，首次从网上下载打开时，
 Gatekeeper 可能提示"无法验证开发者"。这是个人项目的正常现象，解决方式：
@@ -171,7 +191,7 @@ xcrun stapler staple bin/Binvia-<版本>-macos-arm64-x86_64.dmg
 公证后用户双击直接打开，无任何警告。证书与凭证均为私密资产，勿提交到仓库；
 CI 自动化签名需将证书导出为 .p12 加密后存为 repo secret。
 
-### 6.2 CI 里没有 Xcode 也能跑？
+### 7.2 CI 里没有 Xcode 也能跑？
 
 GitHub Actions 的 `macos-26` runner 自带 Xcode，`swift build` 直接可用。
 选 `macos-26`（arm64 + SDK 26）是为了与本机开发环境（Swift 6.3 / SDK 26）一致：
@@ -179,26 +199,26 @@ GitHub Actions 的 `macos-26` runner 自带 Xcode，`swift build` 直接可用�
 若未来 GitHub 调整 runner 标签，把 `ci.yml` / `release.yml` 中的 `macos-26` 换成
 仍可用的同代标签即可（同时保持 setup-swift 版本与本机一致）。
 
-### 6.3 多架构构建的 "swift-version file not registered" 错误
+### 7.3 多架构构建的 "swift-version file not registered" 错误
 
 这是 SwiftPM 的已知问题：顺序执行 `swift build --arch arm64` 和 `--arch x86_64` 时，
 顶层 `.build/release` 符号链接会在两架构间翻转，导致第二次构建报错。
 `build.sh` 已用**每架构独立 `--scratch-path`**（`.build/<arch>/`）规避，不要再改回
 共享 `.build` 的写法。
 
-### 6.4 版本号与 tag 不一致会怎样？
+### 7.4 版本号与 tag 不一致会怎样？
 
 Release workflow 以 **tag 为准**（tag `v0.2.0` + version.env 里 `0.1.0` → 产物为 0.2.0，
 version.env 被覆盖）。本地构建则以 version.env 为准。所以**改版本号务必两处同步**。
 
-### 6.5 测试在 CI 上会不会依赖真实网络？
+### 7.5 测试在 CI 上会不会依赖真实网络？
 
-不会。BinviaCheck 的 698 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
+不会。BinviaCheck 的 647 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
 测试入口会把 `BINVIA_CONFIG` 指到 `/tmp` 并清空凭据环境变量，不会触碰真实配置与上游。
 
 ---
 
-## 7. 本次构建改造清单（相对旧版 build.sh）
+## 8. 本次构建改造清单（相对旧版 build.sh）
 
 - [x] 版本号从 `version.env` 读取，注入 Info.plist（不再硬编码 0.1.0），附带 git commit / 构建时间
 - [x] 默认双架构构建（`ARCHES="arm64 x86_64"`），`lipo` 合成 universal 产物
