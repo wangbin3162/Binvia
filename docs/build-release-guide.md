@@ -1,6 +1,6 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.1.5）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.1.6）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
@@ -148,7 +148,21 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.1.6 变更内容
+
+- **移除 Cursor 供应商支持**：删除 Cursor provider 及其 IDE 登录令牌检测（`CursorCredentialStore`）、
+  私有协议 RPC（HTTP/2 Connect-RPC / protobuf）、用量查询器与模型目录；同时移除 `BinviaCLI cursor` 子命令、
+  GUI 的「Cursor IDE 接入 / 手动导入账号」区块与 `ProviderCredential.machineId` 字段。
+  新增供应商为 9 家（DeepSeek / CodeBuddy / Antigravity / opencode / Kimi / opencode-go / MiMo / z.ai / MiniMax）。
+- **禁用 provider 不再获取用量与显示 Tab**：`AppState.refreshAllUsage` 只轮询已启用 provider（不再打
+  禁用供应商的用量接口）；主面板 Tab / 健康度列表（`configuredProviders`）与「活跃 provider 数」
+  均要求「已启用且已配置凭据」，与 `RouteHandler` 的 `/v1/models` 判定口径一致。
+  设置面板侧栏仍展示全部 provider，可随时重新启用。
+- **MiniMax / z.ai 切换 OpenAI 兼容端点**：`/v1/chat/completions` + `Authorization: Bearer`，
+  rawBody 透传（天然支持工具调用），移除 Anthropic 兼容共享执行器（`AnthropicCompatChatExecutor` / `AnthropicEnvelopeTranslator`）。
 
 ### v0.1.5 优化内容
 
