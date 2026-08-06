@@ -9,9 +9,9 @@ struct ServerStatusView: View {
     @EnvironmentObject private var appState: AppState
     @State private var copied = false
 
-    /// 对外展示的服务地址（与 `RouteHandler` 监听地址一致）。
+    /// 对外展示的服务地址（OpenAI 兼容端点，含 /v1；与设置面板「通用」页一致）。
     private var address: String {
-        "http://\(appState.config.host):\(appState.config.port)"
+        "http://\(appState.config.host):\(appState.config.port)/v1"
     }
 
     var body: some View {
