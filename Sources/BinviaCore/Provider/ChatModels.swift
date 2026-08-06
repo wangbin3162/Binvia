@@ -218,13 +218,6 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
     /// 缺省 nil，旧配置向后兼容。
     public var workspaceId: String?
 
-    /// 是否配置了任何凭据（apiKey / accessToken / refreshToken 任一非空）。
-    public var hasAnyCredential: Bool {
-        !(apiKey ?? "").isEmpty
-            || !(accessToken ?? "").isEmpty
-            || !(refreshToken ?? "").isEmpty
-    }
-
     public init(
         apiKey: String? = nil,
         accessToken: String? = nil,

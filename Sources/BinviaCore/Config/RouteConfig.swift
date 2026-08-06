@@ -207,10 +207,6 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     public var providerOrder: [String]
     /// 用户自定义的 OpenAI 兼容 Provider 定义列表（运行时注册到 ProviderRegistry）。
     public var customProviderDefs: [CustomProviderDef]
-    /// Web 面板启用开关（默认 true；false 时 GET / 与 /admin/* 返回 404）。
-    public var webPanelEnabled: Bool
-    /// 面板管理员密码（nil 或空字符串时不设密码，全部放行）。
-    public var adminPassword: String?
 
     public init(
         version: Int = 2,
@@ -219,9 +215,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         apiKeys: [GatewayKeyConfig] = [],
         providers: [String: ProviderConfig] = [:],
         providerOrder: [String] = [],
-        customProviderDefs: [CustomProviderDef] = [],
-        webPanelEnabled: Bool = true,
-        adminPassword: String? = nil
+        customProviderDefs: [CustomProviderDef] = []
     ) {
         self.version = version
         self.host = host
@@ -230,8 +224,6 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         self.providers = providers
         self.providerOrder = providerOrder
         self.customProviderDefs = customProviderDefs
-        self.webPanelEnabled = webPanelEnabled
-        self.adminPassword = adminPassword
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -242,8 +234,6 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         case providers
         case providerOrder
         case customProviderDefs
-        case webPanelEnabled
-        case adminPassword
     }
 
     /// v1 → v2 兼容解码：`apiKeys` 既可能是 `[String]`（v1），也可能是 `[{key, enabledModels}]`（v2）。
@@ -260,8 +250,6 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         }
         self.providerOrder = try container.decodeIfPresent([String].self, forKey: .providerOrder) ?? []
         self.customProviderDefs = try container.decodeIfPresent([CustomProviderDef].self, forKey: .customProviderDefs) ?? []
-        self.webPanelEnabled = try container.decodeIfPresent(Bool.self, forKey: .webPanelEnabled) ?? true
-        self.adminPassword = try container.decodeIfPresent(String.self, forKey: .adminPassword)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -273,8 +261,6 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         try container.encode(providers, forKey: .providers)
         try container.encodeIfPresent(providerOrder.isEmpty ? nil : providerOrder, forKey: .providerOrder)
         try container.encodeIfPresent(customProviderDefs.isEmpty ? nil : customProviderDefs, forKey: .customProviderDefs)
-        try container.encodeIfPresent(webPanelEnabled ? nil : false, forKey: .webPanelEnabled)
-        try container.encodeIfPresent(adminPassword, forKey: .adminPassword)
     }
 
     /// 全部网关 Key 字符串（鉴权用）。

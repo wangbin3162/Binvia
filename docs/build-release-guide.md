@@ -42,10 +42,9 @@ Release workflow 会**以 tag 为准覆盖** version.env，但本地构建前请
 | 命令 | 作用 |
 |---|---|
 | `make build` | 快速 debug 构建 |
-| `make test` | 跑全部测试（BinviaCheck，737 项断言） |
+| `make test` | 跑全部测试（BinviaCheck，698 项断言） |
 | `make run` | 启动本地网关服务器 |
-| `make web` | 构建 Web 面板（`cd web && npm install && npm run build && node scripts/embed.mjs`） |
-| `make release` | **完整打包**：Web 面板构建 + 双架构 release 构建 + 测试 + GUI 自检 + adhoc 签名 + tar.gz + SHA256，产物在 `bin/` |
+| `make release` | **完整打包**：双架构 release 构建 + 测试 + GUI 自检 + adhoc 签名 + tar.gz + SHA256，产物在 `bin/` |
 | `make clean` | 清空 `.build` 和 `bin/` |
 
 `make release` 的常用变体：
@@ -194,16 +193,8 @@ version.env 被覆盖）。本地构建则以 version.env 为准。所以**改�
 
 ### 6.5 测试在 CI 上会不会依赖真实网络？
 
-不会。BinviaCheck 的 737 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
+不会。BinviaCheck 的 698 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
 测试入口会把 `BINVIA_CONFIG` 指到 `/tmp` 并清空凭据环境变量，不会触碰真实配置与上游。
-
-### 6.6 Web 面板构建依赖
-
-`make release` 和 `make web` 需要 Node.js 环境（npm）。Web 面板构建产物通过 `embed.mjs` 内联为
-`Sources/BinviaCore/Server/WebPanelAssets.swift`（base64），**该文件已提交入库**，因此纯 `swift build`
-不依赖 Node.js。只有修改前端后才需要运行 `make web`。
-
-如果 CI 环境没有 Node.js，可以跳过 Web 面板构建（`make release` 会失败），但 `swift build` 仍然可以正常编译。
 
 ---
 
