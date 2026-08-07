@@ -1069,6 +1069,207 @@ func antigravityIntegrationTests() async throws {
     expectTrue(failResult.message.contains("Unknown name"), "400 消息应提取上游 error.message，实际: \(failResult.message)")
 }
 
+// MARK: - Antigravity 工具调用（翻译器纯单测 + 本地 mock 流式）
+
+/// 工具调用翻译单测（纯函数，不碰网络）。
+func antigravityToolCallTests() async throws {
+    // 1) 请求方向：tools → functionDeclarations；tool_calls → functionCall；tool 结果 → functionResponse
+    let toolsBody = #"""
+    {
+      "model": "gemini-3.6-flash-high",
+      "messages": [
+        {"role": "user", "content": "查一下天气"},
+        {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"北京\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "{\"temp\":25}"}
+      ],
+      "tools": [
+        {"type": "function", "function": {"name": "get_weather", "description": "查询天气", "parameters": {"type": "object", "properties": {"city": {"type": "string", "minLength": 1}}, "required": ["city"], "strict": true}}}
+      ],
+      "stream": true
+    }
+    """#
+    let decoded = try JSONDecoder().decode(ChatRequest.self, from: Data(toolsBody.utf8))
+    let envelope = AntigravityEnvelopeTranslator.makeEnvelope(
+        request: decoded,
+        project: "p1",
+        rawBody: Data(toolsBody.utf8)
+    )
+    let geminiRequest = envelope.request
+
+    // tools → functionDeclarations
+    guard let tools = geminiRequest.tools, let tool = tools.first else {
+        expectTrue(false, "tools 应翻译为 Gemini functionDeclarations")
+        return
+    }
+    expectEqual(tool.functionDeclarations.count, 1, "应有 1 个 function declaration")
+    let decl = tool.functionDeclarations[0]
+    expectEqual(decl.name, "get_weather", "工具名保留")
+    // parameters 已清洗：strict 被删除、空 properties placeholder
+    let params = decl.parameters ?? [:]
+    expectNil(params["strict"], "Gemini 不支持的 strict 关键字应被删除")
+    expectFalse(params["type"] == nil, "parameters 顶层应为 object 类型")
+
+    // tool_calls → functionCall part（assistant 消息）
+    let assistantTurn = geminiRequest.contents.first { $0.role == "model" }
+    expectFalse(assistantTurn == nil, "assistant 消息应翻译为 model turn")
+    if let assistantTurn {
+        let hasFunctionCall = assistantTurn.parts.contains { $0.functionCall != nil }
+        expectTrue(hasFunctionCall, "assistant 消息应含 functionCall part")
+        if let fc = assistantTurn.parts.first(where: { $0.functionCall != nil })?.functionCall {
+            expectEqual(fc.name, "get_weather", "functionCall.name")
+        }
+    }
+
+    // tool 结果 → functionResponse part（role 为 user）
+    let toolResultTurn = geminiRequest.contents.first { $0.role == "user" && $0.parts.contains { $0.functionResponse != nil } }
+    expectFalse(toolResultTurn == nil, "tool 结果消息应翻译为 functionResponse part（role=user）")
+
+    // toolConfig
+    expectEqual(geminiRequest.toolConfig?.functionCallingConfig.mode, "VALIDATED", "toolConfig.mode 应为 VALIDATED")
+
+    // 2) 响应方向：原生 functionCall part → OpenAI tool_calls（finish_reason=tool_calls）
+    let payload: [String: Any] = [
+        "response": [
+            "candidates": [[
+                "content": ["role": "model", "parts": [[
+                    "functionCall": ["name": "get_weather", "args": ["city": "北京"]],
+                    "thoughtSignature": "sig1",
+                ]]],
+                "finishReason": "STOP",
+            ]],
+        ],
+    ]
+    let chunk = AntigravityEnvelopeTranslator.openAIChunk(
+        fromGeminiPayload: payload,
+        model: "gemini-3.6-flash-high",
+        id: "id1",
+        created: 1,
+        emitRole: true
+    )
+    expectFalse(chunk == nil, "functionCall payload 应翻译出 chunk")
+    if let chunk {
+        let choices = chunk["choices"] as? [[String: Any]]
+        let delta = choices?.first?["delta"] as? [String: Any]
+        let toolCalls = delta?["tool_calls"] as? [[String: Any]]
+        expectEqual(toolCalls?.count ?? 0, 1, "应产出 1 个 tool_call")
+        let fn = toolCalls?.first?["function"] as? [String: Any]
+        expectEqual(fn?["name"] as? String, "get_weather", "tool_call.function.name")
+        expectEqual(choices?.first?["finish_reason"] as? String, "tool_calls", "finish_reason 应为 tool_calls")
+        let role = delta?["role"] as? String
+        expectEqual(role, "assistant", "delta.role 应为 assistant")
+    }
+
+    // 3) 响应方向：文本 `[Tool call: ...]` 旧格式兜底
+    let textPayload: [String: Any] = [
+        "response": [
+            "candidates": [[
+                "content": ["role": "model", "parts": [["text": "[Tool call: search_files]\nArguments: {\"query\":\"x\"}"]]],
+                "finishReason": "STOP",
+            ]],
+        ],
+    ]
+    let textChunk = AntigravityEnvelopeTranslator.openAIChunk(
+        fromGeminiPayload: textPayload,
+        model: "gemini-3.6-flash-high",
+        id: "id2",
+        created: 2,
+        emitRole: true
+    )
+    expectFalse(textChunk == nil, "文本工具调用应翻译出 chunk")
+    if let textChunk {
+        let toolCalls = ((textChunk["choices"] as? [[String: Any]])?.first?["delta"] as? [String: Any])?["tool_calls"] as? [[String: Any]]
+        expectEqual(toolCalls?.count ?? 0, 1, "文本工具调用应产出 1 个 tool_call")
+        expectEqual((toolCalls?.first?["function"] as? [String: Any])?["name"] as? String, "search_files", "文本工具名")
+    }
+}
+
+/// Antigravity 工具调用端到端（本地 HTTPServer mock 上游，流式 + 聚合）。
+func antigravityToolCallIntegrationTests() async throws {
+    // mock 上游：/v1internal:streamGenerateContent 返回 functionCall SSE
+    let toolMockHandler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
+        if request.path == "/v1internal:streamGenerateContent" {
+            let sse =
+                sseChunk(#"{"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"北京"}}}]},"finishReason":"STOP"}]}}"#)
+                + sseChunk("[DONE]")
+            return HTTPResponse.text(200, sse, contentType: "text/event-stream")
+        }
+        return HTTPResponse.text(404, "not found")
+    }
+
+    let server = HTTPServer(handler: toolMockHandler)
+    var port: Int?
+    var lastError: Error?
+    for _ in 0 ..< 3 {
+        let candidate = Int.random(in: 40_000 ... 60_000)
+        do {
+            try server.start(host: "127.0.0.1", port: candidate)
+            port = candidate
+            break
+        } catch {
+            lastError = error
+        }
+    }
+    guard let port else {
+        failed += 1
+        print("FAIL: Antigravity 工具 mock 上游无法启动: \(String(describing: lastError))")
+        return
+    }
+    defer {
+        server.stop()
+        unsetenv("ANTIGRAVITY_BASE_URL")
+    }
+    setenv("ANTIGRAVITY_BASE_URL", "http://127.0.0.1:\(port)", 1)
+    setenv("ANTIGRAVITY_PROJECT_ID", "mock-project", 1)
+    defer { unsetenv("ANTIGRAVITY_PROJECT_ID") }
+
+    let credential = ProviderCredential(accessToken: "mock-token")
+    let body = #"""
+    {
+      "model": "gemini-3.6-flash-high",
+      "messages": [{"role": "user", "content": "查天气"}],
+      "tools": [{"type": "function", "function": {"name": "get_weather", "description": "天气", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+      "stream": true
+    }
+    """#
+    let request = try JSONDecoder().decode(ChatRequest.self, from: Data(body.utf8))
+    let rawBody = Data(body.utf8)
+
+    // 1) 流式：第一个 chunk 应含 tool_calls
+    let stream = try await AntigravityProvider().chat(request: request, rawBody: rawBody, credential: credential)
+    var iterator = stream.makeAsyncIterator()
+    var sawToolCall = false
+    var sawDone = false
+    while let chunk = try await iterator.next() {
+        let text = String(data: chunk, encoding: .utf8) ?? ""
+        if text.contains("tool_calls") { sawToolCall = true }
+        if text.contains("[DONE]") { sawDone = true }
+    }
+    expectTrue(sawToolCall, "流式响应应含 tool_calls")
+    expectTrue(sawDone, "流式响应应以 [DONE] 结束")
+
+    // 2) 非流式：聚合 JSON 应含 message.tool_calls + finish_reason=tool_calls
+    let nonStreamRequest = ChatRequest(
+        model: "gemini-3.6-flash-high",
+        messages: [ChatMessage(role: .user, content: "查天气")],
+        stream: false
+    )
+    let nonStream = try await AntigravityProvider().chat(
+        request: nonStreamRequest,
+        rawBody: Data(body.replacingOccurrences(of: "\"stream\": true", with: "\"stream\": false").utf8),
+        credential: credential
+    )
+    var aggregated = Data()
+    for try await chunk in nonStream {
+        aggregated.append(chunk)
+    }
+    let json = try? JSONSerialization.jsonObject(with: aggregated) as? [String: Any]
+    let message = json?["choices"] as? [[String: Any]] ?? []
+    let firstMessage = message.first?["message"] as? [String: Any]
+    let toolCalls = firstMessage?["tool_calls"] as? [[String: Any]]
+    expectEqual(toolCalls?.count ?? 0, 1, "非流式聚合应含 1 个 tool_call")
+    expectEqual(message.first?["finish_reason"] as? String, "tool_calls", "聚合 finish_reason 应为 tool_calls")
+}
+
 // MARK: - Antigravity token 刷新（URLProtocol mock，Phase 20）
 
 /// 刷新流程：refresh_token 换新 access_token（含旋转）、fetchUserEmail 补邮箱。
@@ -2962,6 +3163,8 @@ await run("ProviderHTTPClient 重试", httpRetryTests)
 await run("RouteHandler 路由分发", routeHandlerTests)
 await run("DeepSeek 集成（本地 mock 上游）", deepSeekIntegrationTests)
 await run("Antigravity 集成（本地 mock 上游）", antigravityIntegrationTests)
+await run("Antigravity 工具调用（翻译单测）", antigravityToolCallTests)
+await run("Antigravity 工具调用集成（本地 mock 上游）", antigravityToolCallIntegrationTests)
 await run("Antigravity token 刷新（URLProtocol mock）", antigravityTokenRefreshTests)
 await run("opencode 集成（本地 mock 上游）", opencodeIntegrationTests)
 await run("Kimi 集成（强制流式 + 聚合）", kimiIntegrationTests)

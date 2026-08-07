@@ -106,7 +106,11 @@ public struct AntigravityProvider: Provider {
             refreshToken: credential?.refreshToken,
             config: config
         )
-        let envelope = AntigravityEnvelopeTranslator.makeEnvelope(request: request, project: projectID)
+        let envelope = AntigravityEnvelopeTranslator.makeEnvelope(
+            request: request,
+            project: projectID,
+            rawBody: rawBody
+        )
         let body = try JSONEncoder().encode(envelope)
 
         var upstream = URLRequest(url: config.streamGenerateContentURL)
@@ -319,6 +323,7 @@ public struct AntigravityProvider: Provider {
         let created = Int(Date().timeIntervalSince1970)
         var parser = SSEParser()
         var hasEmittedContent = false
+        var toolCallIndex = 0
         var line = Data()
 
         for try await byte in bytes {
@@ -327,7 +332,9 @@ public struct AntigravityProvider: Provider {
                 for event in parser.append(line) {
                     yieldTranslated(
                         event: event, model: model, id: id, created: created,
-                        hasEmittedContent: &hasEmittedContent, continuation: continuation
+                        hasEmittedContent: &hasEmittedContent,
+                        toolCallIndex: &toolCallIndex,
+                        continuation: continuation
                     )
                 }
                 line.removeAll()
@@ -340,14 +347,18 @@ public struct AntigravityProvider: Provider {
             for event in parser.append(line) {
                 yieldTranslated(
                     event: event, model: model, id: id, created: created,
-                    hasEmittedContent: &hasEmittedContent, continuation: continuation
+                    hasEmittedContent: &hasEmittedContent,
+                    toolCallIndex: &toolCallIndex,
+                    continuation: continuation
                 )
             }
         }
         for event in parser.finish() {
             yieldTranslated(
                 event: event, model: model, id: id, created: created,
-                hasEmittedContent: &hasEmittedContent, continuation: continuation
+                hasEmittedContent: &hasEmittedContent,
+                toolCallIndex: &toolCallIndex,
+                continuation: continuation
             )
         }
         continuation.yield(AntigravityEnvelopeTranslator.doneEvent)
@@ -359,23 +370,31 @@ public struct AntigravityProvider: Provider {
         id: String,
         created: Int,
         hasEmittedContent: inout Bool,
+        toolCallIndex: inout Int,
         continuation: AsyncThrowingStream<Data, Error>.Continuation
     ) {
         guard let value = SSEEvent.dataValue(from: event) else { return }
         if SSEEvent.isDone(value) { return }
         guard let json = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any] else { return }
-        guard let chunk = AntigravityEnvelopeTranslator.openAIChunk(
+        let chunk = AntigravityEnvelopeTranslator.openAIChunk(
             fromGeminiPayload: json,
             model: model,
             id: id,
             created: created,
-            emitRole: !hasEmittedContent
-        ) else { return }
+            emitRole: !hasEmittedContent,
+            toolCallIndex: toolCallIndex
+        )
+        guard let chunk else { return }
         continuation.yield(AntigravityEnvelopeTranslator.encodeSSEChunk(chunk))
         if let choices = chunk["choices"] as? [[String: Any]],
-           let delta = choices.first?["delta"] as? [String: Any],
-           let content = delta["content"] as? String, !content.isEmpty {
-            hasEmittedContent = true
+           let delta = choices.first?["delta"] as? [String: Any] {
+            if let content = delta["content"] as? String, !content.isEmpty {
+                hasEmittedContent = true
+            }
+            // 累计已发出的 tool_call 数量，保证流式多工具调用的 index 全局递增不重复
+            if let calls = delta["tool_calls"] as? [[String: Any]] {
+                toolCallIndex += calls.count
+            }
         }
     }
 

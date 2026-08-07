@@ -115,23 +115,51 @@ extension ChatContent: ExpressibleByStringLiteral {
     }
 }
 
+/// OpenAI `tool_calls[].function` 的函数调用（`name` + 参数 JSON 字符串）。
+public struct ToolCallFunction: Sendable, Codable, Equatable {
+    public var name: String?
+    public var arguments: String?
+
+    public init(name: String? = nil, arguments: String? = nil) {
+        self.name = name
+        self.arguments = arguments
+    }
+}
+
+/// OpenAI `tool_calls[]` 条目（assistant 消息携带）。
+public struct ToolCall: Sendable, Codable, Equatable {
+    public var id: String?
+    public var type: String?
+    public var function: ToolCallFunction?
+
+    public init(id: String? = nil, type: String? = nil, function: ToolCallFunction? = nil) {
+        self.id = id
+        self.type = type
+        self.function = function
+    }
+}
+
 public struct ChatMessage: Sendable, Codable, Equatable {
     public var role: ChatRole
     public var content: ChatContent?
     public var name: String?
     public var toolCallID: String?
+    /// OpenAI `tool_calls`（assistant 消息声明函数调用）。Codable 合成，缺失时为 nil。
+    public var toolCalls: [ToolCall]?
 
     /// `content` 接受字符串字面量（经 `ChatContent: ExpressibleByStringLiteral` 自动包装为 `.text`）。
-    public init(role: ChatRole, content: ChatContent? = nil, name: String? = nil, toolCallID: String? = nil) {
+    public init(role: ChatRole, content: ChatContent? = nil, name: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCall]? = nil) {
         self.role = role
         self.content = content
         self.name = name
         self.toolCallID = toolCallID
+        self.toolCalls = toolCalls
     }
 
     private enum CodingKeys: String, CodingKey {
         case role, content, name
         case toolCallID = "tool_call_id"
+        case toolCalls = "tool_calls"
     }
 }
 

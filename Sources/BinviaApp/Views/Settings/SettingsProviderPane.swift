@@ -84,16 +84,16 @@ struct SettingsProviderPane: View {
             .scrollContentBackground(.hidden)
             .onAppear {
                 loadDrafts()
-                if !descriptor.isUserDefined {
+                // 切换进入该供应商面板时自动拉取一次模型列表（方便直接查看已配置模型）；
+                // 「测试连接」仍会同步刷新，连通性 Section 底部不再保留「刷新模型列表」按钮。
+                if !(ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined ?? false) {
                     loadModels()
                 }
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
-                // 凭据变更时刷新模型列表与令牌草稿（OAuth 登录后令牌列表即时反映新 token）
+                // 凭据变更时刷新令牌草稿（OAuth 登录后令牌列表即时反映新 token）；
+                // 模型列表不自动拉取，留待「测试连接」时再刷新。
                 modelTestResults.removeAll()
-                if !descriptor.isUserDefined {
-                    loadModels()
-                }
                 loadDrafts()
             }
         } else {
@@ -357,9 +357,9 @@ struct SettingsProviderPane: View {
                     Text("加载模型列表…").foregroundStyle(.secondary)
                 }
             } else if models.isEmpty {
-                Button("刷新模型列表") { loadModels() }
-                    .buttonStyle(.link)
-                    .pointingHandCursor()
+                Text("暂无模型列表，点击上方「测试连接」刷新")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 ForEach(models) { model in
                     modelTestRow(model)
@@ -811,7 +811,14 @@ struct SettingsProviderPane: View {
     }
 
     private func startTest() {
-        Task { await appState.testProvider(providerID) }
+        Task { @MainActor in
+            // 「测试连接」时同步刷新模型列表（模型级测试依赖它；
+            // 进入面板时已自动拉取一次，见 onAppear）
+            if !(ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined ?? false) {
+                loadModels()
+            }
+            await appState.testProvider(providerID)
+        }
     }
 
     // MARK: - 模型列表 & 模型级测试
