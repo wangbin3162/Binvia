@@ -45,7 +45,7 @@ jobs:
           printf 'MARKETING_VERSION=%s\nBUILD_NUMBER=%s\n' "$VERSION" "${{ github.run_number }}" > version.env
           cat version.env
 
-      # 双架构（arm64 + x86_64）构建 + 647 项测试 + smoke-test + adhoc 签名 + tar.gz
+      # 双架构（arm64 + x86_64）构建 + 464 项测试 + smoke-test + adhoc 签名 + tar.gz
       - name: 构建 universal 产物
         run: ./Scripts/build.sh
 
@@ -83,7 +83,7 @@ jobs:
           echo '```' >> "$NOTES"
           echo "" >> "$NOTES"
           echo "## 构建信息" >> "$NOTES"
-          echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 647 项断言 → GUI 无界面自检）" >> "$NOTES"
+          echo "- 构建：GitHub Actions 自动完成（构建 → BinviaCheck 464 项断言 → GUI 无界面自检）" >> "$NOTES"
           echo "- 签名：当前为 adhoc 签名（未经 Apple 公证），首次打开若被拦截请右键 → 打开 → 确认" >> "$NOTES"
           gh release create "$TAG" \
             "bin/Binvia-${VERSION}-macos-arm64-x86_64.dmg" \

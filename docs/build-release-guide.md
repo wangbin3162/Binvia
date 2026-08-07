@@ -1,13 +1,13 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.1.6）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.1.7）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
 ## 1. 发布链路总览
 
 ```
-开发 → push main → CI 自动验证（构建 + 647 项测试 + GUI 自检）
+开发 → push main → CI 自动验证（构建 + 464 项测试 + GUI 自检）
                      ↓
             打 tag v0.1.0 → push tag → Release workflow 自动：
             双架构构建(arm64+x86_64) → 测试 → adhoc 签名 → tar.gz + SHA256 → GitHub Release
@@ -42,7 +42,7 @@ Release workflow 会**以 tag 为准覆盖** version.env，但本地构建前请
 | 命令 | 作用 |
 |---|---|
 | `make build` | 快速 debug 构建 |
-| `make test` | 跑全部测试（BinviaCheck，647 项断言） |
+| `make test` | 跑全部测试（BinviaCheck，464 项断言） |
 | `make run` | 启动本地网关服务器 |
 | `make release` | **完整打包**：双架构 release 构建 + 测试 + GUI 自检 + adhoc 签名 + tar.gz + SHA256，产物在 `bin/` |
 | `make clean` | 清空 `.build` 和 `bin/` |
@@ -148,8 +148,24 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.1.7 | 2026-08-07 | 模型列表修复（对齐/重名操作/上下文填充）；/v1/models 附带 context_length（见下） | `Binvia-0.1.7-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.1.7 变更内容
+
+- **模型列表设置面板修复**：输入框与表头对齐（macOS Form 中 TextField 必须加 `.labelsHidden()`
+  才尊重 `.frame(width:)`，否则塌缩成 prompt 决定的固有宽度——经验见 `lessons.md`）；
+  「菜单显示名」「实际请求模型」输入框加宽、「上下文窗口」收窄。
+- **重名条目按索引操作**：删除/编辑/下拉填充全部按列表索引定位（`remove(at:)` / `[index]`），
+  新增同名模型后删一个不再误删两个、填充不再覆盖到其他行。
+- **下拉填充自动带入上下文窗口**：选择「获取模型列表」的模型时，自动把供应商目录中的真实
+  `contextLength` 填入输入框（Kimi/CodeBuddy/Antigravity 等静态目录带真实值）；
+  上游接口未提供（如 DeepSeek 动态拉取）时保留默认 1_000_000。
+- **/v1/models 附带 `context_length`**：响应每项模型新增该字段（来自设置面板条目，
+  默认 1_000_000），客户端可据此展示各模型上下文窗口。
+- **新增 `lessons.md` 踩坑记录**：SwiftUI Form/TextField 布局、列表按索引操作两条经验；
+  `AGENTS.md` 尾部新增引用；移除已被 AGENTS.md 取代的 `CLAUDE.md` / `CODEBUDDY.md`。
 
 ### v0.1.6 变更内容
 
@@ -227,7 +243,7 @@ version.env 被覆盖）。本地构建则以 version.env 为准。所以**改�
 
 ### 7.5 测试在 CI 上会不会依赖真实网络？
 
-不会。BinviaCheck 的 647 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
+不会。BinviaCheck 的 464 项断言全部使用 mock（`URLProtocolMock` + 本地 `HTTPServer`），
 测试入口会把 `BINVIA_CONFIG` 指到 `/tmp` 并清空凭据环境变量，不会触碰真实配置与上游。
 
 ---
