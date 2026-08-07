@@ -92,10 +92,12 @@ public struct RouteHandler: Sendable {
             let id: String
             let object: String
             let ownedBy: String
+            let contextLength: Int
             private enum CodingKeys: String, CodingKey {
                 case id
                 case object
                 case ownedBy = "owned_by"
+                case contextLength = "context_length"
             }
         }
         struct ListResponse: Codable {
@@ -108,10 +110,10 @@ public struct RouteHandler: Sendable {
         // 模型 id 统一归一化为 `<alias>/<displayName>`（无别名用 provider id），
         // 与网关 key 白名单格式及 Router 的 `alias/model` 解析一致。
         // 显示名称为空时回退到 modelName，避免显示空白。
-        let appendModel = { (alias: String, displayID: String, providerID: String) in
+        let appendModel = { (alias: String, displayID: String, providerID: String, contextLength: Int) in
             let normalized = "\(alias)/\(displayID)"
             guard seen.insert(normalized).inserted else { return }
-            items.append(ModelItem(id: normalized, object: "model", ownedBy: providerID))
+            items.append(ModelItem(id: normalized, object: "model", ownedBy: providerID, contextLength: contextLength))
         }
 
         // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 时，只返回白名单内模型
@@ -132,7 +134,7 @@ public struct RouteHandler: Sendable {
             let alias = descriptor.alias ?? descriptor.id
             let userModels = config.providers[descriptor.id]?.userModels ?? []
             for entry in userModels where isModelAllowed(alias, entry.effectiveDisplayName) {
-                appendModel(alias, entry.effectiveDisplayName, descriptor.id)
+                appendModel(alias, entry.effectiveDisplayName, descriptor.id, entry.contextLength)
             }
         }
 

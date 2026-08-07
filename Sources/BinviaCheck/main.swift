@@ -561,7 +561,7 @@ func providerModelDisableTests() async throws {
                 enabled: true,
                 credential: ProviderCredential(apiKey: "k"),
                 userModels: [
-                    ProviderModelEntry(displayName: "d4pro", modelName: "deepseek-v4-pro"),
+                    ProviderModelEntry(displayName: "d4pro", modelName: "deepseek-v4-pro", contextLength: 200_000),
                     ProviderModelEntry(modelName: "deepseek-v4-flash"),
                 ]
             ),
@@ -581,10 +581,17 @@ func providerModelDisableTests() async throws {
     let modelsResp = try await handler.handle(req("GET", "/v1/models"))
     if let data = modelsResp.bodyData(),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        let ids = Set((json["data"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+        let models = json["data"] as? [[String: Any]] ?? []
+        let ids = Set(models.compactMap { $0["id"] as? String })
         expectTrue(ids.contains("ds/d4pro"), "/v1/models 含自定义显示名模型")
         expectTrue(ids.contains("ds/deepseek-v4-flash"), "/v1/models 含无显示名模型（回退 modelName）")
         expectFalse(ids.contains("ds/deepseek-v4-pro"), "/v1/models 不含未配置模型")
+        // Phase 24：/v1/models 附带上下文窗口
+        let byID = Dictionary(uniqueKeysWithValues: models.compactMap { m in
+            (m["id"] as? String).map { ($0, m) }
+        })
+        expectEqual(byID["ds/d4pro"]?["context_length"] as? Int, 200_000, "/v1/models 携带自定义 context_length")
+        expectEqual(byID["ds/deepseek-v4-flash"]?["context_length"] as? Int, 1_000_000, "/v1/models 未配置时 context_length 回退默认值")
     } else {
         failed += 1
         print("FAIL: /v1/models 用户模型列表响应解析失败")

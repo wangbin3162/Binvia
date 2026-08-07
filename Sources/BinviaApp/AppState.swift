@@ -373,19 +373,20 @@ final class AppState: ObservableObject {
        try saveConfig()
    }
 
-    /// 从自定义 provider 删除一个模型条目（按 modelName 匹配）。
-   func removeCustomModel(providerID: String, modelName: String) throws {
-       guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
-       config.customProviderDefs[idx].models.removeAll { $0.modelName == modelName }
-       reregisterCustomProvider(config.customProviderDefs[idx])
-       try saveConfig()
-   }
-
-    /// 更新自定义 provider 下某个模型条目（按原 modelName 定位，替换为新 entry）。
-    func updateCustomModel(providerID: String, originalModelName: String, entry: ProviderModelEntry) throws {
+    /// 从自定义 provider 删除一个模型条目（按列表索引定位，重名条目只删当前行）。
+    func removeCustomModel(providerID: String, at index: Int) throws {
         guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
-        guard let modelIdx = config.customProviderDefs[idx].models.firstIndex(where: { $0.modelName == originalModelName }) else { return }
-        config.customProviderDefs[idx].models[modelIdx] = entry
+        guard config.customProviderDefs[idx].models.indices.contains(index) else { return }
+        config.customProviderDefs[idx].models.remove(at: index)
+        reregisterCustomProvider(config.customProviderDefs[idx])
+        try saveConfig()
+    }
+
+    /// 更新自定义 provider 下某个模型条目（按列表索引定位，替换为新 entry）。
+    func updateCustomModel(providerID: String, at index: Int, entry: ProviderModelEntry) throws {
+        guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+        guard config.customProviderDefs[idx].models.indices.contains(index) else { return }
+        config.customProviderDefs[idx].models[index] = entry
         reregisterCustomProvider(config.customProviderDefs[idx])
         try saveConfig()
     }
@@ -409,19 +410,20 @@ final class AppState: ObservableObject {
        try saveConfig()
    }
 
-    /// 从某 provider 删除一个用户模型条目（按 modelName 匹配）。
-    func removeUserModel(modelName: String, for providerID: String) throws {
+    /// 从某 provider 删除一个用户模型条目（按列表索引定位，重名条目只删当前行）。
+    func removeUserModel(at index: Int, for providerID: String) throws {
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        providerConfig.userModels.removeAll { $0.modelName == modelName }
+        guard providerConfig.userModels.indices.contains(index) else { return }
+        providerConfig.userModels.remove(at: index)
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
 
-    /// 更新某 provider 下某个用户模型条目（按原 modelName 定位，替换为新 entry）。
-    func updateUserModel(originalModelName: String, entry: ProviderModelEntry, for providerID: String) throws {
+    /// 更新某 provider 下某个用户模型条目（按列表索引定位，替换为新 entry）。
+    func updateUserModel(at index: Int, entry: ProviderModelEntry, for providerID: String) throws {
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        guard let idx = providerConfig.userModels.firstIndex(where: { $0.modelName == originalModelName }) else { return }
-        providerConfig.userModels[idx] = entry
+        guard providerConfig.userModels.indices.contains(index) else { return }
+        providerConfig.userModels[index] = entry
         config.providers[providerID] = providerConfig
         try saveConfig()
     }

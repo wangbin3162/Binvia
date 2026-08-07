@@ -70,3 +70,7 @@ PRs should:
 - Config file: `~/.config/binvia/config.json` (`BINVIA_CONFIG` overrides). Credential env vars: `DEEPSEEK_API_KEY`, `CODEBUDDY_CN_ACCESS_TOKEN`, `ANTIGRAVITY_ACCESS_TOKEN`. Gateway keys: `BINVIA_API_KEY` / `ROUTER_API_KEY`.
 - Forced-streaming upstreams (CodeBuddy, Antigravity) aggregate SSE to JSON for non-streaming clients via `SSEJSONAggregator`; follow this pattern for new OAuth-based providers.
 - `HTTPServer.setHandler()` supports runtime hot-replacement of the route handler — the GUI's hot-reload depends on it; don't break this contract.
+
+## Lessons
+
+踩坑记录与经验沉淀在仓库根目录 `lessons.md`（SwiftUI Form/TextField 布局、列表按索引操作等）。**改动 GUI 布局或列表增删改逻辑前，先阅读 `lessons.md` 中相关条目，避免重复踩坑。**

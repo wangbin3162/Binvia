@@ -116,7 +116,7 @@ BinviaCLI oauth login codebuddy-cn
 # 健康检查
 curl http://localhost:20427/v1/health
 
-# 模型列表（含各供应商动态模型）
+# 模型列表（含各供应商动态模型，附带 context_length 上下文窗口）
 curl http://localhost:20427/v1/models
 
 # 聊天（流式）

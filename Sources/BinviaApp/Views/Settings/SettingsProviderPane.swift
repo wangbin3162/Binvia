@@ -331,7 +331,7 @@ struct SettingsProviderPane: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                modelColumnsLayout
+                modelListLayout
             }
         } header: {
             Text("模型列表")
@@ -344,58 +344,33 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 模型列表按列布局，保证表头和输入框使用同一个 leading 起点。
-    private var modelColumnsLayout: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
+    /// 模型列表布局：表头 + 每行一个 HStack（菜单显示名 / 实际请求模型 / 上下文窗口 / 删除）。
+    /// 行内固定列宽保证表头与输入框始终对齐；每行独立，删除/填充按列表索引定位，重名条目互不影响。
+    private var modelListLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
                 modelColumnHeader("菜单显示名")
-                ForEach(modelEntries) { entry in
-                    leadingTextField(
-                        text: displayNameBinding(for: entry),
-                        prompt: "菜单显示名"
-                    )
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(alignment: .leading, spacing: 8) {
+                    .frame(width: modelDisplayNameWidth, alignment: .leading)
                 modelColumnHeader("实际请求模型")
-                ForEach(modelEntries) { entry in
-                    modelNameField(entry)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(alignment: .leading, spacing: 8) {
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 modelColumnHeader("上下文窗口")
-                ForEach(modelEntries) { entry in
-                    leadingTextField(
-                        value: contextLengthBinding(for: entry)
-                    )
-                }
+                    .frame(width: modelContextWidth, alignment: .leading)
+                Color.clear
+                    .frame(width: modelDeleteWidth, height: 17)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 8) {
-                Color.clear.frame(height: 17)
-                ForEach(modelEntries) { entry in
-                    Button(role: .destructive) {
-                        removeModel(modelName: entry.modelName)
-                    } label: {
-                        Image(systemName: "trash")
-                            .foregroundStyle(.secondary)
-                            .font(.footnote)
-                            .padding(2)
-                    }
-                    .buttonStyle(.plain)
-                    .hoverHighlight(cornerRadius: 4)
-                    .help("删除模型")
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                }
+            ForEach(Array(modelEntries.enumerated()), id: \.offset) { index, entry in
+                modelEntryRow(entry, index: index)
             }
-            .frame(width: 24)
         }
     }
+
+    /// 菜单显示名输入框宽度（比令牌标签更宽，容纳较长名称）。
+    private let modelDisplayNameWidth: CGFloat = 200
+    /// 上下文窗口输入框宽度（数字较短，收窄给模型名列留空间）。
+    private let modelContextWidth: CGFloat = 90
+    /// 删除按钮列宽度。
+    private let modelDeleteWidth: CGFloat = 24
 
     private func modelColumnHeader(_ title: String) -> some View {
         Text(title)
@@ -404,29 +379,47 @@ struct SettingsProviderPane: View {
             .frame(height: 17, alignment: .leading)
     }
 
-    private func leadingTextField(text: Binding<String>, prompt: String) -> some View {
-        TextField("", text: text, prompt: Text(prompt))
-            .font(.footnote)
-            .multilineTextAlignment(.leading)
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func leadingTextField(value: Binding<Int>) -> some View {
-        TextField("", value: value, format: .number)
-            .font(.footnote)
-            .multilineTextAlignment(.leading)
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: 120, alignment: .leading)
-    }
-
-    private func modelNameField(_ entry: ProviderModelEntry) -> some View {
-        HStack(spacing: 4) {
-            TextField("", text: modelNameBinding(for: entry), prompt: Text("实际请求模型"))
+    /// 单个模型条目行：显示名 / 请求模型 / 上下文窗口 / 删除按钮，列宽与表头一致。
+    /// 注意：macOS Form 里 TextField 必须加 .labelsHidden() 才会尊重 .frame(width:)，
+    /// 否则会塌缩成由 prompt/内容决定的固有宽度（令牌行同样依赖此行为）。
+    private func modelEntryRow(_ entry: ProviderModelEntry, index: Int) -> some View {
+        HStack(spacing: 12) {
+            TextField("", text: displayNameBinding(for: entry, index: index), prompt: Text("菜单显示名"))
+                .labelsHidden()
                 .font(.footnote)
-                .multilineTextAlignment(.leading)
                 .textFieldStyle(.roundedBorder)
+                .frame(width: modelDisplayNameWidth, alignment: .leading)
+
+            modelNameField(entry, index: index)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            TextField("", value: contextLengthBinding(for: entry, index: index), format: .number)
+                .labelsHidden()
+                .font(.footnote)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: modelContextWidth, alignment: .leading)
+
+            Button(role: .destructive) {
+                removeModel(at: index)
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
+                    .padding(2)
+            }
+            .buttonStyle(.plain)
+            .hoverHighlight(cornerRadius: 4)
+            .help("删除模型")
+            .frame(width: modelDeleteWidth, height: 20)
+        }
+    }
+
+    private func modelNameField(_ entry: ProviderModelEntry, index: Int) -> some View {
+        HStack(spacing: 4) {
+            TextField("", text: modelNameBinding(for: entry, index: index), prompt: Text("实际请求模型"))
+                .labelsHidden()
+                .font(.footnote)
+                .textFieldStyle(.roundedBorder)
 
             // 下拉选择固定占宽（无论是否已获取模型列表），避免获取列表后本列被挤压错位
             Group {
@@ -436,8 +429,10 @@ struct SettingsProviderPane: View {
                             Button(fetched.id) {
                                 updateEntryModelName(
                                     entry: entry,
+                                    index: index,
                                     modelName: fetched.id,
-                                    displayName: fetched.name ?? ""
+                                    displayName: fetched.name ?? "",
+                                    contextLength: fetched.contextLength
                                 )
                             }
                         }
@@ -521,85 +516,71 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// 删除一个模型条目。
-    private func removeModel(modelName: String) {
+    /// 删除一个模型条目（按列表索引定位，重名条目只删当前行）。
+    private func removeModel(at index: Int) {
         if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
-            try? appState.removeCustomModel(providerID: providerID, modelName: modelName)
+            try? appState.removeCustomModel(providerID: providerID, at: index)
         } else {
-            try? appState.removeUserModel(modelName: modelName, for: providerID)
+            try? appState.removeUserModel(at: index, for: providerID)
         }
     }
 
-    /// 从下拉选择模型时，更新模型名并自动填充显示名（为空时用模型名）。
-    private func updateEntryModelName(entry: ProviderModelEntry, modelName: String, displayName: String) {
+    /// 从下拉选择模型时，更新模型名、自动填充显示名（为空时用模型名），
+    /// 并把供应商目录中的真实上下文窗口带入 contextLength（接口未提供时保留原值，
+    /// 新增空白行原值即默认 1_000_000）。按列表索引定位，避免重名条目被覆盖到其他行。
+    private func updateEntryModelName(entry: ProviderModelEntry, index: Int, modelName: String, displayName: String, contextLength: Int?) {
         let newEntry = ProviderModelEntry(
             displayName: displayName.isEmpty ? modelName : displayName,
             modelName: modelName,
-            contextLength: entry.contextLength
+            contextLength: contextLength ?? entry.contextLength
         )
         if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
-            try? appState.updateCustomModel(
-                providerID: providerID,
-                originalModelName: entry.modelName,
-                entry: newEntry
-            )
+            try? appState.updateCustomModel(providerID: providerID, at: index, entry: newEntry)
         } else {
-            try? appState.updateUserModel(
-                originalModelName: entry.modelName,
-                entry: newEntry,
-                for: providerID
-            )
+            try? appState.updateUserModel(at: index, entry: newEntry, for: providerID)
         }
     }
 
     // MARK: - 模型条目双向绑定
 
-    private func displayNameBinding(for entry: ProviderModelEntry) -> Binding<String> {
+    private func displayNameBinding(for entry: ProviderModelEntry, index: Int) -> Binding<String> {
         Binding(
             get: { entry.displayName },
             set: { newValue in
-                updateEntryField(entry: entry, displayName: newValue, modelName: nil, contextLength: nil)
+                updateEntryField(entry: entry, index: index, displayName: newValue, modelName: nil, contextLength: nil)
             }
         )
     }
 
-    private func modelNameBinding(for entry: ProviderModelEntry) -> Binding<String> {
+    private func modelNameBinding(for entry: ProviderModelEntry, index: Int) -> Binding<String> {
         Binding(
             get: { entry.modelName },
             set: { newValue in
-                updateEntryField(entry: entry, displayName: nil, modelName: newValue, contextLength: nil)
+                updateEntryField(entry: entry, index: index, displayName: nil, modelName: newValue, contextLength: nil)
             }
         )
     }
 
-    private func contextLengthBinding(for entry: ProviderModelEntry) -> Binding<Int> {
+    private func contextLengthBinding(for entry: ProviderModelEntry, index: Int) -> Binding<Int> {
         Binding(
             get: { entry.contextLength },
             set: { newValue in
-                updateEntryField(entry: entry, displayName: nil, modelName: nil, contextLength: newValue)
+                updateEntryField(entry: entry, index: index, displayName: nil, modelName: nil, contextLength: newValue)
             }
         )
     }
 
-    /// 局部更新模型条目的某个字段（nil 表示不修改）。
-    private func updateEntryField(entry: ProviderModelEntry, displayName: String?, modelName: String?, contextLength: Int?) {
+    /// 局部更新模型条目的某个字段（nil 表示不修改）。按列表索引定位。
+    private func updateEntryField(entry: ProviderModelEntry, index: Int, displayName: String?, modelName: String?, contextLength: Int?) {
         let newEntry = ProviderModelEntry(
             displayName: displayName ?? entry.displayName,
             modelName: modelName ?? entry.modelName,
             contextLength: contextLength ?? entry.contextLength
         )
         if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
-            try? appState.updateCustomModel(
-                providerID: providerID,
-                originalModelName: entry.modelName,
-                entry: newEntry
-            )
+            try? appState.updateCustomModel(providerID: providerID, at: index, entry: newEntry)
         } else {
-            try? appState.updateUserModel(
-                originalModelName: entry.modelName,
-                entry: newEntry,
-                for: providerID
-            )
+            try? appState.updateUserModel(at: index, entry: newEntry, for: providerID)
         }
     }
 
