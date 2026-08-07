@@ -470,9 +470,9 @@ func gatewayKeyWhitelistTests() async throws {
             GatewayKeyConfig(key: "whitelisted-key", enabledModels: ["ds/deepseek-v4-pro"]),
             GatewayKeyConfig(key: "open-key"),
         ],
-        providers: ["deepseek": ProviderConfig(enabled: true)]
-    )
-    let handler = RouteHandler(config: config)
+       providers: ["deepseek": ProviderConfig(enabled: true, userModels: [ProviderModelEntry(modelName: "deepseek-v4-pro"), ProviderModelEntry(modelName: "deepseek-v4-flash")])]
+   )
+   let handler = RouteHandler(config: config)
 
     func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {
         var headers: [String: String] = [:]
@@ -538,19 +538,21 @@ func providerModelDisableTests() async throws {
     unsetenv("DEEPSEEK_BASE_URL")
     await ModelCache.shared.invalidate("deepseek")
 
-    // 1) ProviderConfig.disabledModels 编解码（含旧配置缺字段回退）
-    let pc = ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), disabledModels: ["deepseek-v4-flash"])
+    // 1) ProviderConfig.userModels 编解码（含旧配置缺字段回退）
+    let entry = ProviderModelEntry(displayName: "g52", modelName: "glm-5.2", contextLength: 128000)
+    let pc = ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), userModels: [entry])
     let pcData = try JSONEncoder().encode(pc)
     let pcDecoded = try JSONDecoder().decode(ProviderConfig.self, from: pcData)
-    expectEqual(pcDecoded.disabledModels, ["deepseek-v4-flash"], "disabledModels round trip")
-    expectTrue(pcDecoded.isModelDisabled("deepseek-v4-flash"), "isModelDisabled 命中")
-    expectFalse(pcDecoded.isModelDisabled("deepseek-v4-pro"), "isModelDisabled 未命中")
+    expectEqual(pcDecoded.userModels.count, 1, "userModels round trip count")
+    expectEqual(pcDecoded.userModels.first?.modelName, "glm-5.2", "userModels modelName")
+    expectEqual(pcDecoded.userModels.first?.displayName, "g52", "userModels displayName")
+    expectEqual(pcDecoded.userModels.first?.contextLength, 128000, "userModels contextLength")
 
     let legacy = #"{"enabled": true, "credential": {"apiKey": "k"}}"#
     let legacyDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacy.utf8))
-    expectEqual(legacyDecoded.disabledModels, [], "旧配置缺 disabledModels → 空数组")
+    expectEqual(legacyDecoded.userModels.count, 0, "旧配置缺 userModels → 空数组")
 
-    // 2) 路由：禁用模型不出现在 /v1/models，chat 返回 404
+    // 2) 路由：/v1/models 只返回用户配置的模型
     let config = RouteConfig(
         host: "127.0.0.1", port: 0,
         apiKeys: [GatewayKeyConfig(key: "test-key")],
@@ -558,7 +560,10 @@ func providerModelDisableTests() async throws {
             "deepseek": ProviderConfig(
                 enabled: true,
                 credential: ProviderCredential(apiKey: "k"),
-                disabledModels: ["deepseek-v4-flash"]
+                userModels: [
+                    ProviderModelEntry(displayName: "d4pro", modelName: "deepseek-v4-pro"),
+                    ProviderModelEntry(modelName: "deepseek-v4-flash"),
+                ]
             ),
         ]
     )
@@ -577,19 +582,18 @@ func providerModelDisableTests() async throws {
     if let data = modelsResp.bodyData(),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         let ids = Set((json["data"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
-        expectTrue(ids.contains("ds/deepseek-v4-pro"), "/v1/models 含未禁用模型")
-        expectFalse(ids.contains("ds/deepseek-v4-flash"), "/v1/models 不含禁用模型")
+        expectTrue(ids.contains("ds/d4pro"), "/v1/models 含自定义显示名模型")
+        expectTrue(ids.contains("ds/deepseek-v4-flash"), "/v1/models 含无显示名模型（回退 modelName）")
+        expectFalse(ids.contains("ds/deepseek-v4-pro"), "/v1/models 不含未配置模型")
     } else {
         failed += 1
-        print("FAIL: /v1/models 禁用模型过滤响应解析失败")
+        print("FAIL: /v1/models 用户模型列表响应解析失败")
     }
 
-    let disabled = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/deepseek-v4-flash")))
-    expectEqual(disabled.status, 404, "禁用模型 chat → 404")
-
-    // 未禁用模型仍正常路由（无凭据/不可达上游 → 502，而非 404）
-    let enabled = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/deepseek-v4-pro")))
-    expectEqual(enabled.status, 502, "未禁用模型正常进入上游（无凭据 → 502）")
+    // 用显示名请求 → 路由到真实模型名
+    let chat = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/d4pro")))
+    // 无凭据/不可达上游 → 502（说明路由成功，模型名映射成功）
+    expectEqual(chat.status, 502, "显示名路由到真实模型名（无凭据 → 502）")
 }
 
 extension HTTPResponse {
@@ -758,11 +762,11 @@ func routeHandlerTests() async throws {
     let config = RouteConfig(
         host: "127.0.0.1", port: 0,
         apiKeys: [GatewayKeyConfig(key: "test-key")],
-        providers: ["codebuddy-cn": ProviderConfig(enabled: true)]
-    )
-    let handler = RouteHandler(config: config)
+       providers: ["codebuddy-cn": ProviderConfig(enabled: true, userModels: [ProviderModelEntry(modelName: "glm-5.2")])]
+   )
+   let handler = RouteHandler(config: config)
 
-    func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {
+   func req(_ method: String, _ path: String, authorization: String? = nil, body: Data? = nil) -> HTTPRequest {
         var headers: [String: String] = [:]
         if let authorization { headers["authorization"] = authorization }
         return HTTPRequest(method: method, path: path, queryItems: [:], headers: headers, body: body)
@@ -2574,7 +2578,7 @@ func genericOpenAIProviderTests() async throws {
     let provider = GenericOpenAIProvider(
         id: "unisound",
         baseURL: URL(string: "https://mock.test/v1")!,
-        models: ["glm-5.2"]
+        models: [ProviderModelEntry(modelName: "glm-5.2")]
     )
 
     // 1) listModels 返回不带前缀的模型，避免外层拼接成双重前缀
@@ -2636,7 +2640,7 @@ func genericOpenAIProviderTests() async throws {
     let fullPathProvider = GenericOpenAIProvider(
         id: "unisound",
         baseURL: URL(string: "https://mock.test/v1/chat/completions")!,
-        models: ["glm-5.2"]
+        models: [ProviderModelEntry(modelName: "glm-5.2")]
     )
     URLProtocolMock.reset()
     URLProtocolMock.requestHandler = { request in
@@ -2689,7 +2693,7 @@ func genericOpenAIProviderTests() async throws {
     let dupProvider = GenericOpenAIProvider(
         id: "unisound",
         baseURL: URL(string: "https://mock.test/v1")!,
-        models: ["unisound/glm-5.2", "unisound/unisound/glm-5.2-flash"]
+        models: [ProviderModelEntry(modelName: "unisound/glm-5.2"), ProviderModelEntry(modelName: "unisound/unisound/glm-5.2-flash")]
     )
     let dupModels = try await dupProvider.listModels(credential: nil)
     expectEqual(
@@ -2762,7 +2766,7 @@ func registryUnregisterTests() {
         baseURL: URL(string: "https://example.com/v1"),
         models: [Model(id: "test-model")],
         isUserDefined: true,
-        makeProvider: { GenericOpenAIProvider(id: testID, baseURL: URL(string: "https://example.com/v1")!, models: ["test-model"]) }
+        makeProvider: { GenericOpenAIProvider(id: testID, baseURL: URL(string: "https://example.com/v1")!, models: [ProviderModelEntry(modelName: "test-model")]) }
     )
     registry.register(descriptor)
     expectEqual(registry.descriptor(for: testID)?.id, testID, "注册后可查询")
@@ -2787,7 +2791,7 @@ func routerCustomProviderTests() {
         baseURL: URL(string: "https://example.com/v1"),
         models: [],
         isUserDefined: true,
-        makeProvider: { GenericOpenAIProvider(id: testID, baseURL: URL(string: "https://example.com/v1")!, models: ["alpha"]) }
+        makeProvider: { GenericOpenAIProvider(id: testID, baseURL: URL(string: "https://example.com/v1")!, models: [ProviderModelEntry(modelName: "alpha")]) }
     )
     registry.register(descriptor)
     defer { registry.unregister(testID) }
@@ -2816,7 +2820,7 @@ func routerCustomProviderTests() {
 
 /// `CustomProviderDef` 配置编解码测试：snake_case 持久化 + 向后兼容（缺字段回退空数组）。
 func customProviderConfigCodecTests() throws {
-    let def = CustomProviderDef(id: "unisound", displayName: "Unisound", baseURL: "https://api.unisound.com/v1", models: ["glm-5.2", "glm-5.2-flash"])
+    let def = CustomProviderDef(id: "unisound", displayName: "Unisound", baseURL: "https://api.unisound.com/v1", models: [ProviderModelEntry(modelName: "glm-5.2"), ProviderModelEntry(modelName: "glm-5.2-flash")])
 
     // 1) 通过 RouteConfig 完整编解码
     let config = RouteConfig(customProviderDefs: [def])
@@ -2825,7 +2829,8 @@ func customProviderConfigCodecTests() throws {
     expectEqual(decoded.customProviderDefs.count, 1, "编解码后 customProviderDefs 数量")
     expectEqual(decoded.customProviderDef(for: "unisound")?.displayName, "Unisound", "编解码后 displayName 保留")
     expectEqual(decoded.customProviderDef(for: "unisound")?.baseURL, "https://api.unisound.com/v1", "编解码后 baseURL 保留")
-    expectEqual(decoded.customProviderDef(for: "unisound")?.models, ["glm-5.2", "glm-5.2-flash"], "编解码后 models 保留")
+    expectEqual(decoded.customProviderDef(for: "unisound")?.models.count, 2, "编解码后 models 数量")
+    expectEqual(decoded.customProviderDef(for: "unisound")?.models.first?.modelName, "glm-5.2", "编解码后首个 modelName")
 
     // 2) 真实 ConfigStore snake_case 持久化：base_url 不能因 acronym 解码失败而丢失整个配置。
     let configPath = NSTemporaryDirectory() + "binvia-config-codec-\(UUID().uuidString).json"
@@ -2833,7 +2838,7 @@ func customProviderConfigCodecTests() throws {
     try ConfigStore.save(config, to: configPath)
     let persisted = try ConfigStore.load(path: configPath)
     expectEqual(persisted.customProviderDef(for: "unisound")?.baseURL, "https://api.unisound.com/v1", "ConfigStore base_url 解码")
-    expectEqual(persisted.customProviderDef(for: "unisound")?.models, ["glm-5.2", "glm-5.2-flash"], "ConfigStore models 保留")
+    expectEqual(persisted.customProviderDef(for: "unisound")?.models.count, 2, "ConfigStore models 数量")
 
     // 3) 旧配置（无 customProviderDefs 字段）解码后回退空数组
     let legacyJSON = Data(#"{"version":2,"host":"localhost","port":20427,"apiKeys":[],"providers":{}}"#.utf8)

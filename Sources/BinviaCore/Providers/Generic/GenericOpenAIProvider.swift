@@ -16,12 +16,11 @@ public struct GenericOpenAIProvider: Provider {
     private let baseURL: URL
     private let models: [Model]
 
-    public init(id: String, baseURL: URL, models: [String]) {
+    public init(id: String, baseURL: URL, models: [ProviderModelEntry]) {
         self.id = id
         self.baseURL = Self.normalizeBaseURL(baseURL)
-        // 归一化：配置只保存原始模型名；兼容历史配置中已经带有一个或多个前缀的情况。
-        self.models = models.map { raw in
-            Model(id: Self.stripRepeatedPrefix(raw, id: id))
+        self.models = models.map { entry in
+            Model(id: Self.stripRepeatedPrefix(entry.modelName, id: id))
         }
     }
 

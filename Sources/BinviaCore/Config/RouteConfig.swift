@@ -63,26 +63,21 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
     public var apiKeys: [KeyedToken]
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。nil = 供应商默认区域。
     public var region: String?
-    /// 禁用模型列表（设置面板模型行的启用/禁用开关）：禁用模型视为不存在——
-    /// `/v1/models` 不展示、网关白名单不可选、请求返回 404。原始模型名（不含 provider 前缀）。
-    public var disabledModels: [String]
+    /// 用户配置的模型列表（显示名称 + 模型名 + 上下文窗口）。默认为空，由用户在设置面板
+    /// 手动添加或通过「获取模型列表」从上游拉取后填充。替代旧的 disabledModels 机制。
+    public var userModels: [ProviderModelEntry]
 
-    public init(enabled: Bool = false, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil, disabledModels: [String] = []) {
+    public init(enabled: Bool = false, credential: ProviderCredential = ProviderCredential(), apiKeys: [KeyedToken] = [], region: String? = nil, userModels: [ProviderModelEntry] = []) {
         self.enabled = enabled
         self.credential = credential
         self.apiKeys = apiKeys
         self.region = region
-        self.disabledModels = disabledModels
+        self.userModels = userModels
     }
 
     /// 全部令牌值（provider / 路由层用，忽略标签）。
     public var apiKeyValues: [String] {
         apiKeys.map(\.value)
-    }
-
-    /// 某模型是否被禁用（设置面板「禁用」开关）。
-    public func isModelDisabled(_ modelID: String) -> Bool {
-        disabledModels.contains(modelID)
     }
 
     // 兼容旧配置：`apiKeys`/`region` 是新增字段，缺失时回退默认值。
@@ -91,7 +86,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         case credential
         case apiKeys
         case region
-        case disabledModels
+        case userModels
     }
 
     public init(from decoder: any Decoder) throws {
@@ -105,7 +100,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
             self.apiKeys = try container.decodeIfPresent([KeyedToken].self, forKey: .apiKeys) ?? []
         }
         self.region = try container.decodeIfPresent(String.self, forKey: .region)
-        self.disabledModels = try container.decodeIfPresent([String].self, forKey: .disabledModels) ?? []
+        self.userModels = try container.decodeIfPresent([ProviderModelEntry].self, forKey: .userModels) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -114,7 +109,7 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         try container.encode(credential, forKey: .credential)
         try container.encode(apiKeys, forKey: .apiKeys)
         try container.encodeIfPresent(region, forKey: .region)
-        try container.encodeIfPresent(disabledModels.isEmpty ? nil : disabledModels, forKey: .disabledModels)
+        try container.encodeIfPresent(userModels.isEmpty ? nil : userModels, forKey: .userModels)
     }
 }
 
@@ -130,9 +125,9 @@ public struct CustomProviderDef: Codable, Sendable, Equatable {
     public var id: String
     public var displayName: String
     public var baseURL: String
-    public var models: [String]
+    public var models: [ProviderModelEntry]
 
-    public init(id: String, displayName: String, baseURL: String, models: [String] = []) {
+    public init(id: String, displayName: String, baseURL: String, models: [ProviderModelEntry] = []) {
         self.id = id
         self.displayName = displayName
         self.baseURL = baseURL
@@ -158,7 +153,7 @@ public struct CustomProviderDef: Codable, Sendable, Equatable {
         } else {
             baseURL = try container.decode(String.self, forKey: .legacyBaseURL)
         }
-        models = try container.decodeIfPresent([String].self, forKey: .models) ?? []
+        models = try container.decodeIfPresent([ProviderModelEntry].self, forKey: .models) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {

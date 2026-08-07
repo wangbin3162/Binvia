@@ -29,30 +29,10 @@ struct SettingsProviderPane: View {
     /// 「手动配置」DisclosureGroup 展开状态（用于折叠态悬停小手光标）。
     @State private var isManualTokenExpanded = false
 
-    /// 模型列表与模型级测试状态。
-    @State private var models: [Model] = []
-    @State private var loadingModels = false
-    /// 当前正在测试的模型 id（用于显示专属加载态）。
-    @State private var testingModelID: String?
-    /// 各模型的测试结果。
-    @State private var modelTestResults: [String: ModelTestResult] = [:]
-
-    /// 「测试全部模型」批量测试状态（Phase 13 需求 1：串行 + 进度条）。
-    @State private var isTestingAll = false
-    @State private var testAllCurrent = 0
-    @State private var testAllTotal = 0
-    @State private var testAllOutcomes: [ModelTestOutcome] = []
-
-    /// 自定义 provider 的「添加模型」输入框草稿。
-    @State private var newModelName = ""
-
-    /// 单个模型的测试结果状态。
-    enum ModelTestResult: Equatable {
-        case idle
-        case testing
-        case ok(String)
-        case failed(String)
-    }
+    /// 从上游获取的模型列表缓存（点击「获取模型列表」后填充，供添加模型时下拉选择）。
+    @State private var fetchedModels: [Model] = []
+    @State private var isFetchingModels = false
+    @State private var fetchMessage: String?
 
     var body: some View {
         if appState.isShowingCodeInput {
@@ -73,27 +53,16 @@ struct SettingsProviderPane: View {
                     usageSection
                 }
                 connectionSection(descriptor)
-                // 自定义 provider：可编辑模型列表（替代只读连通性 Section）
-                if descriptor.isUserDefined {
-                    customModelsSection
-                } else {
-                    testResultSection
-                }
+                modelsSection(descriptor)
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .onAppear {
                 loadDrafts()
-                // 切换进入该供应商面板时自动拉取一次模型列表（方便直接查看已配置模型）；
-                // 「测试连接」仍会同步刷新，连通性 Section 底部不再保留「刷新模型列表」按钮。
-                if !(ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined ?? false) {
-                    loadModels()
-                }
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
                 // 凭据变更时刷新令牌草稿（OAuth 登录后令牌列表即时反映新 token）；
                 // 模型列表不自动拉取，留待「测试连接」时再刷新。
-                modelTestResults.removeAll()
                 loadDrafts()
             }
         } else {
@@ -339,332 +308,299 @@ struct SettingsProviderPane: View {
         }
     }
 
-    // MARK: - 连通性测试结果（供应商级 + 模型级）
+    // MARK: - 模型列表
 
+    /// 当前面板的模型列表（内置 provider 从 config.userModels 派生，自定义 provider 从 customProviderDef.models 派生）。
+    private var modelEntries: [ProviderModelEntry] {
+        if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
+            return appState.customProviderDef(for: providerID)?.models ?? []
+        }
+        return appState.userModels(for: providerID)
+    }
+
+    /// 「模型列表」Section：获取模型列表 + 添加模型按钮 + 模型行（显示名/模型名/上下文窗口 + 删除）。
     @ViewBuilder
-    private var testResultSection: some View {
+    private func modelsSection(_ descriptor: ProviderDescriptor) -> some View {
         Section {
-            // 供应商级测试
-            providerTestRow
-
-            // 测试全部模型（Phase 13 需求 1）
-            testAllRow
-
-            // 模型级测试列表
-            if loadingModels {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("加载模型列表…").foregroundStyle(.secondary)
-                }
-            } else if models.isEmpty {
-                Text("暂无模型列表，点击上方「测试连接」刷新")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(models) { model in
-                    modelTestRow(model)
-                }
-            }
-        } header: {
-            Text("连通性")
-        } footer: {
-            Text("勾选 = 启用；取消勾选 = 禁用该模型（从 /v1/models、网关白名单与测试列表隐藏，仍可在本列表重新启用）。")
-        }
-    }
-
-    /// 测试全部模型入口：未运行时显示按钮 + 上次批量测试汇总（结果保留在模型列表中）；
-    /// 运行时显示进度条（各模型调用结果实时体现在下方模型列表中，不再单独列状态清单）。
-    @ViewBuilder
-    private var testAllRow: some View {
-        if isTestingAll {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    ProgressView(value: Double(testAllCurrent), total: Double(max(testAllTotal, 1)))
-                        .controlSize(.small)
-                    Text("测试全部模型：\(testAllCurrent)/\(testAllTotal)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        } else {
-            HStack(spacing: 8) {
-                // 最前方：全部启用/禁用勾选（一键批量，避免逐行勾掉不需要的模型）
-                allModelsToggle
-
-                if !testAllOutcomes.isEmpty {
-                    let successCount = testAllOutcomes.filter(\.success).count
-                    let failedCount = testAllOutcomes.count - successCount
-                    HStack(spacing: 8) {
-                        Label("\(successCount) 成功", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Label("\(failedCount) 失败", systemImage: "xmark.circle.fill")
-                            .foregroundStyle(.red)
-                    }
-                    .font(.caption)
-                    .padding(.vertical, 2)
-                    Spacer()
-                    Button("重新测试全部") { startTestAll() }
-                        .buttonStyle(.link)
-                        .controlSize(.small)
-                        .pointingHandCursor()
-                } else {
-                    Spacer()
-                    Button("测试全部模型") { startTestAll() }
-                        .buttonStyle(.bordered)
-                        .disabled(models.isEmpty)
-                        .pointingHandCursor()
-                }
-            }
-        }
-    }
-
-    /// 「全部启用/禁用」勾选：勾选 = 启用该供应商全部模型；取消勾选 = 全部禁用。
-    /// 勾选态取当前模型列表的「无任何禁用」，任一模型被禁用即变为未勾选。
-    private var allModelsToggle: some View {
-        let allEnabled = models.allSatisfy { !appState.isModelDisabled($0.id, for: providerID) }
-        return HStack(spacing: 4) {
-            Toggle("", isOn: Binding(
-                get: { allEnabled },
-                set: { enableAll in
-                    // 批量操作，一次持久化（避免逐模型保存/热更新）
-                    appState.setModelsDisabled(!enableAll, modelIDs: models.map(\.id), for: providerID)
-                    modelTestResults.removeAll()
-                }
-            ))
-            .labelsHidden()
-            .toggleStyle(.checkbox)
-            .controlSize(.mini)
-            Text("全部启用")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .help(allEnabled ? "取消勾选 = 禁用该供应商全部模型" : "勾选 = 启用该供应商全部模型")
-        .disabled(models.isEmpty)
-        .pointingHandCursor()
-    }
-
-    @ViewBuilder
-    private var providerTestRow: some View {
-        switch appState.testStates[providerID] ?? .idle {
-        case .testing:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("供应商测试中…").foregroundStyle(.secondary)
-            }
-        case .ok(let msg):
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text(msg).font(.callout)
-                Spacer()
-                Button("重新测试") { startTest() }
-                    .buttonStyle(.link).controlSize(.small)
-                    .pointingHandCursor()
-            }
-        case .failed(let msg):
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                Text(msg).font(.callout)
-                Spacer()
-                Button("重新测试") { startTest() }
-                    .buttonStyle(.link).controlSize(.small)
-                    .pointingHandCursor()
-            }
-        case .idle:
-            HStack {
-                Spacer()
-                Button("测试供应商") { startTest() }
-                    .buttonStyle(.bordered)
-                    .pointingHandCursor()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func modelTestRow(_ model: Model) -> some View {
-        let result = modelTestResults[model.id] ?? .idle
-        let isDisabled = appState.isModelDisabled(model.id, for: providerID)
-        HStack(alignment: .center, spacing: 6) {
-            modelEnabledToggle(model.id)
-
-            Text(model.id)
-                .font(.callout)
-                .foregroundStyle(isDisabled ? .tertiary : .secondary)
-                .strikethrough(isDisabled)
-                .frame(maxWidth: 160, alignment: .leading)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(isDisabled ? "已禁用：从 /v1/models 与网关白名单隐藏（勾选可重新启用）" : "")
-
-            if isDisabled {
-                Spacer(minLength: 8)
-                Text("已禁用")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            } else {
-                switch result {
-                case .testing:
-                    ProgressView().controlSize(.small)
-                case .ok(let msg):
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.footnote)
-                    Text(msg).font(.caption2).foregroundStyle(.secondary)
-                case .failed(let msg):
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                        .font(.footnote)
-                    Text(msg).font(.caption2).foregroundStyle(.red)
-                case .idle:
-                    Spacer()
-                    Button("测试") { startModelTest(model.id) }
-                        .buttonStyle(.link)
-                        .controlSize(.small)
-                        .pointingHandCursor()
-                }
-            }
-        }
-    }
-
-    /// 模型行左侧「启用/禁用」勾选框（紧凑 checkbox）。
-    /// 取消勾选 = 禁用：模型从 /v1/models、网关白名单与测试列表隐藏；
-    /// 本列表仍保留（置灰 + 删除线）以便重新启用。
-    private func modelEnabledToggle(_ modelID: String) -> some View {
-        let enabled = !appState.isModelDisabled(modelID, for: providerID)
-        return Toggle("", isOn: Binding(
-            get: { !appState.isModelDisabled(modelID, for: providerID) },
-            set: { isOn in
-                appState.setModelDisabled(!isOn, modelID: modelID, for: providerID)
-                // 禁用/启用后清除旧测试结果，避免重新启用时残留过期状态
-                modelTestResults.removeValue(forKey: modelID)
-            }
-        ))
-        .labelsHidden()
-        .toggleStyle(.checkbox)
-        .controlSize(.mini)
-        .help(enabled ? "禁用该模型（从 /v1/models 与网关白名单隐藏）" : "启用该模型")
-        .pointingHandCursor()
-    }
-
-    // MARK: - 自定义 Provider 模型列表（可编辑）
-
-    /// 自定义 provider 的模型列表（从 config 直接派生，只显示原始模型名）。响应式，无需 async 加载。
-    /// 归一化：config 中的模型名若已带前缀（历史/误输入），先剥掉全部前缀。
-    private var customModels: [Model] {
-        let def = appState.customProviderDef(for: providerID)
-        let prefix = "\(providerID)/"
-        return def?.models.map { raw in
-            var clean = raw
-            while clean.hasPrefix(prefix) {
-                clean = String(clean.dropFirst(prefix.count))
-            }
-            return Model(id: clean)
-        } ?? []
-    }
-
-    /// 自定义 provider 的「模型列表」Section：顶部添加模型输入 + 模型行（测试 / 删除）+ 供应商级测试。
-    @ViewBuilder
-    private var customModelsSection: some View {
-        Section {
-            // 供应商级测试
-            providerTestRow
-
-            // 添加模型行
-            HStack(spacing: 8) {
-                TextField("模型名（不含 provider/ 前缀）", text: $newModelName)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.footnote)
-                    .onSubmit { addCustomModel() }
-                Button("添加") { addCustomModel() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .pointingHandCursor()
-                    .disabled(newModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+            // 获取模型列表 + 添加模型按钮
+            modelActionsRow
 
             // 模型列表
-            if customModels.isEmpty {
-                Text("暂无模型，请在上方添加")
+            if modelEntries.isEmpty {
+                Text("暂无模型，点击「+添加模型」新增")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(customModels) { model in
-                    customModelRow(model)
-                }
+                modelColumnsLayout
             }
         } header: {
             Text("模型列表")
         } footer: {
-            Text("这里只填写原始模型名，例如 glm-5.2，不要填写 \(providerID)/glm-5.2；调用时系统会自动补上 provider 前缀。")
-        }
-    }
-
-    @ViewBuilder
-    private func customModelRow(_ model: Model) -> some View {
-        let result = modelTestResults[model.id] ?? .idle
-        let isDisabled = appState.isModelDisabled(model.id, for: providerID)
-        HStack(alignment: .center, spacing: 6) {
-            modelEnabledToggle(model.id)
-
-            Text(model.id)
-                .font(.callout)
-                .foregroundStyle(isDisabled ? .tertiary : .secondary)
-                .strikethrough(isDisabled)
-                .frame(maxWidth: 180, alignment: .leading)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(isDisabled ? "已禁用：从 /v1/models 与网关白名单隐藏（勾选可重新启用）" : "")
-
-            // 模型名后直接放弹性空白：状态区与删除按钮固定靠右，测试后删除按钮也始终在最右侧。
-            Spacer(minLength: 8)
-
-            if isDisabled {
-                Text("已禁用")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            if descriptor.isUserDefined {
+                Text("调用时系统自动补上 provider 前缀。")
             } else {
-                switch result {
-                case .testing:
-                    ProgressView().controlSize(.small)
-                case .ok(let msg):
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.footnote)
-                    Text(msg).font(.caption2).foregroundStyle(.secondary)
-                case .failed(let msg):
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                        .font(.footnote)
-                    Text(msg).font(.caption2).foregroundStyle(.red)
-                case .idle:
-                    Button("测试") { startModelTest("\(providerID)/\(model.id)", resultKey: model.id) }
-                        .buttonStyle(.link)
-                        .controlSize(.small)
-                        .pointingHandCursor()
-                }
-            }
-
-            if result != .testing {
-                Button(role: .destructive) {
-                    try? appState.removeCustomModel(providerID: providerID, model: model.id)
-                    modelTestResults.removeValue(forKey: model.id)
-                } label: {
-                    Image(systemName: "trash")
-                        .foregroundStyle(.secondary)
-                        .font(.footnote)
-                        .padding(2)
-                }
-                .buttonStyle(.plain)
-                .hoverHighlight(cornerRadius: 4)
-                .help("删除模型")
+                Text("点击「获取模型列表」从上游拉取，成功后可下拉选择模型名称。")
             }
         }
     }
 
-    private func addCustomModel() {
-        let trimmed = newModelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        try? appState.addCustomModel(providerID: providerID, model: trimmed)
-        newModelName = ""
+    /// 模型列表按列布局，保证表头和输入框使用同一个 leading 起点。
+    private var modelColumnsLayout: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                modelColumnHeader("菜单显示名")
+                ForEach(modelEntries) { entry in
+                    leadingTextField(
+                        text: displayNameBinding(for: entry),
+                        prompt: "菜单显示名"
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 8) {
+                modelColumnHeader("实际请求模型")
+                ForEach(modelEntries) { entry in
+                    modelNameField(entry)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 8) {
+                modelColumnHeader("上下文窗口")
+                ForEach(modelEntries) { entry in
+                    leadingTextField(
+                        value: contextLengthBinding(for: entry)
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 8) {
+                Color.clear.frame(height: 17)
+                ForEach(modelEntries) { entry in
+                    Button(role: .destructive) {
+                        removeModel(modelName: entry.modelName)
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(.secondary)
+                            .font(.footnote)
+                            .padding(2)
+                    }
+                    .buttonStyle(.plain)
+                    .hoverHighlight(cornerRadius: 4)
+                    .help("删除模型")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+            .frame(width: 24)
+        }
+    }
+
+    private func modelColumnHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(height: 17, alignment: .leading)
+    }
+
+    private func leadingTextField(text: Binding<String>, prompt: String) -> some View {
+        TextField("", text: text, prompt: Text(prompt))
+            .font(.footnote)
+            .multilineTextAlignment(.leading)
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func leadingTextField(value: Binding<Int>) -> some View {
+        TextField("", value: value, format: .number)
+            .font(.footnote)
+            .multilineTextAlignment(.leading)
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: 120, alignment: .leading)
+    }
+
+    private func modelNameField(_ entry: ProviderModelEntry) -> some View {
+        HStack(spacing: 4) {
+            TextField("", text: modelNameBinding(for: entry), prompt: Text("实际请求模型"))
+                .font(.footnote)
+                .multilineTextAlignment(.leading)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // 下拉选择固定占宽（无论是否已获取模型列表），避免获取列表后本列被挤压错位
+            Group {
+                if !fetchedModels.isEmpty {
+                    Menu {
+                        ForEach(fetchedModels) { fetched in
+                            Button(fetched.id) {
+                                updateEntryModelName(
+                                    entry: entry,
+                                    modelName: fetched.id,
+                                    displayName: fetched.name ?? ""
+                                )
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuIndicator(.hidden)
+                    .help("选择已获取的模型")
+                }
+            }
+            .frame(width: 16)
+        }
+    }
+
+    /// 获取模型列表 + 添加模型按钮行。
+    @ViewBuilder
+    private var modelActionsRow: some View {
+        HStack(spacing: 8) {
+            if isFetchingModels {
+                ProgressView().controlSize(.small)
+                Text("获取中…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button("获取模型列表") { fetchModels() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+                if let msg = fetchMessage {
+                    Text(msg)
+                        .font(.caption2)
+                        .foregroundStyle(msg.contains("失败") ? .red : .secondary)
+                }
+            }
+            Spacer()
+            Button {
+                addBlankModel()
+            } label: {
+                Label("添加模型", systemImage: "plus")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .pointingHandCursor()
+        }
+    }
+
+    // MARK: - 模型列表操作
+
+    /// 获取模型列表：调用供应商接口（CodeBuddy 返回静态列表），成功后缓存到面板。
+    private func fetchModels() {
+        guard let provider = ProviderRegistry.shared.provider(for: providerID) else {
+            fetchMessage = "未注册的供应商"
+            return
+        }
+        isFetchingModels = true
+        fetchMessage = nil
+        let credential = appState.config.credential(for: providerID)
+        Task { @MainActor in
+            do {
+                let result = try await provider.listModels(credential: credential)
+                fetchedModels = result
+                isFetchingModels = false
+                fetchMessage = "已获取 \(result.count) 个模型"
+            } catch {
+                isFetchingModels = false
+                fetchMessage = "获取失败: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 添加一个空白模型条目。
+    private func addBlankModel() {
+        let entry = ProviderModelEntry(modelName: "")
+        if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
+            try? appState.addCustomModel(providerID: providerID, entry: entry)
+        } else {
+            try? appState.addUserModel(entry, for: providerID)
+        }
+    }
+
+    /// 删除一个模型条目。
+    private func removeModel(modelName: String) {
+        if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
+            try? appState.removeCustomModel(providerID: providerID, modelName: modelName)
+        } else {
+            try? appState.removeUserModel(modelName: modelName, for: providerID)
+        }
+    }
+
+    /// 从下拉选择模型时，更新模型名并自动填充显示名（为空时用模型名）。
+    private func updateEntryModelName(entry: ProviderModelEntry, modelName: String, displayName: String) {
+        let newEntry = ProviderModelEntry(
+            displayName: displayName.isEmpty ? modelName : displayName,
+            modelName: modelName,
+            contextLength: entry.contextLength
+        )
+        if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
+            try? appState.updateCustomModel(
+                providerID: providerID,
+                originalModelName: entry.modelName,
+                entry: newEntry
+            )
+        } else {
+            try? appState.updateUserModel(
+                originalModelName: entry.modelName,
+                entry: newEntry,
+                for: providerID
+            )
+        }
+    }
+
+    // MARK: - 模型条目双向绑定
+
+    private func displayNameBinding(for entry: ProviderModelEntry) -> Binding<String> {
+        Binding(
+            get: { entry.displayName },
+            set: { newValue in
+                updateEntryField(entry: entry, displayName: newValue, modelName: nil, contextLength: nil)
+            }
+        )
+    }
+
+    private func modelNameBinding(for entry: ProviderModelEntry) -> Binding<String> {
+        Binding(
+            get: { entry.modelName },
+            set: { newValue in
+                updateEntryField(entry: entry, displayName: nil, modelName: newValue, contextLength: nil)
+            }
+        )
+    }
+
+    private func contextLengthBinding(for entry: ProviderModelEntry) -> Binding<Int> {
+        Binding(
+            get: { entry.contextLength },
+            set: { newValue in
+                updateEntryField(entry: entry, displayName: nil, modelName: nil, contextLength: newValue)
+            }
+        )
+    }
+
+    /// 局部更新模型条目的某个字段（nil 表示不修改）。
+    private func updateEntryField(entry: ProviderModelEntry, displayName: String?, modelName: String?, contextLength: Int?) {
+        let newEntry = ProviderModelEntry(
+            displayName: displayName ?? entry.displayName,
+            modelName: modelName ?? entry.modelName,
+            contextLength: contextLength ?? entry.contextLength
+        )
+        if ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined == true {
+            try? appState.updateCustomModel(
+                providerID: providerID,
+                originalModelName: entry.modelName,
+                entry: newEntry
+            )
+        } else {
+            try? appState.updateUserModel(
+                originalModelName: entry.modelName,
+                entry: newEntry,
+                for: providerID
+            )
+        }
     }
 
     // MARK: - 基础信息行（与头部同处一个 Section，无独立「信息」标题）
@@ -812,108 +748,8 @@ struct SettingsProviderPane: View {
 
     private func startTest() {
         Task { @MainActor in
-            // 「测试连接」时同步刷新模型列表（模型级测试依赖它；
-            // 进入面板时已自动拉取一次，见 onAppear）
-            if !(ProviderRegistry.shared.descriptor(for: providerID)?.isUserDefined ?? false) {
-                loadModels()
-            }
             await appState.testProvider(providerID)
         }
     }
 
-    // MARK: - 模型列表 & 模型级测试
-
-    @MainActor
-    private func loadModels() {
-        guard let provider = ProviderRegistry.shared.provider(for: providerID) else {
-            models = []
-            return
-        }
-        loadingModels = true
-        Task {
-            let credential = appState.config.credential(for: providerID)
-            let fetched = (try? await provider.listModels(credential: credential)) ?? []
-            // 合并静态目录，避免动态获取失败时模型列表为空
-            var merged = ProviderRegistry.shared.descriptor(for: providerID)?.models ?? []
-            for m in fetched where !merged.contains(where: { $0.id == m.id }) {
-                merged.append(m)
-            }
-            // 如果动态获取成功且非空，用动态结果；否则保留静态目录
-            models = fetched.isEmpty ? merged : fetched
-            loadingModels = false
-        }
-    }
-
-    private func startModelTest(_ modelID: String, resultKey: String? = nil) {
-        let key = resultKey ?? modelID
-        modelTestResults[key] = .testing
-        Task {
-            await appState.testModel(modelID, for: providerID)
-            // appState.testModel 把结果写到 testStates，我们同步一份到本地
-            if let state = appState.testStates[providerID] {
-                switch state {
-                case .ok(let msg): modelTestResults[key] = .ok(msg)
-                case .failed(let msg): modelTestResults[key] = .failed(msg)
-                default: break
-                }
-            }
-        }
-    }
-
-    // MARK: - 测试全部模型（Phase 13 需求 1）
-
-    /// 串行测试该供应商全部模型，逐条更新进度与结果。
-    /// 结果同步写入 `modelTestResults`，使每个模型行在测试结束后仍保留成功/失败状态。
-    @MainActor
-    private func startTestAll() {
-        guard let provider = ProviderRegistry.shared.provider(for: providerID) else { return }
-        isTestingAll = true
-        testAllOutcomes = []
-        modelTestResults.removeAll()
-        testAllCurrent = 0
-        testAllTotal = 0
-        let credential = appState.config.credential(for: providerID)
-        Task {
-            let all = (try? await provider.listModels(credential: credential)) ?? []
-            // 跳过已禁用的模型（设置面板「禁用」开关）
-            let models = all.filter { !appState.isModelDisabled($0.id, for: providerID) }
-            testAllTotal = models.count
-            if models.isEmpty {
-                testAllOutcomes.append(ModelTestOutcome(
-                    modelID: "-",
-                    success: false,
-                    message: "未获取到模型列表"
-                ))
-                testAllCurrent = 0
-                isTestingAll = false
-                return
-            }
-            for (index, model) in models.enumerated() {
-                modelTestResults[model.id] = .testing
-                let outcome: ModelTestOutcome
-                if let result = try? await provider.testModel(model.id, credential: credential) {
-                    outcome = ModelTestOutcome(
-                        modelID: model.id,
-                        success: result.success,
-                        message: result.message,
-                        latencyMS: result.latencyMS
-                    )
-                } else {
-                    outcome = ModelTestOutcome(
-                        modelID: model.id,
-                        success: false,
-                        message: "测试抛出未预期错误"
-                    )
-                }
-                testAllOutcomes.append(outcome)
-                modelTestResults[model.id] = outcome.success ? .ok(outcome.message) : .failed(outcome.message)
-                testAllCurrent = index + 1
-            }
-            // 动态模型与静态列表不一致时，补全模型行以便结果可见
-            for outcome in testAllOutcomes where !models.contains(where: { $0.id == outcome.modelID }) {
-                self.models.append(Model(id: outcome.modelID, name: outcome.modelID))
-            }
-            isTestingAll = false
-        }
-    }
 }

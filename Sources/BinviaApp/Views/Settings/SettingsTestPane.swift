@@ -315,9 +315,8 @@ struct SettingsTestPane: View {
 
     // MARK: - 模型列表
 
-    /// 刷新可选模型列表：受选中网关 Key 的白名单约束。
-    /// 无白名单时先以静态目录填充，再异步合并各供应商动态模型（`listModels`），
-    /// 保证 OpenCode 等动态目录供应商能看到完整模型列表。
+    /// 刷新可选模型列表：从各供应商的用户配置模型列表派生，不再动态拉取上游。
+    /// 受选中网关 Key 的白名单约束。
     private func refreshAvailableModels() {
         guard let key = selectedGatewayKey,
               let gateway = appState.config.gatewayKeyConfig(for: key) else {
@@ -325,72 +324,36 @@ struct SettingsTestPane: View {
             isLoadingModels = false
             return
         }
-        // 白名单为 nil → 全部已启用供应商的模型；否则用白名单
+        // 白名单为 nil → 全部已启用供应商的用户模型；否则用白名单
         if let enabled = gateway.enabledModels {
             availableModels = enabled.sorted()
             isLoadingModels = false
             syncModelSelection()
             return
         }
-        let descriptors = appState.orderedProviderDescriptors().filter(enabledAndConfigured)
-        availableModels = staticModelList(descriptors)
+        var models: [String] = []
+        var seen = Set<String>()
+        for descriptor in appState.orderedProviderDescriptors() {
+            let enabledFlag = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
+            guard enabledFlag else { continue }
+            let alias = descriptor.alias ?? descriptor.id
+            // 自定义 provider 的模型从 customProviderDef 读取
+            let entries: [ProviderModelEntry]
+            if descriptor.isUserDefined {
+                entries = appState.customProviderDef(for: descriptor.id)?.models ?? []
+            } else {
+                entries = appState.config.providers[descriptor.id]?.userModels ?? []
+            }
+            for entry in entries {
+                let normalized = "\(alias)/\(entry.effectiveDisplayName)"
+                if seen.insert(normalized).inserted {
+                    models.append(normalized)
+                }
+            }
+        }
+        availableModels = models.sorted()
+        isLoadingModels = false
         syncModelSelection()
-        isLoadingModels = true
-        let capturedKey = key
-        Task { @MainActor in
-            let merged = await mergedDynamicModelList(descriptors)
-            // 请求期间用户切换了网关 Key → 丢弃过期结果
-            guard selectedGatewayKey == capturedKey else { return }
-            availableModels = merged
-            isLoadingModels = false
-            syncModelSelection()
-        }
-    }
-
-    /// 该供应商是否已启用且已配置凭据（可进入模型列表）。
-    private func enabledAndConfigured(_ descriptor: ProviderDescriptor) -> Bool {
-        let enabledFlag = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
-        return enabledFlag && appState.isProviderConfigured(descriptor.id)
-    }
-
-    /// 仅静态目录 → `<alias>/<modelID>` 列表（排除已禁用模型）。
-    private func staticModelList(_ descriptors: [ProviderDescriptor]) -> [String] {
-        var models: [String] = []
-        var seen = Set<String>()
-        for descriptor in descriptors {
-            let alias = descriptor.alias ?? descriptor.id
-            for model in descriptor.models where !appState.isModelDisabled(model.id, for: descriptor.id) {
-                let normalized = "\(alias)/\(model.id)"
-                if seen.insert(normalized).inserted {
-                    models.append(normalized)
-                }
-            }
-        }
-        return models.sorted()
-    }
-
-    /// 静态目录 + 各供应商动态模型合并（动态获取成功且非空时优先用动态结果；排除已禁用模型）。
-    @MainActor
-    private func mergedDynamicModelList(_ descriptors: [ProviderDescriptor]) async -> [String] {
-        var models: [String] = []
-        var seen = Set<String>()
-        for descriptor in descriptors {
-            let alias = descriptor.alias ?? descriptor.id
-            var list = descriptor.models
-            if let provider = ProviderRegistry.shared.provider(for: descriptor.id) {
-                let credential = appState.config.credential(for: descriptor.id)
-                if let fetched = try? await provider.listModels(credential: credential), !fetched.isEmpty {
-                    list = fetched
-                }
-            }
-            for model in list where !appState.isModelDisabled(model.id, for: descriptor.id) {
-                let normalized = "\(alias)/\(model.id)"
-                if seen.insert(normalized).inserted {
-                    models.append(normalized)
-                }
-            }
-        }
-        return models.sorted()
     }
 
     /// 当前选中模型失效时回退到列表第一个，否则保持原选择。

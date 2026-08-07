@@ -297,42 +297,6 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
-    /// 某模型是否被禁用（设置面板模型行「启用/禁用」开关）。
-    func isModelDisabled(_ modelID: String, for providerID: String) -> Bool {
-        config.providers[providerID]?.isModelDisabled(modelID) ?? false
-    }
-
-    /// 设置某模型启用/禁用（禁用模型视为不存在：/v1/models 不展示、网关白名单不可选、请求 404）。
-    func setModelDisabled(_ disabled: Bool, modelID: String, for providerID: String) {
-        var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        var disabledSet = Set(providerConfig.disabledModels)
-        if disabled {
-            disabledSet.insert(modelID)
-        } else {
-            disabledSet.remove(modelID)
-        }
-        providerConfig.disabledModels = disabledSet.sorted()
-        config.providers[providerID] = providerConfig
-        try? saveConfig()
-    }
-
-    /// 批量设置该供应商多个模型的启用/禁用（一次持久化，避免逐模型保存/热更新）。
-    func setModelsDisabled(_ disabled: Bool, modelIDs: [String], for providerID: String) {
-        guard !modelIDs.isEmpty else { return }
-        var providerConfig = config.providers[providerID] ?? ProviderConfig()
-        var disabledSet = Set(providerConfig.disabledModels)
-        for id in modelIDs {
-            if disabled {
-                disabledSet.insert(id)
-            } else {
-                disabledSet.remove(id)
-            }
-        }
-        providerConfig.disabledModels = disabledSet.sorted()
-        config.providers[providerID] = providerConfig
-        try? saveConfig()
-    }
-
     // MARK: - 供应商排序（拖拽）
 
     /// 按当前 config.providerOrder 返回有序描述符列表（侧栏 / 菜单 / /v1/models 共用）。
@@ -397,34 +361,68 @@ final class AppState: ObservableObject {
         try saveConfig()
     }
 
-    /// 为自定义 provider 追加一个模型。
-    /// 输入可带 `<providerID>/` 前缀（用户可能从 `/v1/models` 复制），内部剥前缀后存原始模型名。
-    func addCustomModel(providerID: String, model: String) throws {
-        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = "\(providerID)/"
-        var clean = trimmed
-        while clean.hasPrefix(prefix) {
-            clean = String(clean.dropFirst(prefix.count))
+    /// 为自定义 provider 追加一个模型条目。
+   func addCustomModel(providerID: String, entry: ProviderModelEntry) throws {
+       guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+        // 空 modelName 允许重复添加（用户正在编辑中的空白行）
+        if !entry.modelName.isEmpty {
+            guard !config.customProviderDefs[idx].models.contains(where: { $0.modelName == entry.modelName }) else { return }
         }
-        guard !clean.isEmpty,
-              let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
-        guard !config.customProviderDefs[idx].models.contains(clean) else { return }
-        config.customProviderDefs[idx].models.append(clean)
+       config.customProviderDefs[idx].models.append(entry)
+       reregisterCustomProvider(config.customProviderDefs[idx])
+       try saveConfig()
+   }
+
+    /// 从自定义 provider 删除一个模型条目（按 modelName 匹配）。
+   func removeCustomModel(providerID: String, modelName: String) throws {
+       guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+       config.customProviderDefs[idx].models.removeAll { $0.modelName == modelName }
+       reregisterCustomProvider(config.customProviderDefs[idx])
+       try saveConfig()
+   }
+
+    /// 更新自定义 provider 下某个模型条目（按原 modelName 定位，替换为新 entry）。
+    func updateCustomModel(providerID: String, originalModelName: String, entry: ProviderModelEntry) throws {
+        guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
+        guard let modelIdx = config.customProviderDefs[idx].models.firstIndex(where: { $0.modelName == originalModelName }) else { return }
+        config.customProviderDefs[idx].models[modelIdx] = entry
         reregisterCustomProvider(config.customProviderDefs[idx])
         try saveConfig()
     }
 
-    /// 从自定义 provider 删除一个模型（`model` 参数可带前缀，内部剥掉全部前缀后比较）。
-    func removeCustomModel(providerID: String, model: String) throws {
-        guard let idx = config.customProviderDefs.firstIndex(where: { $0.id == providerID }) else { return }
-        let prefix = "\(providerID)/"
-        var stripped = model
-        while stripped.hasPrefix(prefix) {
-            stripped = String(stripped.dropFirst(prefix.count))
+   // MARK: - 用户模型列表管理（内置 Provider）
+
+    /// 某 provider 的用户模型列表（从 config 派生）。
+    func userModels(for providerID: String) -> [ProviderModelEntry] {
+        config.providers[providerID]?.userModels ?? []
+    }
+
+    /// 为某 provider 追加一个用户模型条目。
+   func addUserModel(_ entry: ProviderModelEntry, for providerID: String) throws {
+       var providerConfig = config.providers[providerID] ?? ProviderConfig()
+       providerConfig.enabled = true
+        if !entry.modelName.isEmpty {
+            guard !providerConfig.userModels.contains(where: { $0.modelName == entry.modelName }) else { return }
         }
-        guard let modelIdx = config.customProviderDefs[idx].models.firstIndex(of: stripped) else { return }
-        config.customProviderDefs[idx].models.remove(at: modelIdx)
-        reregisterCustomProvider(config.customProviderDefs[idx])
+       providerConfig.userModels.append(entry)
+       config.providers[providerID] = providerConfig
+       try saveConfig()
+   }
+
+    /// 从某 provider 删除一个用户模型条目（按 modelName 匹配）。
+    func removeUserModel(modelName: String, for providerID: String) throws {
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.userModels.removeAll { $0.modelName == modelName }
+        config.providers[providerID] = providerConfig
+        try saveConfig()
+    }
+
+    /// 更新某 provider 下某个用户模型条目（按原 modelName 定位，替换为新 entry）。
+    func updateUserModel(originalModelName: String, entry: ProviderModelEntry, for providerID: String) throws {
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        guard let idx = providerConfig.userModels.firstIndex(where: { $0.modelName == originalModelName }) else { return }
+        providerConfig.userModels[idx] = entry
+        config.providers[providerID] = providerConfig
         try saveConfig()
     }
 

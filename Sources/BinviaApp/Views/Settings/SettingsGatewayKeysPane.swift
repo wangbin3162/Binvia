@@ -374,52 +374,28 @@ struct SettingsGatewayKeysPane: View {
             }
     }
 
-    /// 加载全部「已启用且已配置凭据」供应商的模型：先静态目录（立即），再动态模型（异步补全）。
-    /// 归一化格式 `<alias>/<modelID>` 与 RouteHandler.enforceEnabledModels 一致。
-    /// 未接入（无凭据）或未启用的供应商模型不展示（避免白名单中出现不可用模型）。
+    /// 加载全部「已启用」供应商的用户配置模型列表。
+    /// 归一化格式 `<alias>/<displayName>` 与 RouteHandler /v1/models 一致。
     @MainActor
     private func loadAllModels() {
         guard !loadingModels else { return }
         loadingModels = true
 
-        let isIncluded: (ProviderDescriptor) -> Bool = { descriptor in
-            let enabled = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
-            return enabled && appState.isProviderConfigured(descriptor.id)
-        }
-
         var options: [GatewayModelOption] = []
         var seen = Set<String>()
-        for descriptor in ProviderRegistry.shared.allDescriptors() where isIncluded(descriptor) {
+        for descriptor in ProviderRegistry.shared.allDescriptors() {
+            let enabled = appState.config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id)
+            guard enabled else { continue }
             let alias = descriptor.alias ?? descriptor.id
-            for model in descriptor.models {
-                // 供应商面板「禁用」的模型不出现在白名单可选列表
-                guard !appState.isModelDisabled(model.id, for: descriptor.id) else { continue }
-                let normalized = "\(alias)/\(model.id)"
+            let userModels = appState.config.providers[descriptor.id]?.userModels ?? []
+            for entry in userModels {
+                let normalized = "\(alias)/\(entry.effectiveDisplayName)"
                 guard seen.insert(normalized).inserted else { continue }
-                options.append(GatewayModelOption(id: normalized, providerID: descriptor.id, modelID: model.id))
+                options.append(GatewayModelOption(id: normalized, providerID: descriptor.id, modelID: entry.effectiveDisplayName))
             }
         }
         allModelOptions = options.sorted { $0.id < $1.id }
-
-        Task {
-            for descriptor in ProviderRegistry.shared.allDescriptors() where isIncluded(descriptor) {
-                guard let provider = ProviderRegistry.shared.provider(for: descriptor.id) else { continue }
-                let alias = descriptor.alias ?? descriptor.id
-                let dynamic = (try? await provider.listModels(credential: appState.config.credential(for: descriptor.id))) ?? []
-                guard !dynamic.isEmpty else { continue }
-                var merged = allModelOptions
-                var mergedSeen = Set(merged.map(\.id))
-                for model in dynamic {
-                    // 供应商面板「禁用」的模型不出现在白名单可选列表
-                    guard !appState.isModelDisabled(model.id, for: descriptor.id) else { continue }
-                    let normalized = "\(alias)/\(model.id)"
-                    guard mergedSeen.insert(normalized).inserted else { continue }
-                    merged.append(GatewayModelOption(id: normalized, providerID: descriptor.id, modelID: model.id))
-                }
-                allModelOptions = merged.sorted { $0.id < $1.id }
-            }
-            loadingModels = false
-        }
+        loadingModels = false
     }
 }
 

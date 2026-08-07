@@ -105,11 +105,11 @@ public struct RouteHandler: Sendable {
 
         var seen = Set<String>()
         var items: [ModelItem] = []
-        // 模型 id 统一归一化为 `<alias>/<modelID>`（无别名用 provider id），
+        // 模型 id 统一归一化为 `<alias>/<displayName>`（无别名用 provider id），
         // 与网关 key 白名单格式及 Router 的 `alias/model` 解析一致。
-        // 这样同名模型（如 deepseek-v4-flash 同时存在于 codebuddy-cn 与 deepseek）可被区分。
-        let appendModel = { (alias: String, modelID: String, providerID: String) in
-            let normalized = "\(alias)/\(modelID)"
+        // 显示名称为空时回退到 modelName，避免显示空白。
+        let appendModel = { (alias: String, displayID: String, providerID: String) in
+            let normalized = "\(alias)/\(displayID)"
             guard seen.insert(normalized).inserted else { return }
             items.append(ModelItem(id: normalized, object: "model", ownedBy: providerID))
         }
@@ -120,41 +120,19 @@ public struct RouteHandler: Sendable {
                   let enabled = gateway.enabledModels else { return nil }
             return Set(enabled)
         }()
-        let isModelAllowed = { (aliasOrID: String, modelID: String) in
+        let isModelAllowed = { (aliasOrID: String, displayID: String) in
             guard let allowedModels else { return true }
-            return allowedModels.contains("\(aliasOrID)/\(modelID)")
+            return allowedModels.contains("\(aliasOrID)/\(displayID)")
         }
 
-        // 供应商级模型禁用（设置面板「禁用」开关）：禁用模型视为不存在，不进 /v1/models
-        let isModelDisabled = { (providerID: String, modelID: String) in
-            config.providers[providerID]?.isModelDisabled(modelID) ?? false
-        }
-
+        // 只返回用户在设置面板配置的模型列表（userModels），不再动态拉取上游。
         for descriptor in registry.orderedDescriptors(config.providerOrder) {
-            // 仅处理已注册且启用的 provider
             guard config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id) else { continue }
 
             let alias = descriptor.alias ?? descriptor.id
-
-            // 尝试动态获取（失败静默回退静态目录）。
-            // 无凭据的 provider 直接跳过：不发起上游请求，避免 /v1/models 被不可达/慢上游拖住
-            // （AI 客户端每次启动都会拉模型列表，慢请求直接表现为「总感觉很慢」）。
-            var dynamicModels: [Model]?
-            if config.hasCredential(for: descriptor.id),
-               let provider = registry.provider(for: descriptor.id) {
-                do {
-                    dynamicModels = try await provider.listModels(credential: config.credential(for: descriptor.id))
-                } catch {
-                    dynamicModels = nil
-                }
-            }
-
-            // 静态目录与动态结果合并，按归一化 id 去重
-            for model in descriptor.models where isModelAllowed(alias, model.id) && !isModelDisabled(descriptor.id, model.id) {
-                appendModel(alias, model.id, descriptor.id)
-            }
-            for model in dynamicModels ?? [] where isModelAllowed(alias, model.id) && !isModelDisabled(descriptor.id, model.id) {
-                appendModel(alias, model.id, descriptor.id)
+            let userModels = config.providers[descriptor.id]?.userModels ?? []
+            for entry in userModels where isModelAllowed(alias, entry.effectiveDisplayName) {
+                appendModel(alias, entry.effectiveDisplayName, descriptor.id)
             }
         }
 
@@ -183,11 +161,6 @@ public struct RouteHandler: Sendable {
             return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
         }
 
-        // 供应商级模型禁用：禁用模型视为不存在（与 /v1/models 不展示保持一致）
-        if config.providers[resolution.providerID]?.isModelDisabled(resolution.modelID) == true {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(chatRequest.model)\"}", contentType: "application/json")
-        }
-
         // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 且模型不在其中 → 403
         if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
             logger.log(RequestLogEntry(
@@ -201,7 +174,12 @@ public struct RouteHandler: Sendable {
         }
 
         var forwarded = chatRequest
-        forwarded.model = resolution.modelID
+        // resolution.modelID 现在是显示名称（/v1/models 返回 alias/displayName），
+        // 转发上游前需映射回真实模型名。找不到映射时保持原值（兼容旧路由）。
+        let userModels = config.providers[resolution.providerID]?.userModels ?? []
+        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+            ?? resolution.modelID
+        forwarded.model = realModelName
         forwarded.rawBody = body
 
         let credential = config.credential(for: resolution.providerID)
