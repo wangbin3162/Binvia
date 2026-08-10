@@ -389,8 +389,8 @@ func registryReverseIndexTests() {
         Set(["codebuddy-cn", "zai", "opencode-go", "opencode"]),
         "反向索引: glm-5.2 归属 codebuddy-cn、zai、opencode-go、opencode"
     )
-    expectEqual(registry.providers(forModel: "gemini-3.6-flash-high"), [], "Antigravity 临时未注册 → gemini 无归属")
-    expectNil(registry.descriptor(for: "antigravity"), "Antigravity 临时隐藏，注册表不可见")
+    expectEqual(registry.providers(forModel: "gemini-3.6-flash-high"), ["antigravity"], "反向索引: gemini-3.6-flash-high 归属 antigravity")
+    expectTrue(registry.descriptor(for: "antigravity") != nil, "Antigravity 已恢复注册，注册表可见")
     expectEqual(registry.providers(forModel: "nope-model"), [], "反向索引: 未知模型空归属")
 }
 

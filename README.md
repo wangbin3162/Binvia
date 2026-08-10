@@ -26,14 +26,13 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 |---|---|---|
 | DeepSeek | `ds` | API Key |
 | 腾讯 CodeBuddy | `cbcn` | OAuth 设备码 |
+| Google Antigravity | `agy` | OAuth PKCE |
 | opencode | `oc` | API Key |
 | Kimi（月之暗面） | `kimi` | API Key |
 | opencode-go | `ocgo` | API Key |
 | 小米 MiMo | `mimo` | API Key |
 | 智谱 z.ai | `zai` | API Key |
 | MiniMax | `mm` | API Key |
-
-> Google Antigravity 已临时从供应商列表隐藏（Google OAuth 授权地址暂不可用），实现代码保留。
 
 ## 下载
 
@@ -157,7 +156,7 @@ curl http://localhost:20427/v1/usage
 |---|---|
 | `DEEPSEEK_API_KEY` | DeepSeek API Key |
 | `CODEBUDDY_CN_ACCESS_TOKEN` | CodeBuddy Access Token |
-| `ANTIGRAVITY_ACCESS_TOKEN` | Antigravity Access Token（已临时下线） |
+| `ANTIGRAVITY_ACCESS_TOKEN` | Antigravity Access Token（OAuth 登录后自动配置；也可手动填写） |
 | `BINVIA_API_KEY` / `ROUTER_API_KEY` | 恒有效的网关 Key |
 | `BINVIA_CONFIG` | 配置文件路径覆盖 |
 | `OPENCODE_COOKIE` / `OPENCODE_GO_COOKIE` | OpenCode / OpenCode Go 浏览器会话 Cookie（用量查询，也可在 GUI 设置面板填写） |
