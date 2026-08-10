@@ -36,8 +36,9 @@ public enum OpenCodeProviderDescriptor {
         supportsStreaming: true,
         modelsURL: URL(string: "https://opencode.ai/zen/v1/models"),
         forceStream: false,
-        // opencode 尚无公开用量 API（上游 404，见 OmniRoute opencodeQuotaFetcher 备注），
-        // 提供网页看板入口：登录后在 opencode.ai/zh/zen 查看用量/余额。
+        // opencode 用量：Cookie web 链路（_server RPC，见 OpenCodeUsageFetcher）；
+        // 无 Cookie 时展示网页看板入口：登录后在 opencode.ai/zh/zen 查看用量/余额。
+        usageFetcherFactory: { OpenCodeUsageFetcher() },
         usageDashboardURL: URL(string: "https://opencode.ai/zh/zen"),
         makeProvider: { OpenCodeProvider() }
     )

@@ -242,6 +242,11 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
     /// 附加账号标识：CodeBuddy CN 企业 ID（积分查询 `x-enterprise-id`）。
     /// 缺省 nil，旧配置向后兼容。
     public var workspaceId: String?
+    /// 浏览器会话 Cookie 头（OpenCode / OpenCode Go 用量查询用）。
+    /// 从浏览器开发者工具复制 `Cookie` 请求头粘贴（仅保留 `auth` / `__Host-auth` 两项），
+    /// 或直接粘贴 `auth` cookie 的值（自动包装，见 `OpenCodeCookieConfig.filteredHeader`）。
+    /// 缺省 nil，旧配置向后兼容。
+    public var cookieHeader: String?
 
     public init(
         apiKey: String? = nil,
@@ -250,7 +255,8 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         email: String? = nil,
         expiresAt: Date? = nil,
         region: String? = nil,
-        workspaceId: String? = nil
+        workspaceId: String? = nil,
+        cookieHeader: String? = nil
     ) {
         self.apiKey = apiKey
         self.accessToken = accessToken
@@ -259,6 +265,7 @@ public struct ProviderCredential: Sendable, Codable, Equatable {
         self.expiresAt = expiresAt
         self.region = region
         self.workspaceId = workspaceId
+        self.cookieHeader = cookieHeader
     }
 }
 

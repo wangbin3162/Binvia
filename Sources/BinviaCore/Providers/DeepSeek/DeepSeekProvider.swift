@@ -65,10 +65,10 @@ public struct DeepSeekProvider: Provider {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    /// 是否属于可轮换的握手期鉴权错误（401/403）。
-    private static func isAuthRotationError(_ error: Error) -> Bool {
+    /// 是否属于可轮换的错误（401/403 鉴权失败、429 限流/额度耗尽、502 上游错误）。
+    private static func isTokenRotationError(_ error: Error) -> Bool {
         guard case ProviderError.upstreamError(let statusCode, _) = error else { return false }
-        return statusCode == 401 || statusCode == 403
+        return statusCode == 401 || statusCode == 403 || statusCode == 429 || statusCode == 502
     }
 
     private struct ModelsResponse: Decodable {
@@ -156,8 +156,8 @@ public struct DeepSeekProvider: Provider {
                         continuation.finish()
                         return
                     } catch {
-                        // 仅初始握手阶段的 401/403 轮换；传输中途失败无法轮换（可接受限制）
-                        if Self.isAuthRotationError(error), index + 1 < keys.count {
+                        // 仅初始握手阶段的可轮换错误（401/403/429/502）；传输中途失败无法轮换（可接受限制）
+                        if Self.isTokenRotationError(error), index + 1 < keys.count {
                             continue
                         }
                         continuation.finish(throwing: error)

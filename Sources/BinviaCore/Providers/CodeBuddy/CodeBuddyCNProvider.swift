@@ -98,10 +98,10 @@ public struct CodeBuddyCNProvider: Provider {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    /// 是否属于可轮换的鉴权失败（401）。
-    private static func isAuthRotationError(_ error: Error) -> Bool {
+    /// 是否属于可轮换的错误（401/403 鉴权失败、429 限流/额度耗尽、502 上游错误）。
+    private static func isTokenRotationError(_ error: Error) -> Bool {
         guard case ProviderError.upstreamError(let statusCode, _) = error else { return false }
-        return statusCode == 401 || statusCode == 403
+        return statusCode == 401 || statusCode == 403 || statusCode == 429 || statusCode == 502
     }
 
     /// ChatRequest 路径的角色归一化：`developer` → `system`（CodeBuddy 对 developer 角色误判内容审核）。
@@ -218,7 +218,7 @@ public struct CodeBuddyCNProvider: Provider {
                         continuation.finish()
                         return
                     } catch {
-                        if Self.isAuthRotationError(error), index + 1 < tokens.count {
+                        if Self.isTokenRotationError(error), index + 1 < tokens.count {
                             continue
                         }
                         continuation.finish(throwing: error)
@@ -245,7 +245,7 @@ public struct CodeBuddyCNProvider: Provider {
                         continuation.finish()
                         return
                     } catch {
-                        if Self.isAuthRotationError(error), index + 1 < tokens.count {
+                        if Self.isTokenRotationError(error), index + 1 < tokens.count {
                             lastError = error
                             continue
                         }
@@ -319,7 +319,7 @@ public struct CodeBuddyCNProvider: Provider {
                 if index + 1 < tokens.count { continue }
             } catch {
                 lastMessage = error.localizedDescription
-                if Self.isAuthRotationError(error), index + 1 < tokens.count { continue }
+                if Self.isTokenRotationError(error), index + 1 < tokens.count { continue }
             }
         }
         return ConnectionTestResult(

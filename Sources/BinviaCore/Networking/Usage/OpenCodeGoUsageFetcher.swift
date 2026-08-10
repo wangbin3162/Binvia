@@ -1,20 +1,14 @@
 import Foundation
 
-/// OpenCode Go 用量查询器（参考 OmniRoute `usage/opencode.ts` + `opencodeQuotaFetcher.ts`）。
+/// OpenCode Go 用量查询器。
 ///
-/// 上游 `GET {base}/quota`（默认 `https://opencode.ai/zen/go/v1/quota`，
-/// `OPENCODE_GO_BASE_URL` 或整体覆盖 `OPENCODE_GO_QUOTA_URL` 生效）→ 三窗口配额：
-/// $12/5h、$30/周、$60/月。响应结构尽力兼容多种字段名（参考 OmniRoute
-/// `parseOpencodeQuotaResponse`）：
-/// ```
-/// { "quota"|"data"|"usage": {
-///     "window_5h"|"5h"|"hourly"|"short":     { used, limit, reset_at, reset_after_seconds, ... },
-///     "window_weekly"|"weekly"|"week"|"wk":  { ... },
-///     "window_monthly"|"monthly"|"month"|"mo": { ... }
-/// } }
-/// ```
-/// 端点当前可能返回 404（上游未公开配额 API，见 OmniRoute 备注）：返回带 `error` 的
-/// 快照（「有则展示无则隐藏」语义，不抛错、不崩溃）。
+/// 默认优先读取本机 opencode CLI 的 SQLite 用量（`OpenCodeGoLocalUsageReader`），
+/// 不再依赖会 404 的公开配额端点。显式设置 `OPENCODE_GO_QUOTA_URL` 时才走 web 配额接口
+/// （测试 mock 或上游开放后覆盖），web 路径参考 OmniRoute `opencodeQuotaFetcher.ts`。
+///
+/// 配置了浏览器 Cookie（`OPENCODE_GO_COOKIE` / 设置面板）时，在本地金额基础上叠加
+/// 服务端权威配额窗口（5h/周/月剩余比例 + 重置时间）与 Zen 余额（`OpenCodeGoWebUsageFetcher`）；
+/// Cookie 失效回退本地结果并提示，web 接口异常静默回退本地。
 public struct OpenCodeGoUsageFetcher: ProviderUsageFetcher {
     public init() {}
 
@@ -29,6 +23,88 @@ public struct OpenCodeGoUsageFetcher: ProviderUsageFetcher {
     }
 
     public func fetchUsage(credential: ProviderCredential) async throws -> ProviderUsageSnapshot {
+        // 显式配额 URL 覆盖时保持 web 查询（默认端点当前 404，不主动打）。
+        if let override = RouteConfig.envValue(["OPENCODE_GO_QUOTA_URL"]), !override.isEmpty {
+            return try await fetchWebUsage(credential: credential)
+        }
+
+        // local-first：本机 SQLite 用量
+        let local: ProviderUsageSnapshot
+        do {
+            local = try OpenCodeGoLocalUsageReader().fetch()
+        } catch let error as OpenCodeGoLocalUsageError {
+            return ProviderUsageSnapshot(
+                providerID: "opencode-go",
+                fetchedAt: .now,
+                error: error.localizedDescription
+            )
+        }
+
+        // 有 Cookie → web overlay：服务端权威配额窗口 + Zen 余额叠加到本地金额
+        guard let cookie = OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencode-go", credential: credential)
+        else {
+            return local
+        }
+        do {
+            let override = OpenCodeCookieConfig.resolveWorkspaceID(providerID: "opencode-go", credential: credential)
+            let web = try await OpenCodeGoWebUsageFetcher().fetchUsage(
+                cookieHeader: cookie,
+                workspaceIDOverride: override,
+                now: .now)
+            return Self.merge(local: local, web: web)
+        } catch let error as OpenCodeGoWebUsageError {
+            switch error {
+            case .invalidCredentials:
+                // Cookie 过期：回退本地并提示
+                return ProviderUsageSnapshot(
+                    providerID: "opencode-go",
+                    quotaWindows: local.quotaWindows,
+                    rawJSON: local.rawJSON,
+                    fetchedAt: .now,
+                    error: "OpenCode Go 会话 Cookie 无效或已过期，已回退本机用量"
+                )
+            default:
+                // 其他 web 失败（接口/解析变化）：静默回退本地
+                return local
+            }
+        } catch {
+            return local
+        }
+    }
+
+    /// 把 web 权威剩余比例/重置时间叠加到本地金额窗口（按 5h/周/月 索引对齐），
+    /// 附带 Zen 余额；web 窗口缺省时保留对应本地窗口。
+    private static func merge(local: ProviderUsageSnapshot, web: OpenCodeGoWebUsage) -> ProviderUsageSnapshot {
+        var windows = local.quotaWindows
+        for index in windows.indices where index < web.windows.count {
+            let localWindow = windows[index]
+            let webWindow = web.windows[index]
+            windows[index] = QuotaWindow(
+                label: localWindow.label,
+                remainingFraction: webWindow.remainingFraction,
+                resetAt: webWindow.resetAt,
+                used: localWindow.used,
+                total: localWindow.total
+            )
+        }
+        var balance: Decimal?
+        var currency: String?
+        if let usd = web.balanceUSD, usd.isFinite {
+            balance = Decimal(usd)
+            currency = "USD"
+        }
+        return ProviderUsageSnapshot(
+            providerID: "opencode-go",
+            balance: balance,
+            currency: currency,
+            quotaWindows: windows,
+            rawJSON: local.rawJSON,
+            fetchedAt: .now
+        )
+    }
+
+    /// Web 配额查询：`GET {base}/quota` → 三窗口配额（$12/5h、$30/周、$60/月）。
+    private func fetchWebUsage(credential: ProviderCredential) async throws -> ProviderUsageSnapshot {
         let key: String
         if let apiKey = credential.apiKey, !apiKey.isEmpty {
             key = apiKey

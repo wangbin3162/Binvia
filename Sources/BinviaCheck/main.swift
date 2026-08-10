@@ -1,5 +1,6 @@
 import Foundation
 import BinviaCore
+import SQLite3
 
 // BinviaCheck — 自包含可运行测试（无 XCTest 依赖）。
 // 本机仅安装 CommandLineTools（无 xctest），`swift test` 不可用，
@@ -2368,6 +2369,117 @@ func kimiUsageFetcherTests() async throws {
 
 // MARK: - Phase 25: 新用量查询器（URLProtocol mock）
 
+/// 构造 opencode 本地 SQLite fixture。
+/// - `includePart=false`：只建 `message` 表（旧库路径）；
+/// - `includePart=true`：建 `message + part`，其中 `part.data.time.created` 缺失，
+///   验证回退 `part.time_created`；`m3` 无 step-finish，验证 message 成本兜底。
+private func makeOpenCodeGoFixtureDatabase(
+    databaseURL: URL,
+    createdMs: Int64,
+    includePart: Bool
+) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(databaseURL.path, &db) == SQLITE_OK else {
+        let message = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+        sqlite3_close(db)
+        throw NSError(domain: "BinviaCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+    defer { sqlite3_close(db) }
+
+    let messageSQL = """
+        CREATE TABLE message (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          time_created INTEGER NOT NULL,
+          time_updated INTEGER NOT NULL,
+          data TEXT NOT NULL
+        );
+        INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES
+          ('m1', 's1', \(createdMs), \(createdMs), '{"time":{"created":\(createdMs)},"cost":6,"providerID":"opencode-go","role":"assistant"}'),
+          ('m2', 's1', \(createdMs), \(createdMs), '{"time":{"created":\(createdMs)},"cost":0,"providerID":"opencodego","role":"assistant"}'),
+          ('m3', 's1', \(createdMs), \(createdMs), '{"time":{"created":\(createdMs)},"cost":3,"providerID":"opencode-go","role":"assistant"}');
+        """
+    guard sqlite3_exec(db, messageSQL, nil, nil, nil) == SQLITE_OK else {
+        let message = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "message fixture failed"
+        throw NSError(domain: "BinviaCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    if includePart {
+        let partSQL = """
+            CREATE TABLE part (
+              id TEXT PRIMARY KEY,
+              message_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              time_created INTEGER NOT NULL,
+              time_updated INTEGER NOT NULL,
+              data TEXT NOT NULL
+            );
+            INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES
+              ('p1', 'm1', 's1', \(createdMs), \(createdMs), '{"type":"step-finish","cost":6}'),
+              ('p2', 'm2', 's1', \(createdMs), \(createdMs), '{"type":"step-finish","cost":3}');
+            """
+        guard sqlite3_exec(db, partSQL, nil, nil, nil) == SQLITE_OK else {
+            let message = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "part fixture failed"
+            throw NSError(domain: "BinviaCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+}
+
+/// OpenCode Go 本地用量（SQLite fixture）：
+func openCodeGoLocalUsageReaderTests() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("BinviaCheck-OpenCodeGoLocal-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let databaseURL = root.appendingPathComponent("opencode.db")
+    let authURL = root.appendingPathComponent("auth.json")
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let createdMs = Int64((now.timeIntervalSince1970 - 60) * 1000)
+
+    // 1) 旧库（仅 message 表）：opencode-go + opencodego 别名都计入
+    try makeOpenCodeGoFixtureDatabase(databaseURL: databaseURL, createdMs: createdMs, includePart: false)
+    let snapshot = try OpenCodeGoLocalUsageReader(authURL: authURL, databaseURL: databaseURL).fetch(now: now)
+    expectNil(snapshot.error, "OpenCode Go 本地快照无 error")
+    expectEqual(snapshot.providerID, "opencode-go", "本地快照 providerID")
+    expectEqual(
+        snapshot.quotaWindows.map(\.label),
+        ["$12 / 5小时", "$30 / 周", "$60 / 月"],
+        "本地三窗口标签"
+    )
+    expectEqual(snapshot.quotaWindows.map(\.total), [12, 30, 60], "本地三窗口总配额")
+    let session = snapshot.quotaWindows[0]
+    expectTrue(abs(session.remainingFraction - 0.25) < 0.001, "5h 剩余 25%，实际 \(session.remainingFraction)")
+    expectEqual(session.used, 9, "5h 已用 $9")
+    let weekly = snapshot.quotaWindows[1]
+    expectTrue(abs(weekly.remainingFraction - 0.70) < 0.001, "周剩余 70%，实际 \(weekly.remainingFraction)")
+    let monthly = snapshot.quotaWindows[2]
+    expectTrue(abs(monthly.remainingFraction - 0.85) < 0.001, "月剩余 85%，实际 \(monthly.remainingFraction)")
+
+    // 2) 新库（message + part）：step-finish 优先，message 无 step-finish 时兜底
+    try FileManager.default.removeItem(at: databaseURL)
+    try makeOpenCodeGoFixtureDatabase(databaseURL: databaseURL, createdMs: createdMs, includePart: true)
+    let partSnapshot = try OpenCodeGoLocalUsageReader(authURL: authURL, databaseURL: databaseURL).fetch(now: now)
+    let session2 = partSnapshot.quotaWindows[0]
+    expectTrue(abs(session2.remainingFraction - 0) < 0.001, "part 场景 5h 剩余 0%，实际 \(session2.remainingFraction)")
+    expectEqual(session2.used, 12, "part 场景 5h 已用 $12")
+    let weekly2 = partSnapshot.quotaWindows[1]
+    expectTrue(abs(weekly2.remainingFraction - 0.60) < 0.001, "part 场景周剩余 60%，实际 \(weekly2.remainingFraction)")
+    let monthly2 = partSnapshot.quotaWindows[2]
+    expectTrue(abs(monthly2.remainingFraction - 0.80) < 0.001, "part 场景月剩余 80%，实际 \(monthly2.remainingFraction)")
+
+    // 3) 数据库不存在且无 auth → notDetected
+    let missingURL = root.appendingPathComponent("missing.db")
+    do {
+        _ = try OpenCodeGoLocalUsageReader(authURL: authURL, databaseURL: missingURL).fetch(now: now)
+        expectTrue(false, "本地库不存在应抛错")
+    } catch let error as OpenCodeGoLocalUsageError {
+        expectEqual(error, .notDetected, "本地库不存在 → notDetected")
+    } catch {
+        expectTrue(false, "本地库不存在应抛 OpenCodeGoLocalUsageError，实际 \(error)")
+    }
+}
+
 /// OpenCode Go 用量查询器（参考 OmniRoute usage/opencode.ts + opencodeQuotaFetcher.ts）：
 func openCodeGoUsageFetcherTests() async throws {
     unsetenv("OPENCODE_GO_API_KEY")
@@ -2442,10 +2554,395 @@ func openCodeGoUsageFetcherTests() async throws {
         expectTrue(snapshot.error?.contains("404") == true, "OpenCode Go 404 → error 快照，实际: \(snapshot.error ?? "nil")")
     }
 
-    // 4) 无凭据抛 missingCredentials（不触发网络）
-    await expectThrows({
-        _ = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
-    }, "OpenCode Go 无凭据抛 missingCredentials")
+    // 4) 显式配额 URL 时无凭据抛 missingCredentials（默认本地路径不要求 API Key）
+    try await withGlobalURLProtocolMock {
+        setenv("OPENCODE_GO_QUOTA_URL", "https://mock.test/zen/go/v1/quota", 1)
+        URLProtocolMock.reset()
+        await expectThrows({
+            _ = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
+        }, "OpenCode Go 显式配额 URL 无凭据抛 missingCredentials")
+    }
+}
+
+// MARK: - OpenCode / OpenCode Go Cookie 链路（Phase 24）
+
+/// OpenCode Cookie 配置工具：过滤头 / workspace 归一化 / env 优先级。
+func openCodeCookieConfigTests() async throws {
+    // 1) filteredHeader：只保留 auth / __Host-auth
+    let raw = "auth=abc123; __Host-auth=xyz; theme=dark; _ga=GA1.2"
+    expectEqual(
+        OpenCodeCookieConfig.filteredHeader(from: raw),
+        "auth=abc123; __Host-auth=xyz",
+        "过滤 Cookie 头仅保留认证字段")
+    expectNil(OpenCodeCookieConfig.filteredHeader(from: "theme=dark; _ga=GA1"), "无认证字段返回 nil")
+    expectNil(OpenCodeCookieConfig.filteredHeader(from: nil), "nil 输入返回 nil")
+    expectNil(OpenCodeCookieConfig.filteredHeader(from: ""), "空串返回 nil")
+
+    // 1.1) 裸值（无 `=`）：自动包装为 auth=值（浏览器 Application → Cookies 复制形态）
+    let bareValue = "Fe26.2**21e0c5*Qe6uiaBw2HeNJt0ry5RLlQ*IuRV554om4lx_kkLLiSd3LmZljH9Fh0sQsIDSPC0Q3o"
+    expectEqual(
+        OpenCodeCookieConfig.filteredHeader(from: bareValue),
+        "auth=\(bareValue)",
+        "裸值自动包装为 auth=值")
+    expectEqual(
+        OpenCodeCookieConfig.filteredHeader(from: "  \(bareValue)  "),
+        "auth=\(bareValue)",
+        "裸值首尾空白修剪")
+    // 裸值内含 `=` 的 cookie 值不误判为「无认证字段」（头形态仍按 name 过滤）
+    expectEqual(
+        OpenCodeCookieConfig.filteredHeader(from: "__Host-auth=val1=part2; theme=dark"),
+        "__Host-auth=val1=part2",
+        "值内含 = 的 __Host-auth 保留")
+    expectEqual(
+        OpenCodeCookieConfig.filteredHeader(from: "auth=one=two"),
+        "auth=one=two",
+        "值内含 = 的 auth 保留")
+
+    // 2) normalizeWorkspaceID
+    expectEqual(OpenCodeCookieConfig.normalizeWorkspaceID("wrk_abc123"), "wrk_abc123", "wrk_ 前缀直通")
+    expectEqual(OpenCodeCookieConfig.normalizeWorkspaceID("  wrk_abc123  "), "wrk_abc123", "首尾空白修剪")
+    expectEqual(
+        OpenCodeCookieConfig.normalizeWorkspaceID("https://opencode.ai/workspace/wrk_abc123/go"),
+        "wrk_abc123",
+        "完整 URL 提取")
+    expectEqual(
+        OpenCodeCookieConfig.normalizeWorkspaceID("prefix wrk_abc123 suffix"),
+        "wrk_abc123",
+        "内嵌 wrk_ 提取")
+    expectNil(OpenCodeCookieConfig.normalizeWorkspaceID("https://example.com/other"), "非 workspace URL → nil")
+    expectNil(OpenCodeCookieConfig.normalizeWorkspaceID(""), "空串 → nil")
+
+    // 3) resolveCookieHeader：env 优先于 credential；opencode-go 用 GO env
+    setenv("OPENCODE_COOKIE", "auth=env-cookie; theme=x", 1)
+    let credential = ProviderCredential(cookieHeader: "auth=cred-cookie")
+    expectEqual(
+        OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencode", credential: credential),
+        "auth=env-cookie",
+        "Cookie env 优先")
+    unsetenv("OPENCODE_COOKIE")
+    expectEqual(
+        OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencode", credential: credential),
+        "auth=cred-cookie",
+        "Cookie 回退 credential")
+    setenv("OPENCODE_GO_COOKIE", "auth=go-env", 1)
+    expectEqual(
+        OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencode-go", credential: nil),
+        "auth=go-env",
+        "opencode-go 用 GO env")
+    expectEqual(
+        OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencodego", credential: nil),
+        "auth=go-env",
+        "opencodego 别名同 GO env")
+    unsetenv("OPENCODE_GO_COOKIE")
+    expectNil(
+        OpenCodeCookieConfig.resolveCookieHeader(providerID: "opencode", credential: nil),
+        "Cookie 均无 → nil")
+
+    // 4) resolveWorkspaceID：env 优先，回退 credential.workspaceId
+    setenv("OPENCODE_GO_WORKSPACE_ID", "https://opencode.ai/workspace/wrk_env/go", 1)
+    expectEqual(
+        OpenCodeCookieConfig.resolveWorkspaceID(
+            providerID: "opencode-go",
+            credential: ProviderCredential(workspaceId: "wrk_cred")),
+        "wrk_env",
+        "workspace env 优先（URL 归一化）")
+    unsetenv("OPENCODE_GO_WORKSPACE_ID")
+    expectEqual(
+        OpenCodeCookieConfig.resolveWorkspaceID(
+            providerID: "opencode-go",
+            credential: ProviderCredential(workspaceId: "wrk_cred")),
+        "wrk_cred",
+        "workspace 回退 credential")
+    expectNil(
+        OpenCodeCookieConfig.resolveWorkspaceID(providerID: "opencode", credential: nil),
+        "workspace 均无 → nil")
+}
+
+/// OpenCode `_server` RPC 查询：解析 + 请求头 + 登出/无 Cookie 行为。
+func openCodeUsageFetcherTests() async throws {
+    unsetenv("OPENCODE_COOKIE")
+    unsetenv("OPENCODE_WORKSPACE_ID")
+    defer {
+        unsetenv("OPENCODE_COOKIE")
+        unsetenv("OPENCODE_WORKSPACE_ID")
+    }
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    // 1) JSON 解析：fraction 归一化（0.35 → 35%）+ 时间戳重置 + renewsAt
+    let json = #"{"data":{"subscription":{"rollingUsage":{"usagePercent":0.35,"resetInSec":1800},"weeklyUsage":{"usagePercent":62.5,"resetInSec":86400},"renewAt":1800000000}}}"#
+    guard let parsed = OpenCodeUsageFetcher.parseSubscription(text: json, now: now) else {
+        expectTrue(false, "JSON 双窗口解析应成功")
+        return
+    }
+    expectTrue(abs(parsed.rollingPercent - 35) < 0.001, "rolling fraction→百分数，实际 \(parsed.rollingPercent)")
+    expectTrue(abs(parsed.weeklyPercent - 62.5) < 0.001, "weekly 百分数直通，实际 \(parsed.weeklyPercent)")
+    expectEqual(parsed.rollingResetInSec, 1800, "rolling 重置秒数")
+    expectEqual(parsed.weeklyResetInSec, 86400, "weekly 重置秒数")
+    expectEqual(parsed.renewsAt, now, "renewsAt 时间戳解析")
+
+    // 2) 正则兜底：text/javascript 序列化对象形态
+    let js = #"R0=[{data:{rollingUsage:{usagePercent:42,resetInSec:7200},weeklyUsage:{usagePercent:10,resetInSec:604800}}}];"#
+    guard let jsParsed = OpenCodeUsageFetcher.parseSubscription(text: js, now: now) else {
+        expectTrue(false, "正则兜底解析应成功")
+        return
+    }
+    expectTrue(abs(jsParsed.rollingPercent - 42) < 0.001, "正则 rolling，实际 \(jsParsed.rollingPercent)")
+    expectTrue(abs(jsParsed.weeklyPercent - 10) < 0.001, "正则 weekly，实际 \(jsParsed.weeklyPercent)")
+
+    // 3) workspace id 提取（正则 + JSON 递归）
+    let jsWorkspaces = #"[{id:"wrk_aaaa1111",name:"A"},{id:"wrk_bbbb2222",name:"B"}]"#
+    expectEqual(
+        OpenCodeUsageFetcher.parseWorkspaceIDs(text: jsWorkspaces),
+        ["wrk_aaaa1111", "wrk_bbbb2222"],
+        "正则提取 workspace id")
+    expectEqual(
+        OpenCodeUsageFetcher.parseWorkspaceIDs(text: #"[{id:"wrk_cccc3333",name:"C"}]"#),
+        ["wrk_cccc3333"],
+        "正则提取 workspace id（JS 形态）")
+
+    // 4) 集成：workspace GET + subscription GET → 双窗口快照（断言请求头）
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.value(forHTTPHeaderField: "Cookie"), "auth=test-cookie", "_server 请求携带过滤后 Cookie")
+            expectEqual(request.value(forHTTPHeaderField: "Origin"), "https://opencode.ai", "_server Origin")
+            expectTrue(request.value(forHTTPHeaderField: "X-Server-Id") != nil, "_server X-Server-Id 存在")
+            expectTrue(request.value(forHTTPHeaderField: "X-Server-Instance") != nil, "_server X-Server-Instance 存在")
+            expectTrue(request.value(forHTTPHeaderField: "User-Agent") != nil, "_server User-Agent 存在")
+            if URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value == OpenCodeUsageFetcher.workspacesServerID {
+                let body = #"[{id:"wrk_aaaa1111",name:"A"}]"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            let body = #"R0=[{data:{rollingUsage:{usagePercent:42,resetInSec:7200},weeklyUsage:{usagePercent:10,resetInSec:604800}}}];"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let fetcher = OpenCodeUsageFetcher()
+        let snapshot = try await fetcher.fetchUsage(credential: ProviderCredential(cookieHeader: "auth=test-cookie; theme=dark"))
+        expectNil(snapshot.error, "OpenCode 集成无 error")
+        expectEqual(snapshot.quotaWindows.map(\.label), ["5h 滚动", "周配额"], "集成双窗口标签")
+        expectTrue(abs(snapshot.quotaWindows[0].remainingFraction - 0.58) < 0.001, "集成 5h 剩余 58%")
+        expectTrue(abs(snapshot.quotaWindows[1].remainingFraction - 0.90) < 0.001, "集成周剩余 90%")
+        expectTrue(snapshot.quotaWindows[0].resetAt != nil, "集成 5h 有重置时间")
+        expectEqual(URLProtocolMock.requestCount, 2, "集成共 2 次 _server 请求（workspaces + subscription）")
+    }
+
+    // 5) 无 Cookie → error 快照，不崩溃
+    let noCookie = try await OpenCodeUsageFetcher().fetchUsage(credential: ProviderCredential())
+    expectTrue(noCookie.error?.contains("Cookie") == true, "无 Cookie → error 快照，实际: \(noCookie.error ?? "nil")")
+
+    // 6) 登出特征（login 页）→ invalidCredentials error 快照
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let body = "<html><title>Login</title><body>Please sign in</body></html>"
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let expired = try await OpenCodeUsageFetcher().fetchUsage(credential: ProviderCredential(cookieHeader: "auth=stale"))
+        expectTrue(expired.error?.contains("过期") == true, "登出特征 → 过期提示，实际: \(expired.error ?? "nil")")
+    }
+
+    // 7) workspace override：跳过 workspaces 发现，仅打 subscription
+    setenv("OPENCODE_WORKSPACE_ID", "wrk_override99", 1)
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
+            expectFalse(query == OpenCodeUsageFetcher.workspacesServerID, "override 时不应请求 workspaces")
+            let body = #"R0=[{data:{rollingUsage:{usagePercent:5,resetInSec:3600}}}];"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let override = try await OpenCodeUsageFetcher().fetchUsage(credential: ProviderCredential(cookieHeader: "auth=x"))
+        expectEqual(URLProtocolMock.requestCount, 1, "override 只打 1 次 subscription")
+        expectNil(override.error, "override 无 error")
+        expectEqual(override.quotaWindows.count, 1, "override 只有 5h 窗口（无 weekly）")
+    }
+    unsetenv("OPENCODE_WORKSPACE_ID")
+
+    // 8) 401 → 过期提示
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data("unauthorized".utf8))
+        }
+        let unauthorized = try await OpenCodeUsageFetcher().fetchUsage(credential: ProviderCredential(cookieHeader: "auth=bad"))
+        expectTrue(unauthorized.error?.contains("过期") == true, "401 → 过期提示，实际: \(unauthorized.error ?? "nil")")
+    }
+
+    // 9) subscription GET 返回 JS 包装的 null（无订阅数据）：不触发 POST 兜底（避免 500），
+    //    返回明确提示且只打 1 次请求
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
+            if query == OpenCodeUsageFetcher.workspacesServerID {
+                let body = #"[{id:"wrk_aaaa1111",name:"A"}]"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            // JS 序列化 null 形态（含 0x 长度前缀）
+            let body = ";0x00000056;((self.$R=self.$R||{})[\"server-fn:x\"]=[],null)"
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let noSub = try await OpenCodeUsageFetcher().fetchUsage(credential: ProviderCredential(cookieHeader: "auth=x"))
+        expectEqual(URLProtocolMock.requestCount, 2, "null payload 不打 POST 兜底（仅 workspaces + subscription GET）")
+        expectTrue(noSub.error?.contains("没有 OpenCode 订阅配额数据") == true, "null → 明确提示，实际: \(noSub.error ?? "nil")")
+    }
+}
+
+/// Zen 余额解析：JSON 显式键 / 页面 $ 金额 / billing RPC 整数缩放。
+func openCodeZenBalanceParserTests() async throws {
+    // 1) JSON 显式余额键
+    expectEqual(OpenCodeZenBalanceParser.parse(text: #"{"zenBalance":12.34}"#), 12.34, "JSON zenBalance 键")
+    expectEqual(OpenCodeZenBalanceParser.parse(text: #"{"data":{"currentBalanceUSD":5.5}}"#), 5.5, "JSON currentBalanceUSD 键")
+
+    // 2) 页面 $ 金额（HTML）
+    expectEqual(
+        OpenCodeZenBalanceParser.parse(text: "<div>Current balance $12.34</div>"),
+        12.34,
+        "HTML Current balance $")
+    expectEqual(
+        OpenCodeZenBalanceParser.parse(text: "<span>Zen Balance</span><b>$1,234.56</b>"),
+        1234.56,
+        "HTML balance 附近 $ 金额（千分位）")
+
+    // 3) billing RPC：JSON 原始整数 / 1e8；无 customerID 拒绝
+    expectEqual(
+        OpenCodeZenBalanceParser.parseBillingServerResponse(
+            text: #"{"customerID":"cus_123","balance":123456789}"#),
+        1.23456789,
+        "billing JSON 整数缩放")
+    expectNil(
+        OpenCodeZenBalanceParser.parseBillingServerResponse(text: #"{"balance":123456789}"#),
+        "billing 无 customerID → nil")
+    expectEqual(
+        OpenCodeZenBalanceParser.parseBillingServerResponse(
+            text: #"R1={"customerID":"cus_123","balance":50000000};"#),
+        0.5,
+        "billing text/javascript 正则缩放")
+
+    // 4) 无法识别 → nil
+    expectNil(OpenCodeZenBalanceParser.parse(text: "no balance here"), "无余额信息 → nil")
+    expectNil(OpenCodeZenBalanceParser.parseBillingServerResponse(text: "{}"), "空对象 → nil")
+}
+
+/// OpenCode Go web 用量：三窗口解析 + dashboard/余额抓取。
+func openCodeGoWebUsageFetcherTests() async throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    // 1) JSON 三窗口解析
+    let json = #"{"data":{"rollingUsage":{"usagePercent":50,"resetInSec":1800},"weeklyUsage":{"usagePercent":25,"resetInSec":604800},"monthlyUsage":{"usagePercent":12,"resetInSec":2592000}}}"#
+    guard let windows = OpenCodeGoWebUsageFetcher.parseWindows(text: json, now: now) else {
+        expectTrue(false, "JSON 三窗口解析应成功")
+        return
+    }
+    expectEqual(windows.map(\.label), ["5h 滚动", "周配额", "月配额"], "三窗口标签")
+    expectTrue(abs(windows[0].remainingFraction - 0.50) < 0.001, "5h 剩余 50%")
+    expectTrue(abs(windows[1].remainingFraction - 0.75) < 0.001, "周剩余 75%")
+    expectTrue(abs(windows[2].remainingFraction - 0.88) < 0.001, "月剩余 88%")
+    expectEqual(windows[0].resetAt, now.addingTimeInterval(1800), "5h 重置时间")
+
+    // 2) 正则兜底（text/javascript 形态，weekly/monthly 可缺省）
+    let js = #"R0=[{data:{rollingUsage:{usagePercent:60,resetInSec:3600}}}];"#
+    guard let jsWindows = OpenCodeGoWebUsageFetcher.parseWindows(text: js, now: now) else {
+        expectTrue(false, "正则兜底解析应成功")
+        return
+    }
+    expectEqual(jsWindows.count, 1, "仅 rolling 时单窗口")
+    expectTrue(abs(jsWindows[0].remainingFraction - 0.40) < 0.001, "正则 5h 剩余 40%")
+
+    // 3) 集成：workspace override → /go 页 + dashboard 余额
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            expectEqual(request.value(forHTTPHeaderField: "Cookie"), "auth=go-cookie", "web 请求携带过滤后 Cookie")
+            if request.url?.path.hasSuffix("/go") == true {
+                let body = #"R0=[{data:{rollingUsage:{usagePercent:50,resetInSec:1800},weeklyUsage:{usagePercent:25,resetInSec:604800},monthlyUsage:{usagePercent:12,resetInSec:2592000}}}];"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            let body = #"{"zenBalance":12.34}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let fetcher = OpenCodeGoWebUsageFetcher()
+        let usage = try await fetcher.fetchUsage(
+            cookieHeader: "auth=go-cookie; theme=dark",
+            workspaceIDOverride: "wrk_web001")
+        expectEqual(usage.windows.count, 3, "web 集成三窗口")
+        expectTrue(abs((usage.balanceUSD ?? -1) - 12.34) < 0.001, "web 集成 Zen 余额 12.34，实际 \(usage.balanceUSD ?? -1)")
+    }
+}
+
+/// OpenCode Go 用量查询：local-first → web overlay → Cookie 失效回退。
+func openCodeGoOverlayTests() async throws {
+    unsetenv("OPENCODE_GO_QUOTA_URL")
+    unsetenv("OPENCODE_GO_BASE_URL")
+    unsetenv("OPENCODE_GO_COOKIE")
+    unsetenv("OPENCODE_GO_WORKSPACE_ID")
+    defer {
+        unsetenv("OPENCODE_GO_QUOTA_URL")
+        unsetenv("OPENCODE_GO_BASE_URL")
+        unsetenv("OPENCODE_GO_COOKIE")
+        unsetenv("OPENCODE_GO_WORKSPACE_ID")
+        unsetenv("OPENCODE_GO_LOCAL_DIR")
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("BinviaCheck-OpenCodeGoOverlay-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let databaseURL = root.appendingPathComponent("opencode.db")
+    let now = Date()
+    let createdMs = Int64((now.timeIntervalSince1970 - 60) * 1000)
+    try makeOpenCodeGoFixtureDatabase(databaseURL: databaseURL, createdMs: createdMs, includePart: false)
+    setenv("OPENCODE_GO_LOCAL_DIR", root.path, 1)
+
+    // 1) web 成功：本地金额 + web 权威剩余/重置 + Zen 余额
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
+            if query == OpenCodeGoWebUsageFetcher.workspacesServerID {
+                let body = #"[{id:"wrk_go001",name:"Go"}]"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            if request.url?.path.hasSuffix("/go") == true {
+                let body = #"R0=[{data:{rollingUsage:{usagePercent:50,resetInSec:1800},weeklyUsage:{usagePercent:25,resetInSec:604800},monthlyUsage:{usagePercent:12,resetInSec:2592000}}}];"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            let body = #"{"zenBalance":12.34}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let snapshot = try await OpenCodeGoUsageFetcher().fetchUsage(
+            credential: ProviderCredential(cookieHeader: "auth=go-cookie"))
+        expectNil(snapshot.error, "overlay 无 error")
+        expectEqual(snapshot.quotaWindows.map(\.label), ["$12 / 5小时", "$30 / 周", "$60 / 月"], "overlay 保留本地标签")
+        expectTrue(abs(snapshot.quotaWindows[0].remainingFraction - 0.50) < 0.001, "overlay 5h 用 web 剩余")
+        expectEqual(snapshot.quotaWindows[0].total, 12, "overlay 保留本地总配额")
+        expectEqual(snapshot.quotaWindows[0].used, 9, "overlay 保留本地已用")
+        expectTrue(abs(snapshot.quotaWindows[1].remainingFraction - 0.75) < 0.001, "overlay 周用 web 剩余")
+        expectTrue(abs(snapshot.quotaWindows[2].remainingFraction - 0.88) < 0.001, "overlay 月用 web 剩余")
+        expectEqual(snapshot.balance, Decimal(string: "12.34"), "overlay Zen 余额")
+        expectEqual(snapshot.currency, "USD", "overlay 币种 USD")
+    }
+
+    // 2) Cookie 失效：回退本地窗口 + 过期提示
+    try await withGlobalURLProtocolMock {
+        URLProtocolMock.reset()
+        URLProtocolMock.requestHandler = { request in
+            let body = "<html><title>Login</title><body>Please sign in</body></html>"
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+        }
+        let expired = try await OpenCodeGoUsageFetcher().fetchUsage(
+            credential: ProviderCredential(cookieHeader: "auth=stale"))
+        expectTrue(expired.error?.contains("回退本机") == true, "Cookie 失效 → 回退提示，实际: \(expired.error ?? "nil")")
+        expectEqual(expired.quotaWindows.map(\.label), ["$12 / 5小时", "$30 / 周", "$60 / 月"], "Cookie 失效保留本地窗口")
+        expectNil(expired.balance, "Cookie 失效无余额")
+    }
+
+    // 3) 无 Cookie：纯本地（不联网）
+    let localOnly = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
+    expectNil(localOnly.error, "无 Cookie 纯本地无 error")
+    expectEqual(localOnly.quotaWindows.count, 3, "无 Cookie 三窗口")
+    expectNil(localOnly.balance, "无 Cookie 无余额")
 }
 
 /// CodeBuddy CN 用量查询器（参考 OmniRoute usage/codebuddy-cn.ts）：
@@ -3190,7 +3687,13 @@ await run("minimax 集成（OpenAI 兼容透传，URLProtocol mock）", minimaxI
 await run("opencode-go 集成（URLProtocol mock）", opencodeGoIntegrationTests)
 await run("xiaomi-mimo 集成（URLProtocol mock）", xiaomiMimoIntegrationTests)
 await run("Kimi 用量查询（URLProtocol mock）", kimiUsageFetcherTests)
+await run("OpenCode Go 本地用量（SQLite fixture）", openCodeGoLocalUsageReaderTests)
 await run("OpenCode Go 用量查询（URLProtocol mock）", openCodeGoUsageFetcherTests)
+await run("OpenCode Cookie 配置工具", openCodeCookieConfigTests)
+await run("OpenCode 用量查询（_server RPC，URLProtocol mock）", openCodeUsageFetcherTests)
+await run("OpenCode Zen 余额解析", openCodeZenBalanceParserTests)
+await run("OpenCode Go web 用量查询（URLProtocol mock）", openCodeGoWebUsageFetcherTests)
+await run("OpenCode Go 本地 + web overlay", openCodeGoOverlayTests)
 await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFetcherTests)
 await run("CodeBuddy OAuth 登录账号标识", codeBuddyIdentityTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)

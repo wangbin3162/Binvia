@@ -234,6 +234,32 @@ final class AppState: ObservableObject {
         try? saveConfig()
     }
 
+    /// 设置 OpenCode / OpenCode Go 的会话 Cookie（用量查询用，存 `credential.cookieHeader`）。
+    /// 空串 = 清除。
+    func setCookieHeader(_ header: String?, for providerID: String) {
+        let trimmed = header?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        var credential = providerConfig.credential
+        credential.cookieHeader = trimmed.isEmpty ? nil : trimmed
+        providerConfig.credential = credential
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
+    }
+
+    /// 设置 OpenCode / OpenCode Go 的 workspace override（用量查询用，存 `credential.workspaceId`）。
+    /// 接受 `wrk_...` 或完整 URL；空串 = 清除（走 workspace 自动发现）。
+    func setOpenCodeWorkspace(_ workspace: String?, for providerID: String) {
+        let trimmed = workspace?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var providerConfig = config.providers[providerID] ?? ProviderConfig()
+        providerConfig.enabled = true
+        var credential = providerConfig.credential
+        credential.workspaceId = trimmed.isEmpty ? nil : trimmed
+        providerConfig.credential = credential
+        config.providers[providerID] = providerConfig
+        try? saveConfig()
+    }
+
     /// 设置 deviceFlow 类型 provider 的模型调用 token 列表（只写 `apiKeys`）。
     /// OAuth 登录 token 单独存于 `credential.accessToken`，**仅用于积分查询，不参与模型调用**
     /// （CodeBuddy 登录 token 调用模型会报「体验版尚未激活」）。

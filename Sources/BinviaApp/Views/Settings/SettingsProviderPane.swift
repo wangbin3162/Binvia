@@ -50,6 +50,7 @@ struct SettingsProviderPane: View {
                 // 自定义 provider 无用量查询，隐藏用量 Section
                 if !descriptor.isUserDefined {
                     codeBuddyCredentialsSection
+                    openCodeCookieCredentialsSection
                     usageSection
                 }
                 connectionSection(descriptor)
@@ -615,6 +616,18 @@ struct SettingsProviderPane: View {
                 CodeBuddyUsageCredentials()
             } header: {
                 Text("积分凭据")
+            }
+        }
+    }
+
+    /// OpenCode / OpenCode Go 网页会话 Cookie 凭据 Section（用量/余额查询用）。
+    @ViewBuilder
+    private var openCodeCookieCredentialsSection: some View {
+        if providerID == "opencode" || providerID == "opencode-go" {
+            Section {
+                OpenCodeCookieCredentials(providerID: providerID)
+            } header: {
+                Text("网页会话 Cookie")
             }
         }
     }

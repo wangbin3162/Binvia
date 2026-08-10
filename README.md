@@ -160,6 +160,10 @@ curl http://localhost:20427/v1/usage
 | `ANTIGRAVITY_ACCESS_TOKEN` | Antigravity Access Token（已临时下线） |
 | `BINVIA_API_KEY` / `ROUTER_API_KEY` | 恒有效的网关 Key |
 | `BINVIA_CONFIG` | 配置文件路径覆盖 |
+| `OPENCODE_COOKIE` / `OPENCODE_GO_COOKIE` | OpenCode / OpenCode Go 浏览器会话 Cookie（用量查询，也可在 GUI 设置面板填写） |
+| `OPENCODE_WORKSPACE_ID` / `OPENCODE_GO_WORKSPACE_ID` | 跳过 workspace 发现，强制指定（接受 `wrk_...` 或完整 URL） |
+| `OPENCODE_GO_LOCAL_DIR` | 覆盖本地 opencode 数据目录（默认 `~/.local/share/opencode`） |
+| `OPENCODE_GO_QUOTA_URL` | 显式覆盖 OpenCode Go web 配额端点（默认端点上游未公开，仅供测试） |
 
 > 未配置任何 Key 时为开发模式（匿名访问）；配置后所有 `/v1/*` 端点均需携带有效网关 Key。
 
@@ -167,7 +171,7 @@ curl http://localhost:20427/v1/usage
 
 ```bash
 swift build          # 构建
-make test            # 运行全部测试（439 项断言，无需 Xcode）
+make test            # 运行全部测试（563 项断言，无需 Xcode）
 make run             # 启动服务器
 make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```
