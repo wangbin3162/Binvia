@@ -1,6 +1,6 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.2.0）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.2.1）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
@@ -148,10 +148,20 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.2.1 | 2026-08-11 | 恢复 Antigravity 供应商支持（Google OAuth 授权已恢复可用，见下） | `Binvia-0.2.1-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.0 | 2026-08-11 | OpenCode / OpenCode Go Cookie 用量查询；GUI 调整（令牌管理/调用测试/服务管理）；DeepSeek 令牌轮换扩展（见下） | `Binvia-0.2.0-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.7 | 2026-08-07 | 模型列表修复（对齐/重名操作/上下文填充）；/v1/models 附带 context_length（见下） | `Binvia-0.1.7-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.2.1 变更内容
+
+- **恢复 Antigravity 供应商支持**：Google OAuth 授权地址恢复可用，重新注册
+  `AntigravityProviderDescriptor`（`ProviderCatalog.registerAll`），路由规则 `claude-*` / `gemini-*` → Antigravity
+  立即生效，无需额外配置；已有 OAuth 凭据（access/refresh token）直接复用，token 周期刷新同步恢复。
+  实测：`BinviaCLI test antigravity` 连通 OK（24 个模型），`/v1/chat/completions` 流式与非流式均正常。
+- **测试与文档同步**：BinviaCheck 反向索引测试更新（`gemini-3.6-flash-high` 归属 antigravity、注册表可见）；
+  README 供应商表恢复 Antigravity 行并移除临时下线说明；AppState 更新过时注释。
 
 ### v0.2.0 变更内容
 
