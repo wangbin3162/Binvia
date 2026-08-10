@@ -1,6 +1,6 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.1.7）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.2.0）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
@@ -148,9 +148,25 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.2.0 | 2026-08-11 | OpenCode / OpenCode Go Cookie 用量查询；GUI 调整（令牌管理/调用测试/服务管理）；DeepSeek 令牌轮换扩展（见下） | `Binvia-0.2.0-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.7 | 2026-08-07 | 模型列表修复（对齐/重名操作/上下文填充）；/v1/models 附带 context_length（见下） | `Binvia-0.1.7-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.2.0 变更内容
+
+- **OpenCode / OpenCode Go Cookie 用量查询**：`ProviderCredential` 新增 `cookieHeader` 字段，
+  `OpenCodeCookieConfig` 负责 Cookie 头过滤（仅 `auth` / `__Host-auth`，裸值自动包装）与 workspace 归一化；
+  普通 OpenCode 走 `_server` RPC（workspaces + subscription.get）→ 5h/周窗口；
+  OpenCode Go local-first → Cookie web overlay（服务端权威配额 + Zen 余额）→ Cookie 失效回退本地并提示。
+  设置面板新增「网页会话 Cookie」Section（Cookie + workspace 输入）。
+  环境变量：`OPENCODE_COOKIE` / `OPENCODE_GO_COOKIE` / `OPENCODE_WORKSPACE_ID` / `OPENCODE_GO_WORKSPACE_ID`。
+  实现计划见 `docs/opencode-cookie-implementation-plan.md`。
+- **GUI 调整**：设置侧栏重命名（API Key → 令牌管理、测试 → 调用测试、服务器 → 服务管理）；
+  主面板底部「密钥」→「令牌」；「调用测试」对话区修复滚动到底部（布局完成后延迟滚动 +
+  流式期间无动画避免打断）；「服务管理」面板新增服务状态与启停按钮、
+  「启动 App 时自动启动服务」开关（`config.autoStartServer`，App 启动即拉起服务）。
+- **DeepSeek 令牌轮换扩展**：握手期可轮换错误从 401/403 扩展到 429（限流/额度耗尽）与 502（上游错误）。
 
 ### v0.1.7 变更内容
 
