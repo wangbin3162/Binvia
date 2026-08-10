@@ -14,7 +14,7 @@ enum SettingsPane: Hashable {
         switch self {
         case .general: return "服务器"
         case .test: return "测试"
-        case .gatewayKeys: return "网关密钥"
+        case .gatewayKeys: return "API Key"
         case .about: return "关于"
         case let .provider(id): return id
         }

@@ -18,11 +18,6 @@ struct CodeBuddyUsageCredentials: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // 提示放在最上方
-            Text("仅支持企业积分查询")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
             OAuthLoginButton(providerID: "codebuddy-cn")
 
             LabeledContent("企业 ID") {
@@ -34,6 +29,10 @@ struct CodeBuddyUsageCredentials: View {
             }
 
             HStack(spacing: 8) {
+                Text("仅支持企业积分查询")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
                 if let msg = credentialMessage {
                     Text(msg)
                         .font(.caption)
@@ -46,8 +45,6 @@ struct CodeBuddyUsageCredentials: View {
                     .pointingHandCursor()
             }
         }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
         .onAppear(perform: loadCredentials)
         .onChange(of: appState.config.providers["codebuddy-cn"]?.credential) { _, _ in
             // 重新登录后刷新草稿（企业 ID 保留、refreshToken 更新）

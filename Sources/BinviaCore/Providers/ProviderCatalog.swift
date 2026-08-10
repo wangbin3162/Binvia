@@ -6,7 +6,9 @@ public enum ProviderCatalog {
     public static func registerAll() {
         ProviderRegistry.shared.register(DeepSeekProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(CodeBuddyCNProviderDescriptor.descriptor)
-        ProviderRegistry.shared.register(AntigravityProviderDescriptor.descriptor)
+        // Antigravity 临时下线：Google OAuth 授权地址已不可用，先从供应商列表与路由中移除。
+        // 实现代码保留在 Sources/BinviaCore/Providers/Antigravity，恢复时取消本行注册即可。
+        // ProviderRegistry.shared.register(AntigravityProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(OpenCodeProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(KimiProviderDescriptor.descriptor)
         // Phase 18：OpenAI 兼容（opencode-go / xiaomi-mimo）

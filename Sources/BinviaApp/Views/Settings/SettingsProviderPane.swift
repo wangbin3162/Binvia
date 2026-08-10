@@ -7,8 +7,8 @@ import BinviaCore
 /// 布局借鉴 CodexBar `ProviderDetailView`：头部行（品牌图标 + 名称 + 副标题 + 启用开关）、
 /// 「连接」Section（按认证类型展示不同配置方式）、「连通性」Section、信息 Section。
 /// 连接流程参考 OmniRoute `EditConnectionModal`：
-/// - API Key 型：输入 Key → 测试连接 → 保存（支持多 Key 轮换）；
-/// - OAuth 型：OAuth 登录（设备码 / PKCE）→ 状态展示 → 测试；另支持手动粘贴 Token。
+/// - API Key 型：输入 Key → 保存（支持多 Key 轮换）；
+/// - OAuth 型：OAuth 登录（设备码 / PKCE）→ 状态展示；另支持手动粘贴 Token。
 struct SettingsProviderPane: View {
     let providerID: String
     @EnvironmentObject private var appState: AppState
@@ -62,7 +62,7 @@ struct SettingsProviderPane: View {
             }
             .onChange(of: appState.config.providers[providerID]?.credential) { _, _ in
                 // 凭据变更时刷新令牌草稿（OAuth 登录后令牌列表即时反映新 token）；
-                // 模型列表不自动拉取，留待「测试连接」时再刷新。
+                // 模型列表不自动拉取，由模型列表区的「获取模型列表」按钮手动刷新。
                 loadDrafts()
             }
         } else {
@@ -166,13 +166,6 @@ struct SettingsProviderPane: View {
             tokenAddRow(placeholder: "粘贴API密钥/Token") {
                 addAPIKey()
             }
-
-            HStack {
-                Spacer()
-                Button("测试连接") { startTest() }
-                    .buttonStyle(.bordered)
-                    .pointingHandCursor()
-            }
         } header: {
             // 标题黑体：分区标题用粗体（默认 Form 小标题样式偏细，用户反馈 API 令牌标题不醒目）。
             Text("API 令牌")
@@ -244,16 +237,10 @@ struct SettingsProviderPane: View {
                 addDeviceToken()
             }
 
-            HStack {
-                if let msg = tokenSaveMessage {
-                    Text(msg)
-                        .font(.caption)
-                        .foregroundStyle(msg.contains("失败") ? .red : .green)
-                }
-                Spacer()
-                Button("测试连接") { startTest() }
-                    .buttonStyle(.bordered)
-                    .pointingHandCursor()
+            if let msg = tokenSaveMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(msg.contains("失败") ? .red : .green)
             }
         } header: {
             Text("模型调用 Access Token")
@@ -294,13 +281,6 @@ struct SettingsProviderPane: View {
                 .padding(.top, 2)
             }
             .disclosurePointingHand(isExpanded: isManualTokenExpanded)
-
-            HStack {
-                Spacer()
-                Button("测试连接") { startTest() }
-                    .buttonStyle(.bordered)
-                    .pointingHandCursor()
-            }
         } header: {
             Text("Access Token")
         } footer: {
@@ -724,12 +704,6 @@ struct SettingsProviderPane: View {
             tokenSaveMessage = "已保存"
         } catch {
             tokenSaveMessage = "保存失败: \(error.localizedDescription)"
-        }
-    }
-
-    private func startTest() {
-        Task { @MainActor in
-            await appState.testProvider(providerID)
         }
     }
 

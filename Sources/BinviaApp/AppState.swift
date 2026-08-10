@@ -108,6 +108,7 @@ final class AppState: ObservableObject {
         // 恢复 OAuth/设备码登录状态：有 accessToken 且带登录账号标识的 provider 标为已连接，
         // 使「已连接 · 账号」在重启后仍然展示（否则按钮退回「登录」，造成未登录假象）。
         for id in ["codebuddy-cn", "antigravity"] {
+            guard ProviderRegistry.shared.descriptor(for: id) != nil else { continue }
             if let pc = loaded.providers[id],
                !(pc.credential.accessToken ?? "").isEmpty,
                !(pc.credential.email ?? "").isEmpty {
@@ -461,8 +462,12 @@ final class AppState: ObservableObject {
         case .apiKey, .localProbe:
             return !(pc?.credential.apiKey ?? "").isEmpty
                 || !(pc?.apiKeys ?? []).isEmpty
-        case .oauth, .deviceFlow:
+        case .oauth:
             return !(pc?.credential.accessToken ?? "").isEmpty
+        case .deviceFlow:
+            // CodeBuddy 配置只看模型调用 Access Token（apiKeys）；
+            // credential.accessToken 仅用于积分查询，不影响调用配置判定。
+            return !(pc?.apiKeys ?? []).isEmpty
         }
     }
 
@@ -594,6 +599,8 @@ final class AppState: ObservableObject {
     /// 用 refreshToken 主动刷新 Antigravity access token，并把新 token（含旋转后的
     /// refreshToken）、过期时间、邮箱（为空时补抓）持久化回 config。刷新失败不覆盖旧凭据。
     func refreshAntigravityToken() async {
+        // Antigravity 临时下线：未注册时不再发起 token 刷新，避免后台持续访问不可用的授权/上游端点。
+        guard ProviderRegistry.shared.descriptor(for: "antigravity") != nil else { return }
         guard let pc = config.providers["antigravity"],
               !(pc.credential.accessToken ?? "").isEmpty,
               let refresh = pc.credential.refreshToken, !refresh.isEmpty else {
