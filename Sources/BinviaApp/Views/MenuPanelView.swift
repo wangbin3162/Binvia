@@ -100,7 +100,7 @@ struct MenuPanelView: View {
             footerButton(systemName: "gearshape", title: "设置") {
                 SettingsWindowController.shared.show(appState: appState, pane: .general)
             }
-            footerButton(systemName: "key.fill", title: "密钥") {
+            footerButton(systemName: "key.fill", title: "令牌") {
                 SettingsWindowController.shared.show(appState: appState, pane: .gatewayKeys)
             }
             Spacer()

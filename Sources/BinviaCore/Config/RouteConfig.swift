@@ -195,6 +195,8 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     public var version: Int
     public var host: String
     public var port: Int
+    /// 启动 App 时是否自动启动本地服务（GUI 设置面板「服务管理」开关）。
+    public var autoStartServer: Bool
     /// 网关 API Key 列表（v2：对象数组，兼容旧版 `[String]`，加载时自动转换）。
     public var apiKeys: [GatewayKeyConfig]
     public var providers: [String: ProviderConfig]
@@ -207,6 +209,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         version: Int = 2,
         host: String = "localhost",
         port: Int = 20427,
+        autoStartServer: Bool = false,
         apiKeys: [GatewayKeyConfig] = [],
         providers: [String: ProviderConfig] = [:],
         providerOrder: [String] = [],
@@ -215,6 +218,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         self.version = version
         self.host = host
         self.port = port
+        self.autoStartServer = autoStartServer
         self.apiKeys = apiKeys
         self.providers = providers
         self.providerOrder = providerOrder
@@ -225,6 +229,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         case version
         case host
         case port
+        case autoStartServer
         case apiKeys
         case providers
         case providerOrder
@@ -237,6 +242,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         self.host = try container.decodeIfPresent(String.self, forKey: .host) ?? "localhost"
         self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 20427
+        self.autoStartServer = try container.decodeIfPresent(Bool.self, forKey: .autoStartServer) ?? false
         self.providers = try container.decodeIfPresent([String: ProviderConfig].self, forKey: .providers) ?? [:]
         if let legacyKeys = try? container.decodeIfPresent([String].self, forKey: .apiKeys) {
             self.apiKeys = legacyKeys.map { GatewayKeyConfig(key: $0) }
@@ -252,6 +258,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         try container.encode(version, forKey: .version)
         try container.encode(host, forKey: .host)
         try container.encode(port, forKey: .port)
+        try container.encodeIfPresent(autoStartServer ? true : nil, forKey: .autoStartServer)
         try container.encode(apiKeys, forKey: .apiKeys)
         try container.encode(providers, forKey: .providers)
         try container.encodeIfPresent(providerOrder.isEmpty ? nil : providerOrder, forKey: .providerOrder)

@@ -23,6 +23,31 @@ struct SettingsGeneralPane: View {
     var body: some View {
         Form {
             Section {
+                // 服务状态 + 启停按钮（与概览页 ServerStatusView 一致）
+                HStack(spacing: 6) {
+                    StatusBadge(
+                        color: appState.isServerRunning ? BadgeColor.running : BadgeColor.stopped,
+                        tooltip: appState.isServerRunning ? "运行中" : "已停止"
+                    )
+                    Text(appState.isServerRunning ? "运行中" : "已停止")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if let err = appState.serverError, !err.isEmpty {
+                        Text("· \(err)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer()
+                    Button(appState.isServerRunning ? "停止服务" : "启动服务") {
+                        appState.toggleServer()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(appState.isServerRunning ? .red : .accentColor)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+                }
                 LabeledContent("监听地址") {
                     Text("localhost")
                         .foregroundStyle(.secondary)
@@ -33,10 +58,11 @@ struct SettingsGeneralPane: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 120)
                 }
+                Toggle("启动 App 时自动启动服务", isOn: autoStartBinding)
             } header: {
-                Text("服务器")
+                Text("服务管理")
             } footer: {
-                Text("仅监听本机回环地址（localhost），不对外网开放。")
+                Text("仅监听本机回环地址（localhost），不对外网开放。开启自动启动后，App 运行即拉起服务。")
             }
 
             Section {
@@ -140,6 +166,17 @@ struct SettingsGeneralPane: View {
     private var endpointText: String {
         let port = Int(portText) ?? appState.config.port
         return "http://localhost:\(port)/v1"
+    }
+
+    /// 自动启动开关绑定：立即持久化（存 config.autoStartServer）。
+    private var autoStartBinding: Binding<Bool> {
+        Binding(
+            get: { appState.config.autoStartServer },
+            set: { newValue in
+                appState.config.autoStartServer = newValue
+                try? appState.saveConfig()
+            }
+        )
     }
 
     private func copyToClipboard(_ text: String, flag: Binding<Bool>) {

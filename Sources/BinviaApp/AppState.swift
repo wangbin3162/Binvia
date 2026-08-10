@@ -105,6 +105,16 @@ final class AppState: ObservableObject {
         ProviderCatalog.registerAll()
         ProviderCatalog.registerCustomProviders(from: loaded)
 
+        // 自动启动服务：配置开启且非自检模式时，App 启动即拉起本地服务
+        // （startServer 内部已处理错误记录到 serverError，这里不向外抛）。
+        if loaded.autoStartServer, !CommandLine.arguments.contains("--smoke-test") {
+            do {
+                try startServer()
+            } catch {
+                // 启动失败信息已在 serverError 中，静默继续（GUI 概览页可见）
+            }
+        }
+
         // 恢复 OAuth/设备码登录状态：有 accessToken 且带登录账号标识的 provider 标为已连接，
         // 使「已连接 · 账号」在重启后仍然展示（否则按钮退回「登录」，造成未登录假象）。
         for id in ["codebuddy-cn", "antigravity"] {

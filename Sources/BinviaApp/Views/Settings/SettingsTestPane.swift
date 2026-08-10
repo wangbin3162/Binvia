@@ -170,25 +170,36 @@ struct SettingsTestPane: View {
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
             .onChange(of: messages.count) { _, _ in
-                scrollToBottom(proxy)
+                // 新消息（用户提问 / 追加 assistant 占位）：延迟到布局完成后带动画滚动。
+                // onChange 触发时 LazyVStack 可能尚未创建新行，立即 scrollTo 会静默失效。
+                scheduleScroll(proxy, delay: 0.08, animated: true)
             }
             .onChange(of: isSending) { _, sending in
-                if sending { scrollToBottom(proxy) }
+                if sending { scheduleScroll(proxy, delay: 0.08, animated: false) }
             }
             .onChange(of: messages.last?.content) { _, _ in
-                // 流式内容更新时保持滚动到底部
-                scrollToBottom(proxy)
+                // 流式 chunk：无动画高频滚动（带动画会被高频打断，导致停在半途）
+                scheduleScroll(proxy, delay: 0.02, animated: false)
             }
         }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        if isSending, let last = messages.last {
-            withAnimation(.easeOut(duration: 0.15)) {
-                proxy.scrollTo(last.id, anchor: .bottom)
+    /// 延迟到布局完成后滚动到底部；animated=true 时带动画（仅发送/追加新消息用）。
+    /// 流式期间用无动画滚动，避免动画被高频 chunk 打断停在半途。
+    private func scheduleScroll(_ proxy: ScrollViewProxy, delay: Double, animated: Bool) {
+        guard let last = messages.last else { return }
+        let id = last.id
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            // 目标消息已不是最后一条（期间又有新消息/清空）→ 跳过，由新的触发滚动
+            guard messages.last?.id == id else { return }
+            if animated {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(id, anchor: .bottom)
             }
-        } else if let last = messages.last {
-            proxy.scrollTo(last.id, anchor: .bottom)
         }
     }
 

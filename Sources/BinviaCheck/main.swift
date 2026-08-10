@@ -245,8 +245,18 @@ func routeConfigTests() throws {
     expectEqual(defaults.version, 2, "默认 version")
     expectEqual(defaults.host, "localhost", "默认 host")
     expectEqual(defaults.port, 20427, "默认 port")
+    expectEqual(defaults.autoStartServer, false, "默认 autoStartServer 为 false")
     expectEqual(defaults.apiKeys, [], "默认 apiKeys 为空")
     expectEqual(defaults.providers, [:], "默认 providers 为空")
+
+    // autoStartServer 编解码往返：true 显式保存、缺省时解码为 false（旧配置兼容）
+    let roundTrip = RouteConfig(host: "localhost", port: 20427, autoStartServer: true)
+    let data = try JSONEncoder().encode(roundTrip)
+    let decodedCfg = try JSONDecoder().decode(RouteConfig.self, from: data)
+    expectEqual(decodedCfg.autoStartServer, true, "autoStartServer 编解码往返")
+    let legacyCfgData = #"{"version":2,"host":"localhost","port":20427}"#.data(using: .utf8)!
+    let legacyCfg = try JSONDecoder().decode(RouteConfig.self, from: legacyCfgData)
+    expectEqual(legacyCfg.autoStartServer, false, "旧配置缺省 autoStartServer → false")
 
     // credential 优先 config 而非 env
     unsetenv("DEEPSEEK_API_KEY")

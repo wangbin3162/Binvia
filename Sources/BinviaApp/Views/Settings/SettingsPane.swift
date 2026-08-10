@@ -12,9 +12,9 @@ enum SettingsPane: Hashable {
     /// 侧栏展示标题。
     var title: String {
         switch self {
-        case .general: return "服务器"
-        case .test: return "测试"
-        case .gatewayKeys: return "API Key"
+        case .general: return "服务管理"
+        case .test: return "调用测试"
+        case .gatewayKeys: return "令牌管理"
         case .about: return "关于"
         case let .provider(id): return id
         }
