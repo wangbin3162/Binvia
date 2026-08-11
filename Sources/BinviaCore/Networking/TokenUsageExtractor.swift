@@ -13,6 +13,8 @@ import Foundation
 public final class TokenUsageExtractor: @unchecked Sendable {
     private var parser = SSEParser()
     private var lastUsage: TokenUsage?
+    /// 流中是否出现过非空 `finish_reason`（供路由层补齐缺失的结束标记）。
+    private(set) var sawFinishReason = false
 
     public init() {}
 
@@ -42,11 +44,18 @@ public final class TokenUsageExtractor: @unchecked Sendable {
 
     private func extractUsage(fromJSON string: String) {
         guard let data = string.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let usage = json["usage"] as? [String: Any] else { return }
-        let prompt = (usage["prompt_tokens"] as? Int) ?? 0
-        let completion = (usage["completion_tokens"] as? Int) ?? 0
-        let total = (usage["total_tokens"] as? Int) ?? (prompt + completion)
-        lastUsage = TokenUsage(promptTokens: prompt, completionTokens: completion, totalTokens: total)
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let usage = json["usage"] as? [String: Any] {
+            let prompt = (usage["prompt_tokens"] as? Int) ?? 0
+            let completion = (usage["completion_tokens"] as? Int) ?? 0
+            let total = (usage["total_tokens"] as? Int) ?? (prompt + completion)
+            lastUsage = TokenUsage(promptTokens: prompt, completionTokens: completion, totalTokens: total)
+        }
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let reason = first["finish_reason"] as? String,
+           !reason.isEmpty {
+            sawFinishReason = true
+        }
     }
 }

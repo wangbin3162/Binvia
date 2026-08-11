@@ -2777,6 +2777,189 @@ func genericOpenAIProviderTests() async throws {
     }
 }
 
+// MARK: - 流式中途错误传播 + 流式超时封顶
+
+/// 首个 chunk 之后必抛错的上游，用于验证 RouteHandler 不再吞错/挂起。
+private struct FlakyStreamProvider: Provider {
+    let id = "flaky-stream"
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data("data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".utf8))
+            continuation.finish(throwing: ProviderError.upstreamError(statusCode: 500, message: "mid-stream boom"))
+        }
+    }
+}
+
+/// 正常结束但漏发 `finish_reason` 的上游，验证路由层补发结束标记。
+private struct NoFinishProvider: Provider {
+    let id = "no-finish"
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data("data: {\"id\":\"chatcmpl-2\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n".utf8))
+            continuation.finish()
+        }
+    }
+}
+
+struct StreamCollectTimeout: Error {}
+
+/// 收集流式响应；超过 `within` 秒未结束视为失败，避免回归变成测试套件永久挂起。
+func collectStreamData(_ stream: AsyncThrowingStream<Data, Error>, within timeout: TimeInterval) async throws -> Data {
+    try await withThrowingTaskGroup(of: Data.self) { group in
+        group.addTask {
+            var data = Data()
+            for try await chunk in stream {
+                data.append(chunk)
+            }
+            return data
+        }
+        group.addTask {
+            try? await Task.sleep(for: .seconds(timeout))
+            throw StreamCollectTimeout()
+        }
+        let first = try await group.next()
+        group.cancelAll()
+        return first ?? Data()
+    }
+}
+
+func streamingErrorAndTimeoutTests() async throws {
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+
+    // 1) 流式请求对超长 timeoutInterval 封顶
+    let captured = RequestCapture()
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        captured.timeout = request.timeoutInterval
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data("data: x\n\n".utf8))
+    }
+    var longRequest = URLRequest(url: URL(string: "https://mock.test/v1/chat/completions")!)
+    longRequest.httpMethod = "POST"
+    longRequest.httpBody = Data(#"{"model":"m"}"#.utf8)
+    longRequest.timeoutInterval = 300
+    let timeoutStream = ProviderHTTPClient(session: URLProtocolMock.makeSession()).stream(for: longRequest)
+    for try await _ in timeoutStream {}
+    expectEqual(captured.timeout ?? -1, ProviderHTTPClient.streamingIdleTimeout, "流式请求 timeoutInterval 封顶")
+
+    // 2) RouteHandler：首个 chunk 后上游抛错 → 流必须结束并返回错误体
+    let testID = "flaky-stream"
+    ProviderRegistry.shared.unregister(testID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: testID, displayName: "Flaky Stream", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: { FlakyStreamProvider() }
+    ))
+    defer { ProviderRegistry.shared.unregister(testID) }
+
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            testID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    func req(stream: Bool) -> HTTPRequest {
+        HTTPRequest(
+            method: "POST", path: "/v1/chat/completions", queryItems: [:],
+            headers: ["authorization": "Bearer test-key"],
+            body: Data(#"{"model":"\#(testID)/m","messages":[{"role":"user","content":"hi"}],"stream":\#(stream)}"#.utf8)
+        )
+    }
+
+    let streamResponse = try await handler.handle(req(stream: true))
+    expectEqual(streamResponse.status, 200, "中途错误响应仍是 200（响应头已发出）")
+    if case .stream(let stream) = streamResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("hi"), "首个 chunk 仍透传")
+        expectTrue(text.contains("data: "), "流式错误以 SSE data 事件返回")
+        expectTrue(text.contains("mid-stream boom"), "流式错误消息包含上游原因")
+    } else {
+        failed += 1
+        print("FAIL: 流式响应应为 .stream")
+    }
+
+    let jsonResponse = try await handler.handle(req(stream: false))
+    expectEqual(jsonResponse.status, 200, "非流式中途错误响应仍是 200")
+    if case .stream(let stream) = jsonResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("\"error\""), "非流式错误体包含 error")
+        expectTrue(text.contains("upstream_error"), "非流式错误体包含 type")
+        expectTrue(text.contains("mid-stream boom"), "非流式错误体包含上游原因")
+    } else {
+        failed += 1
+        print("FAIL: 非流式响应应为 .stream")
+    }
+
+    // 3) 流正常结束但漏发 finish_reason → 本地补发 finish_reason: stop
+    let noFinishID = "no-finish"
+    ProviderRegistry.shared.unregister(noFinishID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: noFinishID, displayName: "No Finish", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: { NoFinishProvider() }
+    ))
+    defer { ProviderRegistry.shared.unregister(noFinishID) }
+
+    let noFinishConfig = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            noFinishID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    )
+    let noFinishHandler = RouteHandler(config: noFinishConfig)
+    let noFinishResponse = try await noFinishHandler.handle(HTTPRequest(
+        method: "POST", path: "/v1/chat/completions", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: Data(#"{"model":"\#(noFinishID)/m","messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+    ))
+    if case .stream(let stream) = noFinishResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains(#""finish_reason":"stop""#), "漏发 finish_reason 时本地补发 stop")
+        expectFalse(text.contains(#""error""#), "正常结束补发 finish_reason 不伪造错误")
+    } else {
+        failed += 1
+        print("FAIL: no-finish 响应应为 .stream")
+    }
+}
+
 /// 读取 URLRequest 的请求体：优先 `httpBody`，回退 `httpBodyStream`。
 /// URLProtocol 拦截时 URLSession 常把 body 转成 stream，`httpBody` 为 nil。
 func readRequestBody(_ request: URLRequest) -> Data? {
@@ -2802,6 +2985,7 @@ final class RequestCapture: @unchecked Sendable {
     var auth: String?
     var body: Data?
     var url: URL?
+    var timeout: TimeInterval?
 }
 
 /// `ProviderRegistry.unregister` 测试：注册 → 注销 → 验证移除。
@@ -3236,6 +3420,7 @@ await run("OpenCode Go 本地 + web overlay", openCodeGoOverlayTests)
 await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFetcherTests)
 await run("CodeBuddy OAuth 登录账号标识", codeBuddyIdentityTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)
+await run("流式中途错误传播与超时封顶", streamingErrorAndTimeoutTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)

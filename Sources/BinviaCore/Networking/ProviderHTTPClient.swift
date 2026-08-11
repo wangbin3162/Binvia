@@ -63,6 +63,9 @@ public struct ProviderHTTPClient: Sendable {
     /// （实测 `/v1/models` 62s、用量轮询 hang）。统一封顶后最坏 12s 返回。
     /// 流式请求走 `stream` / `streamThrowing`，不受影响。
     public static let nonStreamingTimeout: TimeInterval = 12
+    /// 流式请求空闲超时上限（秒）：URLSession 等待上游新数据超过该时长即终止。
+    /// 只约束“两次数据之间的空闲时间”，不限制长流总时长。
+    public static let streamingIdleTimeout: TimeInterval = 60
 
     private let session: URLSession
 
@@ -115,10 +118,15 @@ public struct ProviderHTTPClient: Sendable {
     /// 流式请求。逐字节透传上游 body。
     /// 非 2xx 时把上游错误 body 作为数据块透传（反向代理语义），不抛错。
     public func stream(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        var mutableRequest = request
+        if mutableRequest.timeoutInterval > Self.streamingIdleTimeout {
+            mutableRequest.timeoutInterval = Self.streamingIdleTimeout
+        }
+        let effectiveRequest = mutableRequest
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: effectiveRequest)
                     if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
                         // 收集错误 body 并透传，保持与上游一致的错误信息
                         var errorBody = Data()
@@ -147,10 +155,15 @@ public struct ProviderHTTPClient: Sendable {
     /// `ProviderError.upstreamError(statusCode:message:)`（可读错误 body），
     /// 而非透传错误 body。用于 key 轮换等需要判断握手状态的场景。
     public func streamThrowing(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        var mutableRequest = request
+        if mutableRequest.timeoutInterval > Self.streamingIdleTimeout {
+            mutableRequest.timeoutInterval = Self.streamingIdleTimeout
+        }
+        let effectiveRequest = mutableRequest
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: effectiveRequest)
                     if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
                         var errorBody = Data()
                         for try await byte in bytes {

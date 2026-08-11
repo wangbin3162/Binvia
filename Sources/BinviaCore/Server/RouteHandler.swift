@@ -218,9 +218,22 @@ public struct RouteHandler: Sendable {
                         }
                         continuation.finish()
                     }
-                    continuation.yield(extractor.process(firstChunk))
-                    for try await chunk in remaining {
-                        continuation.yield(extractor.process(chunk))
+                    do {
+                        continuation.yield(extractor.process(firstChunk))
+                        for try await chunk in remaining {
+                            continuation.yield(extractor.process(chunk))
+                        }
+                        // 与 SSEJSONAggregator 的非流式兜底一致：流正常结束时补齐缺失的 finish_reason，
+                        // 避免 AI SDK 报 "Stream ended without finish_reason"。
+                        if isStreaming, !extractor.sawFinishReason,
+                           let missing = Self.missingFinishReasonChunk() {
+                            continuation.yield(missing)
+                        }
+                    } catch {
+                        // 响应头已发出，无法再改 HTTP 状态码；把上游错误转成客户端可识别的错误体。
+                        if let payload = Self.errorPayload(isStreaming: isStreaming, error: error) {
+                            continuation.yield(payload)
+                        }
                     }
                 }
             }
@@ -264,13 +277,53 @@ public struct RouteHandler: Sendable {
 
         let remaining = AsyncThrowingStream<Data, Error> { continuation in
             Task {
-                while let chunk = try await handler.next() {
-                    continuation.yield(chunk)
+                do {
+                    while let chunk = try await handler.next() {
+                        continuation.yield(chunk)
+                    }
+                    continuation.finish()
+                } catch {
+                    // 首个 chunk 之后的上游错误必须继续传播，否则本地连接会一直挂起或静默 EOF。
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
         }
         return (first, remaining)
+    }
+
+    /// 响应头已发出后的上游错误体：流式客户端收到 `data: {"error":...}`，
+    /// 非流式客户端收到 OpenAI 兼容的 JSON error。
+    private static func errorPayload(isStreaming: Bool, error: Error) -> Data? {
+        let root: [String: Any] = [
+            "error": [
+                "message": "upstream: \(error.localizedDescription)",
+                "type": "upstream_error",
+            ]
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: root) else { return nil }
+        if isStreaming {
+            return Data("data: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+        }
+        return json
+    }
+
+    /// 流正常结束但缺少 `finish_reason` 时补发的最终 SSE chunk。
+    private static func missingFinishReasonChunk() -> Data? {
+        let root: [String: Any] = [
+            "id": "chatcmpl-binvia",
+            "object": "chat.completion.chunk",
+            "created": Int(Date().timeIntervalSince1970),
+            "model": "unknown",
+            "choices": [
+                [
+                    "index": 0,
+                    "delta": [String: Any](),
+                    "finish_reason": "stop",
+                ]
+            ],
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: root) else { return nil }
+        return Data("data: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
     }
 
     /// 持有可变迭代器的类包装（非 actor，因为 actor 无法自调用 mutating async）。
