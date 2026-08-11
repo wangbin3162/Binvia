@@ -161,6 +161,9 @@ curl http://localhost:20427/v1/usage
 | `OPENCODE_WORKSPACE_ID` / `OPENCODE_GO_WORKSPACE_ID` | 跳过 workspace 发现，强制指定（接受 `wrk_...` 或完整 URL） |
 | `OPENCODE_GO_LOCAL_DIR` | 覆盖本地 opencode 数据目录（默认 `~/.local/share/opencode`） |
 | `OPENCODE_GO_QUOTA_URL` | 显式覆盖 OpenCode Go web 配额端点（默认端点上游未公开，仅供测试） |
+| `BINVIA_STREAM_READINESS_TIMEOUT` | 首个事件超时（秒），默认 60 |
+| `BINVIA_STREAM_IDLE_TIMEOUT` | 两次事件之间的空闲超时（秒），默认 120 |
+| `BINVIA_STREAM_EARLY_EOF_RETRY` | 首包前早断最大重试次数，默认 1（0 关闭） |
 
 > 未配置任何 Key 时为开发模式（匿名访问）；配置后所有 `/v1/*` 端点均需携带有效网关 Key。
 
@@ -168,7 +171,7 @@ curl http://localhost:20427/v1/usage
 
 ```bash
 swift build          # 构建
-make test            # 运行全部测试（563 项断言，无需 Xcode）
+make test            # 运行全部测试（591 项断言，无需 Xcode）
 make run             # 启动服务器
 make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```

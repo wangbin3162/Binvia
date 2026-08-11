@@ -64,8 +64,12 @@ public struct ProviderHTTPClient: Sendable {
     /// 流式请求走 `stream` / `streamThrowing`，不受影响。
     public static let nonStreamingTimeout: TimeInterval = 12
     /// 流式请求空闲超时上限（秒）：URLSession 等待上游新数据超过该时长即终止。
-    /// 只约束“两次数据之间的空闲时间”，不限制长流总时长。
-    public static let streamingIdleTimeout: TimeInterval = 60
+    /// 只约束“两次数据之间的空闲时间”，不限制长流总时长；支持 `BINVIA_STREAM_IDLE_TIMEOUT` 覆盖。
+    public static var streamingIdleTimeout: TimeInterval { StreamConfig.idleTimeout }
+
+    /// 首事件（readiness）超时上限（秒）：路由层竞争首个 chunk 使用，
+    /// 支持 `BINVIA_STREAM_READINESS_TIMEOUT` 覆盖，默认 60s。
+    public static var streamingReadinessTimeout: TimeInterval { StreamConfig.readinessTimeout }
 
     private let session: URLSession
 

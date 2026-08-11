@@ -102,8 +102,9 @@ public struct GenericOpenAIProvider: Provider {
         let key = try resolveKey(credential)
         let upstream = try makeUpstreamRequest(request: request, rawBody: rawBody, key: key)
 
-        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 错误 body 直接透传（反向代理语义）。
-        return ProviderHTTPClient.shared.stream(for: upstream)
+        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 抛
+        // ProviderError.upstreamError，由路由层保留上游状态码（不再伪装成 200）。
+        return ProviderHTTPClient.shared.streamThrowing(for: upstream)
     }
 
     /// 模型级测试必须使用抛错版流，不能把 404 错误 body 当作“收到首个 chunk”而判定成功。

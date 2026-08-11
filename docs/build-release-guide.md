@@ -42,7 +42,7 @@ Release workflow 会**以 tag 为准覆盖** version.env，但本地构建前请
 | 命令 | 作用 |
 |---|---|
 | `make build` | 快速 debug 构建 |
-| `make test` | 跑全部测试（BinviaCheck，464 项断言） |
+| `make test` | 跑全部测试（BinviaCheck，591 项断言） |
 | `make run` | 启动本地网关服务器 |
 | `make release` | **完整打包**：双架构 release 构建 + 测试 + GUI 自检 + adhoc 签名 + tar.gz + SHA256，产物在 `bin/` |
 | `make clean` | 清空 `.build` 和 `bin/` |

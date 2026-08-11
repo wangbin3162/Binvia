@@ -607,9 +607,10 @@ func providerModelDisableTests() async throws {
         print("FAIL: /v1/models 用户模型列表响应解析失败")
     }
 
-    // 用显示名请求 → 路由到真实模型名
+    // 用显示名请求 → 路由到真实模型名；上游设为不可达，确定性验证映射成功（非 404）。
+    setenv("DEEPSEEK_BASE_URL", "http://127.0.0.1:1/v1", 1)
+    defer { unsetenv("DEEPSEEK_BASE_URL") }
     let chat = try await handler.handle(req("POST", "/v1/chat/completions", body: chatBody(model: "ds/d4pro")))
-    // 无凭据/不可达上游 → 502（说明路由成功，模型名映射成功）
     expectEqual(chat.status, 502, "显示名路由到真实模型名（无凭据 → 502）")
 }
 
@@ -2960,6 +2961,391 @@ func streamingErrorAndTimeoutTests() async throws {
     }
 }
 
+// MARK: - SSEStreamNormalizer 事件级归一化
+
+func sseStreamNormalizerTests() async throws {
+    // 1) 事件跨 chunk 切分，原文保留
+    let normalizer = SSEStreamNormalizer()
+    let partial = normalizer.process(Data("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n".utf8))
+    expectTrue(partial.isEmpty, "未完整事件不转发")
+    let rest = normalizer.process(Data("\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n".utf8))
+    expectEqual(rest.count, 2, "完整事件逐条转发")
+    expectTrue(String(data: rest[0], encoding: .utf8)?.contains("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}") == true, "跨 chunk 事件原文保留")
+    let tail = normalizer.finish()
+    expectEqual(tail.count, 1, "已带 finish_reason 时只补 [DONE]")
+    expectTrue(String(data: tail[0], encoding: .utf8)?.contains("[DONE]") == true, "结束补 [DONE]")
+
+    // 2) [DONE] 暂存；缺 finish_reason 时先补合成结束块再发 [DONE]
+    let doneFirst = SSEStreamNormalizer()
+    _ = doneFirst.process(Data("data: {\"content\":\"x\"}\n\n".utf8))
+    _ = doneFirst.process(Data("data: [DONE]\n\n".utf8))
+    let doneTail = doneFirst.finish()
+    expectEqual(doneTail.count, 2, "缺 finish_reason 补发合成块 + [DONE]")
+    let doneText = doneTail.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    let finishIndex = doneText.range(of: "finish_reason")?.lowerBound
+    let doneIndex = doneText.range(of: "[DONE]")?.lowerBound
+    expectTrue(
+        finishIndex != nil && doneIndex != nil && finishIndex! < doneIndex!,
+        "finish_reason 在 [DONE] 之前"
+    )
+
+    // 3) 上游带 finish_reason 但缺 [DONE] → 只补 [DONE]
+    let withReason = SSEStreamNormalizer()
+    _ = withReason.process(Data("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".utf8))
+    let withReasonTail = withReason.finish()
+    expectEqual(withReasonTail.count, 1, "已有 finish_reason 只补 [DONE]")
+
+    // 4) 工具调用流缺 finish_reason → 合成 tool_calls
+    let toolNormalizer = SSEStreamNormalizer()
+    _ = toolNormalizer.process(Data("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"f\"}}]}}]}\n\n".utf8))
+    let toolTail = toolNormalizer.finish()
+    let toolText = toolTail.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(toolText.contains("\"tool_calls\""), "工具调用流缺 finish_reason 合成 tool_calls")
+    expectTrue(toolText.contains("[DONE]"), "工具调用流结束补 [DONE]")
+
+    // 5) JSON completion body → SSE（Phase 5：上游忽略 stream:true）
+    let jsonNormalizer = SSEStreamNormalizer()
+    _ = jsonNormalizer.process(Data(#"{"id":"c1","model":"m","created":1,"choices":[{"message":{"content":"Hi"},"finish_reason":"stop"}]}"#.utf8))
+    let jsonOut = jsonNormalizer.finish()
+    let jsonText = jsonOut.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(jsonText.contains("chat.completion.chunk"), "JSON body 转 SSE chunk")
+    expectTrue(jsonText.contains("\"content\":\"Hi\""), "JSON body 内容进 delta")
+    expectTrue(jsonText.contains("\"finish_reason\":\"stop\""), "JSON body finish_reason 保留")
+    expectTrue(jsonText.contains("[DONE]"), "JSON body 转 SSE 结束补 [DONE]")
+
+    // 6) JSON body 跨 chunk 到达；finish_reason 归一化
+    let splitJSON = SSEStreamNormalizer()
+    _ = splitJSON.process(Data(#"{"id":"c2","model":"m","created":1,"choices":[{"message":{"content":"He"#.utf8))
+    _ = splitJSON.process(Data(#"llo"},"finish_reason":"safety"}]}"#.utf8))
+    let splitOut = splitJSON.finish()
+    let splitText = splitOut.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(splitText.contains("chat.completion.chunk"), "跨 chunk JSON body 转 SSE")
+    expectTrue(splitText.contains("\"finish_reason\":\"content_filter\""), "JSON 转 SSE 时 finish_reason 归一化")
+
+    // 7) 错误 JSON（无 choices）→ 原样转 SSE data 事件，不伪造成功
+    let errorNormalizer = SSEStreamNormalizer()
+    _ = errorNormalizer.process(Data(#"{"error":{"message":"boom"}}"#.utf8))
+    let errorOut = errorNormalizer.finish()
+    expectEqual(errorOut.count, 1, "错误 JSON 原样转 SSE data 事件")
+    expectTrue(String(data: errorOut[0], encoding: .utf8)?.contains("\"error\"") == true, "错误 JSON 保留 error 字段")
+
+    // 8) finish_reason 归一化映射
+    expectEqual(FinishReasonNormalizer.normalized("max_tokens"), "length", "max_tokens → length")
+    expectEqual(FinishReasonNormalizer.normalized("safety"), "content_filter", "safety → content_filter")
+    expectEqual(FinishReasonNormalizer.normalized("recitation"), "content_filter", "recitation → content_filter")
+    expectEqual(FinishReasonNormalizer.normalized("prohibited_content"), "content_filter", "prohibited_content → content_filter")
+    expectEqual(FinishReasonNormalizer.normalized("stop"), "stop", "stop 保持")
+    expectEqual(FinishReasonNormalizer.normalized("tool_calls"), "tool_calls", "tool_calls 保持")
+
+    // 9) SSEJSONAggregator 聚合时 finish_reason 归一化
+    let aggStream = AsyncThrowingStream<Data, Error> { continuation in
+        continuation.yield(Data(sseChunk(#"{"id":"c3","model":"m","created":1,"choices":[{"delta":{"content":"x"},"finish_reason":null}]}"#).utf8))
+        continuation.yield(Data(sseChunk(#"{"id":"c3","model":"m","created":1,"choices":[{"delta":{},"finish_reason":"safety"}]}"#).utf8))
+        continuation.finish()
+    }
+    let aggData = try await SSEJSONAggregator.aggregateChatCompletion(aggStream)
+    let aggJSON = try JSONSerialization.jsonObject(with: aggData) as? [String: Any]
+    if let choices = aggJSON?["choices"] as? [[String: Any]], let first = choices.first {
+        expectEqual(first["finish_reason"] as? String, "content_filter", "聚合响应 finish_reason 归一化")
+    } else {
+        failed += 1
+        print("FAIL: 聚合归一化 JSON 结构")
+    }
+}
+
+// MARK: - 流式服务健壮性：readiness / idle / early EOF / 状态码保真
+
+private final class StreamingTestState: @unchecked Sendable {
+    var calls = 0
+}
+
+private struct SilentStreamProvider: Provider {
+    var id: String { "silent-stream" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                try? await Task.sleep(for: .seconds(30))
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+private struct StallAfterFirstProvider: Provider {
+    var id: String { "stall-after-first" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data("data: {\"id\":\"c\",\"model\":\"m\",\"created\":1,\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".utf8))
+            let task = Task {
+                try? await Task.sleep(for: .seconds(30))
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+private struct EarlyEOFProvider: Provider {
+    let state: StreamingTestState
+    var id: String { "early-eof" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        state.calls += 1
+        if state.calls == 1 {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(Data("data: {\"id\":\"c\",\"model\":\"m\",\"created\":1,\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n".utf8))
+            continuation.finish()
+        }
+    }
+}
+
+private struct AlwaysEmptyProvider: Provider {
+    let state: StreamingTestState
+    var id: String { "always-empty" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        state.calls += 1
+        return AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private struct FirstChunkThenEmptyProvider: Provider {
+    let state: StreamingTestState
+    var id: String { "first-chunk-empty" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        state.calls += 1
+        return AsyncThrowingStream { continuation in
+            continuation.yield(Data("data: {\"id\":\"c\",\"model\":\"m\",\"created\":1,\"choices\":[{\"delta\":{\"content\":\"once\"},\"finish_reason\":null}]}\n\n".utf8))
+            continuation.finish()
+        }
+    }
+}
+
+private struct UpstreamStatusProvider: Provider {
+    let status: Int
+    let message: String
+    var id: String { "upstream-status" }
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: ProviderError.upstreamError(statusCode: status, message: message))
+        }
+    }
+}
+
+func streamingRobustnessTests() async throws {
+    unsetenv("BINVIA_STREAM_READINESS_TIMEOUT")
+    unsetenv("BINVIA_STREAM_IDLE_TIMEOUT")
+    unsetenv("BINVIA_STREAM_EARLY_EOF_RETRY")
+    defer {
+        unsetenv("BINVIA_STREAM_READINESS_TIMEOUT")
+        unsetenv("BINVIA_STREAM_IDLE_TIMEOUT")
+        unsetenv("BINVIA_STREAM_EARLY_EOF_RETRY")
+    }
+
+    func robustnessRequest(model: String, stream: Bool) -> HTTPRequest {
+        HTTPRequest(
+            method: "POST", path: "/v1/chat/completions", queryItems: [:],
+            headers: ["authorization": "Bearer test-key"],
+            body: Data(#"{"model":"\#(model)","messages":[{"role":"user","content":"hi"}],"stream":\#(stream)}"#.utf8)
+        )
+    }
+
+    func robustnessHandler(providerID: String) -> RouteHandler {
+        RouteHandler(config: RouteConfig(
+            host: "127.0.0.1", port: 0,
+            apiKeys: [GatewayKeyConfig(key: "test-key")],
+            providers: [
+                providerID: ProviderConfig(
+                    enabled: true,
+                    credential: ProviderCredential(apiKey: "k"),
+                    userModels: [ProviderModelEntry(modelName: "m")]
+                )
+            ]
+        ))
+    }
+
+    func register(_ id: String, _ provider: Provider) {
+        ProviderRegistry.shared.unregister(id)
+        ProviderRegistry.shared.register(ProviderDescriptor(
+            metadata: ProviderMetadata(id: id, displayName: id, authType: .apiKey),
+            baseURL: URL(string: "https://example.com/v1"),
+            models: [Model(id: "m")],
+            makeProvider: { provider }
+        ))
+    }
+
+    // 1) env 配置读取与默认值
+    setenv("BINVIA_STREAM_READINESS_TIMEOUT", "5", 1)
+    setenv("BINVIA_STREAM_IDLE_TIMEOUT", "7", 1)
+    setenv("BINVIA_STREAM_EARLY_EOF_RETRY", "0", 1)
+    expectEqual(StreamConfig.readinessTimeout, 5, "readiness env 生效")
+    expectEqual(StreamConfig.idleTimeout, 7, "idle env 生效")
+    expectEqual(StreamConfig.earlyEOFRetryLimit, 0, "early EOF 重试可关闭")
+    expectEqual(ProviderHTTPClient.streamingReadinessTimeout, 5, "ProviderHTTPClient 暴露 readiness env")
+    expectEqual(ProviderHTTPClient.streamingIdleTimeout, 7, "ProviderHTTPClient 暴露 idle env")
+    unsetenv("BINVIA_STREAM_READINESS_TIMEOUT")
+    unsetenv("BINVIA_STREAM_IDLE_TIMEOUT")
+    unsetenv("BINVIA_STREAM_EARLY_EOF_RETRY")
+    expectEqual(StreamConfig.readinessTimeout, 60, "readiness 默认 60s")
+    expectEqual(StreamConfig.idleTimeout, 120, "idle 默认 120s")
+
+    // 2) readiness 超时 → 504 + stream_readiness_timeout
+    setenv("BINVIA_STREAM_READINESS_TIMEOUT", "0.3", 1)
+    register("robust-silent", SilentStreamProvider())
+    defer { ProviderRegistry.shared.unregister("robust-silent") }
+    let silentResponse = try await robustnessHandler(providerID: "robust-silent")
+        .handle(robustnessRequest(model: "robust-silent/m", stream: true))
+    expectEqual(silentResponse.status, 504, "readiness 超时返回 504")
+    let silentBody = String(data: silentResponse.bodyData() ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(silentBody.contains("stream_readiness_timeout"), "readiness 超时错误体带错误码")
+    unsetenv("BINVIA_STREAM_READINESS_TIMEOUT")
+
+    // 3) 流中途空闲超时 → SSE 错误体 stream_idle_timeout
+    setenv("BINVIA_STREAM_IDLE_TIMEOUT", "0.4", 1)
+    register("robust-stall", StallAfterFirstProvider())
+    defer { ProviderRegistry.shared.unregister("robust-stall") }
+    let stallResponse = try await robustnessHandler(providerID: "robust-stall")
+        .handle(robustnessRequest(model: "robust-stall/m", stream: true))
+    expectEqual(stallResponse.status, 200, "idle 超时发生在响应头发出后")
+    if case .stream(let stream) = stallResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("stream_idle_timeout"), "idle 超时 SSE 错误码")
+    } else {
+        failed += 1
+        print("FAIL: stall 响应应为 .stream")
+    }
+    unsetenv("BINVIA_STREAM_IDLE_TIMEOUT")
+
+    // 4) 首包前空流重试一次 → 正常结果
+    let retryState = StreamingTestState()
+    register("robust-retry", EarlyEOFProvider(state: retryState))
+    defer { ProviderRegistry.shared.unregister("robust-retry") }
+    let retryResponse = try await robustnessHandler(providerID: "robust-retry")
+        .handle(robustnessRequest(model: "robust-retry/m", stream: true))
+    expectEqual(retryResponse.status, 200, "空流重试后返回 200")
+    if case .stream(let stream) = retryResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("ok"), "重试后拿到正常内容")
+    } else {
+        failed += 1
+        print("FAIL: retry 响应应为 .stream")
+    }
+    expectEqual(retryState.calls, 2, "空流恰好重试一次")
+    let retryEntry = RequestLogger.shared.allEntries().last { $0.providerID == "robust-retry" }
+    expectEqual(retryEntry?.retries, 1, "日志记录 early EOF 重试次数")
+
+    // 5) 连续两次空流 → 502 + stream_early_eof
+    let emptyState = StreamingTestState()
+    register("robust-empty", AlwaysEmptyProvider(state: emptyState))
+    defer { ProviderRegistry.shared.unregister("robust-empty") }
+    let emptyResponse = try await robustnessHandler(providerID: "robust-empty")
+        .handle(robustnessRequest(model: "robust-empty/m", stream: true))
+    expectEqual(emptyResponse.status, 502, "连续两次空流返回 502")
+    let emptyBody = String(data: emptyResponse.bodyData() ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(emptyBody.contains("stream_early_eof"), "early EOF 错误体带错误码")
+    expectEqual(emptyState.calls, 2, "连续空流尝试两次")
+
+    // 6) 已产生输出后不再重试
+    let firstState = StreamingTestState()
+    register("robust-first", FirstChunkThenEmptyProvider(state: firstState))
+    defer { ProviderRegistry.shared.unregister("robust-first") }
+    let firstResponse = try await robustnessHandler(providerID: "robust-first")
+        .handle(robustnessRequest(model: "robust-first/m", stream: true))
+    expectEqual(firstResponse.status, 200, "首个 chunk 后空流正常结束")
+    expectEqual(firstState.calls, 1, "已产生输出不再重试")
+
+    // 7) 上游 4xx/5xx 状态码保真
+    for (status, code, message) in [(401, 401, "unauthorized"), (429, 429, "rate limited"), (502, 502, "bad gateway")] {
+        let statusID = "robust-status-\(status)"
+        register(statusID, UpstreamStatusProvider(status: status, message: message))
+        let statusResponse = try await robustnessHandler(providerID: statusID)
+            .handle(robustnessRequest(model: "\(statusID)/m", stream: true))
+        expectEqual(statusResponse.status, code, "上游 \(status) 状态码保真")
+        let statusBody = String(data: statusResponse.bodyData() ?? Data(), encoding: .utf8) ?? ""
+        expectTrue(statusBody.contains(message), "上游错误消息保真")
+        expectTrue(statusBody.contains("upstream_error"), "上游错误错误码")
+        ProviderRegistry.shared.unregister(statusID)
+    }
+
+    // 8) 切到 streamThrowing 后非 2xx 直接抛错（GenericOpenAIProvider）
+    URLProtocol.registerClass(URLProtocolMock.self)
+    defer {
+        URLProtocol.unregisterClass(URLProtocolMock.self)
+        URLProtocolMock.reset()
+    }
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 429, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data(#"{"error":{"message":"rate limited"}}"#.utf8))
+    }
+    let generic = GenericOpenAIProvider(
+        id: "robust-generic",
+        baseURL: URL(string: "https://mock.test/v1")!,
+        models: [ProviderModelEntry(modelName: "glm-5.2")]
+    )
+    let genericRequest = ChatRequest(model: "glm-5.2", messages: [ChatMessage(role: .user, content: "hi")], stream: true)
+    let genericStream = try await generic.chat(request: genericRequest, rawBody: nil, credential: ProviderCredential(apiKey: "sk-test"))
+    do {
+        for try await _ in genericStream {}
+        failed += 1
+        print("FAIL: GenericOpenAIProvider 429 应抛 upstreamError")
+    } catch let ProviderError.upstreamError(statusCode, message) {
+        expectEqual(statusCode, 429, "GenericOpenAIProvider 保留上游 429")
+        expectTrue(message.contains("rate limited"), "GenericOpenAIProvider 错误消息保真")
+    } catch {
+        failed += 1
+        print("FAIL: GenericOpenAIProvider 抛出非预期错误: \(error)")
+    }
+}
+
 /// 读取 URLRequest 的请求体：优先 `httpBody`，回退 `httpBodyStream`。
 /// URLProtocol 拦截时 URLSession 常把 body 转成 stream，`httpBody` 为 nil。
 func readRequestBody(_ request: URLRequest) -> Data? {
@@ -3421,6 +3807,8 @@ await run("CodeBuddy CN 用量查询（URLProtocol mock）", codeBuddyCnUsageFet
 await run("CodeBuddy OAuth 登录账号标识", codeBuddyIdentityTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)
 await run("流式中途错误传播与超时封顶", streamingErrorAndTimeoutTests)
+await run("SSEStreamNormalizer 事件级归一化", sseStreamNormalizerTests)
+await run("流式服务健壮性（readiness/idle/early EOF/状态码）", streamingRobustnessTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)

@@ -3,7 +3,9 @@
 > 制定日期：2026-08-11
 > 参考：OmniRoute `open-sse/utils/stream.ts`、`open-sse/utils/streamReadiness.ts`、
 > `open-sse/utils/streamFailureFinalization.ts`、`src/shared/utils/runtimeTimeouts.ts`
-> 关联现状：Binvia 已完成 Phase 0（中途错误传播、基础 finish_reason 补发、60s 流式空闲超时）
+> 关联现状：Binvia 已完成 Phase 0（中途错误传播、基础 finish_reason 补发、60s 流式空闲超时），
+> 并已实施 Phase 1-5（事件级 SSE 归一化、readiness/idle 超时、非 2xx 状态保真、
+> early EOF 重试与错误分类、JSON 转 SSE 与 finish_reason 归一化）
 
 ## 1. 背景与目标
 
@@ -124,7 +126,7 @@ Provider chat 原始流（字节）
 - `ProviderHTTPClient` 增加 60s 流式空闲超时封顶；
 - 回归测试：`make test` 535 项断言通过。
 
-### Phase 1：SSEStreamNormalizer 事件级归一化
+### Phase 1：SSEStreamNormalizer 事件级归一化（已完成）
 
 目标：把字节透传升级为事件级透传，保证结束块顺序正确。
 
@@ -164,7 +166,7 @@ Provider chat 原始流（字节）
 - 上游完全不发结束标记，客户端收到合成 `finish_reason: stop` → `[DONE]`；
 - `make test` 全量通过。
 
-### Phase 2：readiness 与空闲超时
+### Phase 2：readiness 与空闲超时（已完成）
 
 目标：首事件和流空闲都有明确上限，且可配置。
 
@@ -187,7 +189,7 @@ Provider chat 原始流（字节）
 - `BINVIA_STREAM_READINESS_TIMEOUT=5` 时超时时间约为 5s；
 - `make test` 全量通过。
 
-### Phase 3：非 2xx 状态保真
+### Phase 3：非 2xx 状态保真（已完成）
 
 目标：上游 4xx/5xx 在响应头发出前转成正确 HTTP 状态码。
 
@@ -207,7 +209,7 @@ Provider chat 原始流（字节）
 - 现有 key 轮换测试不回归；
 - `make test` 全量通过。
 
-### Phase 4：early EOF 重试与错误分类
+### Phase 4：early EOF 重试与错误分类（已完成）
 
 目标：首包前早断自动重试一次；日志能区分失败类型。
 
@@ -231,7 +233,7 @@ Provider chat 原始流（字节）
 - 流中途断连不再重试（已产生输出，重试会造成重复内容）；
 - `make test` 全量通过。
 
-### Phase 5（可选）：JSON 响应转 SSE 与 finish_reason 归一化
+### Phase 5（已完成）：JSON 响应转 SSE 与 finish_reason 归一化
 
 目标：兼容忽略 `stream:true` 的上游，和 Gemini 等非 OpenAI 结束原因。
 

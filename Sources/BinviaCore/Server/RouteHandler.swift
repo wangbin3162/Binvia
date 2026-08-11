@@ -188,29 +188,25 @@ public struct RouteHandler: Sendable {
         let start = Date()
 
         do {
-            let upstream = try await provider.chat(request: forwarded, rawBody: body, credential: credential)
             let isStreaming = chatRequest.stream == true
-
-            // 先取首个 chunk：此阶段可检测上游连接/认证错误，避免在 200 后才发现失败。
-            let firstChunkBox = try await Self.firstChunk(from: upstream)
-            guard let firstChunk = firstChunkBox.chunk else {
-                // 空流（无数据无错误）
-                logger.log(RequestLogEntry(
-                    timestamp: Date(),
-                    method: request.method, path: request.path,
-                    providerID: resolution.providerID, model: resolution.modelID,
-                    statusCode: 200,
-                    durationMS: Date().timeIntervalSince(start) * 1000))
-                return HTTPResponse.text(200, "{}", contentType: "application/json")
-            }
-
+            // 先取首个 chunk：此阶段可检测上游连接/认证错误、执行 readiness 超时与
+            // 首包前早断（empty stream）单次重试，避免在 200 后才发现失败。
+            let firstChunkBox = try await Self.openStream(
+                provider: provider,
+                request: forwarded,
+                rawBody: body,
+                credential: credential,
+                readinessTimeout: StreamConfig.readinessTimeout,
+                earlyEOFRetryLimit: StreamConfig.earlyEOFRetryLimit
+            )
+            let firstChunk = firstChunkBox.chunk
             let remaining = firstChunkBox.remaining
             // Phase 22：透传 + 旁路解析 token 用量。Extractor 为单任务内可变对象（仿 IteratorHandler），
             // 每个 chunk 原样透传，流结束时用累计的 usage 回填日志条目。
             let extractor = TokenUsageExtractor()
             let entryID = UUID()
             let responseStream = AsyncThrowingStream<Data, Error> { continuation in
-                Task.detached {
+                let task = Task.detached {
                     defer {
                         // 流结束（含中途出错）：冲刷残余 buffer 并回填 token；保证 continuation 必被 finish
                         if let tokens = extractor.finish() {
@@ -219,22 +215,55 @@ public struct RouteHandler: Sendable {
                         continuation.finish()
                     }
                     do {
-                        continuation.yield(extractor.process(firstChunk))
-                        for try await chunk in remaining {
-                            continuation.yield(extractor.process(chunk))
+                        // 流式客户端走事件级 SSE 归一化（补 finish_reason / [DONE] / JSON 转 SSE）；
+                        // 非流式客户端保持字节透传（上游返回完整 JSON，不做 SSE 改写）。
+                        let normalizer = isStreaming ? SSEStreamNormalizer() : nil
+                        let handler = IteratorHandler(iterator: remaining.makeAsyncIterator())
+                        let idle = StreamIdleMonitor()
+                        if let normalizer {
+                            for data in normalizer.process(firstChunk) {
+                                continuation.yield(data)
+                            }
+                        } else {
+                            continuation.yield(extractor.process(firstChunk))
                         }
-                        // 与 SSEJSONAggregator 的非流式兜底一致：流正常结束时补齐缺失的 finish_reason，
-                        // 避免 AI SDK 报 "Stream ended without finish_reason"。
-                        if isStreaming, !extractor.sawFinishReason,
-                           let missing = Self.missingFinishReasonChunk() {
-                            continuation.yield(missing)
+                        idle.touch()
+                        while true {
+                            let chunk = try await Self.nextChunkWithIdleWatchdog(
+                                handler: handler,
+                                idle: idle,
+                                idleTimeout: StreamConfig.idleTimeout
+                            )
+                            guard let chunk else { break }
+                            idle.touch()
+                            if let normalizer {
+                                for data in normalizer.process(chunk) {
+                                    continuation.yield(data)
+                                }
+                            } else {
+                                continuation.yield(extractor.process(chunk))
+                            }
+                        }
+                        if let normalizer {
+                            for data in normalizer.finish() {
+                                continuation.yield(data)
+                            }
                         }
                     } catch {
-                        // 响应头已发出，无法再改 HTTP 状态码；把上游错误转成客户端可识别的错误体。
-                        if let payload = Self.errorPayload(isStreaming: isStreaming, error: error) {
+                        // 客户端断开时不再写错误体，由 onTermination 记录 client_disconnected。
+                        guard !Task.isCancelled else { return }
+                        let code = Self.streamErrorCode(for: error)
+                        if let payload = Self.errorPayload(isStreaming: isStreaming, error: error, code: code) {
                             continuation.yield(payload)
                         }
+                        logger.updateErrorCode(id: entryID, code: code.rawValue)
                     }
+                }
+                continuation.onTermination = { reason in
+                    if case .cancelled = reason {
+                        logger.updateErrorCode(id: entryID, code: StreamErrorCode.clientDisconnected.rawValue)
+                    }
+                    task.cancel()
                 }
             }
 
@@ -244,7 +273,8 @@ public struct RouteHandler: Sendable {
                 method: request.method, path: request.path,
                 providerID: resolution.providerID, model: resolution.modelID,
                 statusCode: 200,
-                durationMS: Date().timeIntervalSince(start) * 1000))
+                durationMS: Date().timeIntervalSince(start) * 1000,
+                retries: firstChunkBox.earlyEOFRetries > 0 ? firstChunkBox.earlyEOFRetries : nil))
 
             return HTTPResponse(
                 status: 200,
@@ -252,54 +282,157 @@ public struct RouteHandler: Sendable {
                 body: .stream(responseStream)
             )
         } catch {
+            let mapping = Self.errorMapping(for: error)
             logger.log(RequestLogEntry(
                 timestamp: Date(),
                 method: request.method, path: request.path,
                 providerID: resolution.providerID, model: resolution.modelID,
-                statusCode: 502,
+                statusCode: mapping.statusCode,
                 durationMS: Date().timeIntervalSince(start) * 1000,
-                error: error.localizedDescription))
-            let msg = error.localizedDescription
-            return HTTPResponse.text(502, "{\"error\":\"upstream: \(msg)\"}", contentType: "application/json")
+                error: mapping.message,
+                errorCode: mapping.code.rawValue))
+            return HTTPResponse.text(
+                mapping.statusCode,
+                "{\"error\":\"upstream: \(mapping.message)\",\"code\":\"\(mapping.code.rawValue)\"}",
+                contentType: "application/json"
+            )
         }
     }
 
-    /// 从上游流中取出首个 chunk（用于提前检测上游错误），同时把剩余部分包装为新流。
-    /// 避免在 `Task` 闭包内捕获可变迭代器引发的 StrictConcurrency 数据竞争。
-    private static func firstChunk(
-        from stream: AsyncThrowingStream<Data, Error>
-    ) async throws -> (chunk: Data?, remaining: AsyncThrowingStream<Data, Error>) {
-        let iterator = stream.makeAsyncIterator()
-        let handler = IteratorHandler(iterator: iterator)
-        guard let first = try await handler.next() else {
-            return (nil, AsyncThrowingStream { $0.finish() })
+    /// 打开上游流：readiness 超时内取首个 chunk；首包前空流按配置最多重试一次。
+    private static func openStream(
+        provider: Provider,
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?,
+        readinessTimeout: TimeInterval,
+        earlyEOFRetryLimit: Int
+    ) async throws -> FirstChunkBox {
+        var retries = 0
+        while true {
+            let upstream = try await provider.chat(request: request, rawBody: rawBody, credential: credential)
+            let first = try await firstChunk(from: upstream, readinessTimeout: readinessTimeout)
+            if let chunk = first.chunk {
+                return FirstChunkBox(chunk: chunk, remaining: first.remaining, earlyEOFRetries: retries)
+            }
+            guard retries < earlyEOFRetryLimit else {
+                throw StreamError(
+                    code: .streamEarlyEOF,
+                    message: "上游在首个事件前结束（empty stream）",
+                    statusCode: 502
+                )
+            }
+            retries += 1
         }
+    }
 
-        let remaining = AsyncThrowingStream<Data, Error> { continuation in
-            Task {
-                do {
-                    while let chunk = try await handler.next() {
-                        continuation.yield(chunk)
-                    }
-                    continuation.finish()
-                } catch {
-                    // 首个 chunk 之后的上游错误必须继续传播，否则本地连接会一直挂起或静默 EOF。
-                    continuation.finish(throwing: error)
+    /// 从上游流中取出首个 chunk（readiness 超时内；超时抛 `stream_readiness_timeout`），
+    /// 同时把剩余部分包装为新流。超时后取消读取任务，避免上游连接泄漏。
+    private static func firstChunk(
+        from stream: AsyncThrowingStream<Data, Error>,
+        readinessTimeout: TimeInterval
+    ) async throws -> (chunk: Data?, remaining: AsyncThrowingStream<Data, Error>) {
+        try await withThrowingTaskGroup(of: FirstChunkResult.self) { group in
+            group.addTask {
+                let iterator = stream.makeAsyncIterator()
+                let handler = IteratorHandler(iterator: iterator)
+                guard let first = try await handler.next() else {
+                    return FirstChunkResult(chunk: nil, remaining: AsyncThrowingStream { $0.finish() })
                 }
+                let remaining = AsyncThrowingStream<Data, Error> { continuation in
+                    Task {
+                        do {
+                            while let chunk = try await handler.next() {
+                                continuation.yield(chunk)
+                            }
+                            continuation.finish()
+                        } catch {
+                            // 首个 chunk 之后的上游错误必须继续传播，否则本地连接会一直挂起或静默 EOF。
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                }
+                return FirstChunkResult(chunk: first, remaining: remaining)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(readinessTimeout))
+                throw StreamError(
+                    code: .streamReadinessTimeout,
+                    message: "上游 \(Int(readinessTimeout))s 内未返回首个事件",
+                    statusCode: 504
+                )
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw StreamError(
+                        code: .streamReadinessTimeout,
+                        message: "上游 \(Int(readinessTimeout))s 内未返回首个事件",
+                        statusCode: 504
+                    )
+                }
+                group.cancelAll()
+                return (result.chunk, result.remaining)
+            } catch {
+                group.cancelAll()
+                throw error
             }
         }
-        return (first, remaining)
+    }
+
+    /// 读取下一个上游 chunk；等待期间由看门狗按 `StreamConfig.watchdogInterval` 检查空闲时间，
+    /// 超过 `idleTimeout` 抛 `stream_idle_timeout`。
+    private static func nextChunkWithIdleWatchdog(
+        handler: IteratorHandler,
+        idle: StreamIdleMonitor,
+        idleTimeout: TimeInterval
+    ) async throws -> Data? {
+        try await withThrowingTaskGroup(of: Optional<Data>.self) { group in
+            group.addTask {
+                try await handler.next()
+            }
+            group.addTask {
+                var waited: TimeInterval = 0
+                while waited < idleTimeout {
+                    let step = min(StreamConfig.watchdogInterval, idleTimeout - waited)
+                    try await Task.sleep(for: .seconds(step))
+                    waited += step
+                    if idle.elapsed > idleTimeout {
+                        throw StreamError(
+                            code: .streamIdleTimeout,
+                            message: "上游空闲超过 \(Int(idleTimeout))s 未返回数据",
+                            statusCode: 502
+                        )
+                    }
+                }
+                throw StreamError(
+                    code: .streamIdleTimeout,
+                    message: "上游空闲超过 \(Int(idleTimeout))s 未返回数据",
+                    statusCode: 502
+                )
+            }
+            do {
+                guard let result = try await group.next() else { return nil }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
     }
 
     /// 响应头已发出后的上游错误体：流式客户端收到 `data: {"error":...}`，
-    /// 非流式客户端收到 OpenAI 兼容的 JSON error。
-    private static func errorPayload(isStreaming: Bool, error: Error) -> Data? {
-        let root: [String: Any] = [
-            "error": [
-                "message": "upstream: \(error.localizedDescription)",
-                "type": "upstream_error",
-            ]
+    /// 非流式客户端收到 OpenAI 兼容的 JSON error；两者都带错误码。
+    private static func errorPayload(isStreaming: Bool, error: Error, code: StreamErrorCode) -> Data? {
+        var errorInfo: [String: Any] = [
+            "message": "upstream: \(error.localizedDescription)",
+            "type": code.rawValue,
+            "code": code.rawValue,
         ]
+        if case ProviderError.upstreamError(let statusCode, _) = error {
+            errorInfo["status"] = statusCode
+        }
+        let root: [String: Any] = ["error": errorInfo]
         guard let json = try? JSONSerialization.data(withJSONObject: root) else { return nil }
         if isStreaming {
             return Data("data: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
@@ -307,23 +440,68 @@ public struct RouteHandler: Sendable {
         return json
     }
 
-    /// 流正常结束但缺少 `finish_reason` 时补发的最终 SSE chunk。
-    private static func missingFinishReasonChunk() -> Data? {
-        let root: [String: Any] = [
-            "id": "chatcmpl-binvia",
-            "object": "chat.completion.chunk",
-            "created": Int(Date().timeIntervalSince1970),
-            "model": "unknown",
-            "choices": [
-                [
-                    "index": 0,
-                    "delta": [String: Any](),
-                    "finish_reason": "stop",
-                ]
-            ],
-        ]
-        guard let json = try? JSONSerialization.data(withJSONObject: root) else { return nil }
-        return Data("data: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+    /// 把握手期错误映射为客户端可见的 HTTP 状态码 + 错误码：
+    /// 上游 4xx/5xx 保留原状态码（401/403/429 供客户端重试），其余统一 502。
+    private static func errorMapping(for error: Error) -> ErrorMapping {
+        if let streamError = error as? StreamError {
+            return ErrorMapping(statusCode: streamError.statusCode, code: streamError.code, message: streamError.message)
+        }
+        if let providerError = error as? ProviderError {
+            if case .upstreamError(let statusCode, let message) = providerError {
+                let status = (400 ..< 600).contains(statusCode) ? statusCode : 502
+                return ErrorMapping(statusCode: status, code: .upstreamError, message: message)
+            }
+            return ErrorMapping(statusCode: 502, code: .upstreamError, message: providerError.localizedDescription)
+        }
+        return ErrorMapping(statusCode: 502, code: .upstreamError, message: error.localizedDescription)
+    }
+
+    private static func streamErrorCode(for error: Error) -> StreamErrorCode {
+        if let streamError = error as? StreamError {
+            return streamError.code
+        }
+        if error is CancellationError {
+            return .clientDisconnected
+        }
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return .streamIdleTimeout
+        }
+        return .upstreamError
+    }
+
+    private struct ErrorMapping: Sendable {
+        let statusCode: Int
+        let code: StreamErrorCode
+        let message: String
+    }
+
+    private struct FirstChunkResult: Sendable {
+        let chunk: Data?
+        let remaining: AsyncThrowingStream<Data, Error>
+    }
+
+    private struct FirstChunkBox: Sendable {
+        let chunk: Data
+        let remaining: AsyncThrowingStream<Data, Error>
+        let earlyEOFRetries: Int
+    }
+
+    /// 记录最后一次上游事件时间（锁保护；仅被响应流任务与其看门狗访问）。
+    private final class StreamIdleMonitor: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastActivity = Date()
+
+        func touch() {
+            lock.lock()
+            defer { lock.unlock() }
+            lastActivity = Date()
+        }
+
+        var elapsed: TimeInterval {
+            lock.lock()
+            defer { lock.unlock() }
+            return Date().timeIntervalSince(lastActivity)
+        }
     }
 
     /// 持有可变迭代器的类包装（非 actor，因为 actor 无法自调用 mutating async）。

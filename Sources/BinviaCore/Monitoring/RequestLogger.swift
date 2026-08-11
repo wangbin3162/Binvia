@@ -24,6 +24,10 @@ public struct RequestLogEntry: Sendable, Codable, Equatable {
     public let statusCode: Int
     public let durationMS: Double
     public let error: String?
+    /// 流式错误码（`stream_readiness_timeout` / `stream_idle_timeout` / `stream_early_eof` 等）。
+    public var errorCode: String?
+    /// 首包前早断重试次数（未重试为 nil）。
+    public var retries: Int?
     /// 上游返回的 token 用量。流式请求在流结束后才回填，回填前为 nil。
     public var tokens: TokenUsage?
 
@@ -37,6 +41,8 @@ public struct RequestLogEntry: Sendable, Codable, Equatable {
         statusCode: Int,
         durationMS: Double,
         error: String? = nil,
+        errorCode: String? = nil,
+        retries: Int? = nil,
         tokens: TokenUsage? = nil
     ) {
         self.id = id
@@ -48,6 +54,8 @@ public struct RequestLogEntry: Sendable, Codable, Equatable {
         self.statusCode = statusCode
         self.durationMS = durationMS
         self.error = error
+        self.errorCode = errorCode
+        self.retries = retries
         self.tokens = tokens
     }
 }
@@ -112,6 +120,15 @@ public final class RequestLogger: @unchecked Sendable {
         defer { lock.unlock() }
         if let index = entries.lastIndex(where: { $0.id == id }) {
             entries[index].tokens = tokens
+        }
+    }
+
+    /// 流式请求中途出错时回填错误码（按条目 id 定位，找不到时静默忽略）。
+    public func updateErrorCode(id: UUID, code: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let index = entries.lastIndex(where: { $0.id == id }) {
+            entries[index].errorCode = code
         }
     }
 

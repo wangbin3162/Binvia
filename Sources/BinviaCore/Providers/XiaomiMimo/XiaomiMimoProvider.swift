@@ -76,7 +76,8 @@ public struct XiaomiMimoProvider: Provider {
         upstream.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         upstream.httpBody = body
 
-        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 错误 body 直接透传。
-        return ProviderHTTPClient.shared.stream(for: upstream)
+        // 透传流：客户端 stream=true/false 原样转发；上游非 2xx 抛
+        // ProviderError.upstreamError，由路由层保留上游状态码。
+        return ProviderHTTPClient.shared.streamThrowing(for: upstream)
     }
 }

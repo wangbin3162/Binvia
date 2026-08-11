@@ -70,6 +70,9 @@ public enum SSEJSONAggregator {
             consume(event)
         }
 
+        // finish_reason 归一化（对齐 OmniRoute finishReason.ts）：safety → content_filter、
+        // max_tokens → length 等，仅影响聚合后的响应体，不改动原始事件。
+        let normalizedReason = finishReason.map(FinishReasonNormalizer.normalized) ?? "stop"
         var message: [String: Any] = ["role": "assistant", "content": content]
         if hasToolCalls {
             // 按 index 排序输出完整 tool_calls
@@ -85,7 +88,9 @@ public enum SSEJSONAggregator {
                     ],
                 ]
             }
-            finishReason = finishReason == "stop" || finishReason == nil ? "tool_calls" : finishReason
+            finishReason = normalizedReason == "stop" ? "tool_calls" : normalizedReason
+        } else {
+            finishReason = normalizedReason
         }
 
         var root: [String: Any] = [
