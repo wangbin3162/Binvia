@@ -24,10 +24,30 @@ public struct RouteHandler: Sendable {
             return await handleModels(request)
         case ("POST", "/v1/chat/completions"):
             return try await handleChat(request)
+        case ("POST", "/v1/responses"):
+            guard FeatureFlags.enableResponses else {
+                return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
+            }
+            return try await handleResponses(request)
+        case ("POST", "/v1/messages"):
+            guard FeatureFlags.enableMessages else {
+                return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
+            }
+            return try await handleAnthropicMessages(request)
         case ("GET", "/v1/usage"):
             return handleUsage()
         default:
             return HTTPResponse.text(404, "{\"error\":\"Not Found\"}", contentType: "application/json")
+        }
+    }
+
+    /// 端点开关（计划 §8，默认开启，环境变量可关闭）。
+    private enum FeatureFlags {
+        static var enableResponses: Bool {
+            RouteConfig.envValue(["BINVIA_ENABLE_RESPONSES"]) != "0"
+        }
+        static var enableMessages: Bool {
+            RouteConfig.envValue(["BINVIA_ENABLE_MESSAGES"]) != "0"
         }
     }
 
@@ -299,6 +319,453 @@ public struct RouteHandler: Sendable {
         }
     }
 
+    /// POST /v1/responses（阶段 B：非流式）。
+    ///
+    /// 客户端请求翻译成 ChatRequest 后复用完整上游链路；上游返回 Chat JSON 时
+    /// 翻译成 Responses Response JSON。流式请求目前返回 501，阶段 C 补齐。
+    private func handleResponses(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard authorized(request) else { return unauthorized() }
+        guard let body = request.body, !body.isEmpty else {
+            return HTTPResponse.text(400, "{\"error\":\"empty body\"}", contentType: "application/json")
+        }
+
+        let translated: ChatRequest
+        do {
+            let previousID = try ResponsesRequestReader.previousResponseID(body)
+            let history = previousID.flatMap(ResponsesSessionStore.shared.history(for:))
+            translated = try ResponsesRequestTranslator.translate(body: body, history: history ?? [])
+        } catch {
+            return HTTPResponse.text(400, "{\"error\":\"\(error.localizedDescription)\"}", contentType: "application/json")
+        }
+
+        guard let resolution = router.resolve(translated.model) else {
+            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(translated.model)\"}", contentType: "application/json")
+        }
+        guard let provider = registry.provider(for: resolution.providerID) else {
+            return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+        }
+        if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
+            return forbidden
+        }
+
+        var forwarded = translated
+        let userModels = config.providers[resolution.providerID]?.userModels ?? []
+        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+            ?? resolution.modelID
+        forwarded.model = realModelName
+        forwarded.rawBody = translated.rawBody
+
+        let credential = config.credential(for: resolution.providerID)
+        let start = Date()
+        let responseID = "resp_\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))"
+        do {
+            let isStreaming = translated.stream == true
+            // 非流式统一按流处理：上游返回完整 JSON 时 firstChunk 拿到整段 body，
+            // 后续 EOF；上游强制流式时由聚合层合成 JSON 后再交给这里翻译。
+            let upstream = try await provider.chat(
+                request: forwarded,
+                rawBody: forwarded.rawBody,
+                credential: credential
+            )
+            if !isStreaming {
+                let aggregated = try await Self.aggregateChatResponse(upstream, timeout: StreamConfig.readinessTimeout)
+                let translatedData = try ResponsesResponseTranslator.translate(chatJSON: aggregated, responseID: responseID)
+
+                // 把当轮 Chat 消息加入会话表，供 previous_response_id 续接。
+                let fullHistory = translated.messages + [ChatMessage(
+                    role: .assistant,
+                    content: .text(Self.assistantContent(from: aggregated)),
+                    toolCalls: Self.assistantToolCalls(from: aggregated)
+                )]
+                ResponsesSessionStore.shared.store(responseID: responseID, messages: fullHistory)
+
+                logger.log(RequestLogEntry(
+                    timestamp: Date(),
+                    method: request.method, path: request.path,
+                    providerID: resolution.providerID, model: resolution.modelID,
+                    statusCode: 200,
+                    durationMS: Date().timeIntervalSince(start) * 1000
+                ))
+                return HTTPResponse(
+                    status: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: .data(translatedData)
+                )
+            }
+
+            // 流式：先取首个 chunk，再逐块翻译成 Responses SSE。
+            let firstChunkBox = try await Self.openStream(
+                provider: provider,
+                request: forwarded,
+                rawBody: forwarded.rawBody,
+                credential: credential,
+                readinessTimeout: StreamConfig.readinessTimeout,
+                earlyEOFRetryLimit: StreamConfig.earlyEOFRetryLimit
+            )
+            let firstChunk = firstChunkBox.chunk
+            let remaining = firstChunkBox.remaining
+            let translator = ResponsesStreamTranslator(responseID: responseID)
+            // 上游可能返回纯 JSON（忽略 stream=true）或缺 finish_reason；
+            // 先用 Chat 格式 normalizer 归一化成 SSE 再翻译，保证 translator 只看到事件。
+            let normalizer = SSEStreamNormalizer(format: .openaiChat)
+            let entryID = UUID()
+            let responseStream = AsyncThrowingStream<Data, Error> { continuation in
+                let task = Task.detached {
+                    defer { continuation.finish() }
+                    do {
+                        let handler = IteratorHandler(iterator: remaining.makeAsyncIterator())
+                        let idle = StreamIdleMonitor()
+                        for data in normalizer.process(firstChunk) {
+                            for translated in translator.process(data) {
+                                continuation.yield(translated)
+                            }
+                        }
+                        idle.touch()
+                        while true {
+                            let chunk = try await Self.nextChunkWithIdleWatchdog(
+                                handler: handler,
+                                idle: idle,
+                                idleTimeout: StreamConfig.idleTimeout
+                            )
+                            guard let chunk else { break }
+                            idle.touch()
+                            for data in normalizer.process(chunk) {
+                                for translated in translator.process(data) {
+                                    continuation.yield(translated)
+                                }
+                            }
+                        }
+                        for data in normalizer.finish() {
+                            for translated in translator.process(data) {
+                                continuation.yield(translated)
+                            }
+                        }
+                        for data in translator.finish() {
+                            continuation.yield(data)
+                        }
+                        // 流结束回填会话表（含 assistant 内容 / 工具调用）
+                        let fullHistory = translated.messages + [ChatMessage(
+                            role: .assistant,
+                            content: .text(translator.assistantText),
+                            toolCalls: translator.toolCalls.isEmpty ? nil : translator.toolCalls
+                        )]
+                        ResponsesSessionStore.shared.store(responseID: responseID, messages: fullHistory)
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        let code = Self.streamErrorCode(for: error)
+                        if let payload = Self.responsesErrorPayload(error: error, code: code) {
+                            continuation.yield(payload)
+                        }
+                        logger.updateErrorCode(id: entryID, code: code.rawValue)
+                    }
+                }
+                continuation.onTermination = { reason in
+                    if case .cancelled = reason {
+                        logger.updateErrorCode(id: entryID, code: StreamErrorCode.clientDisconnected.rawValue)
+                    }
+                    task.cancel()
+                }
+            }
+
+            logger.log(RequestLogEntry(
+                id: entryID,
+                timestamp: Date(),
+                method: request.method, path: request.path,
+                providerID: resolution.providerID, model: resolution.modelID,
+                statusCode: 200,
+                durationMS: Date().timeIntervalSince(start) * 1000,
+                retries: firstChunkBox.earlyEOFRetries > 0 ? firstChunkBox.earlyEOFRetries : nil
+            ))
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "text/event-stream"],
+                body: .stream(responseStream)
+            )
+        } catch {
+            let mapping = Self.errorMapping(for: error)
+            logger.log(RequestLogEntry(
+                timestamp: Date(),
+                method: request.method, path: request.path,
+                providerID: resolution.providerID, model: resolution.modelID,
+                statusCode: mapping.statusCode,
+                durationMS: Date().timeIntervalSince(start) * 1000,
+                error: mapping.message,
+                errorCode: mapping.code.rawValue))
+            return HTTPResponse.text(
+                mapping.statusCode,
+                "{\"error\":\"upstream: \(mapping.message)\",\"code\":\"\(mapping.code.rawValue)\"}",
+                contentType: "application/json"
+            )
+        }
+    }
+
+    /// POST /v1/messages（阶段 D：Anthropic Messages API）。
+    private func handleAnthropicMessages(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard authorized(request) else { return unauthorized() }
+        guard let body = request.body, !body.isEmpty else {
+            return HTTPResponse.text(400, "{\"error\":\"empty body\"}", contentType: "application/json")
+        }
+
+        let translated: ChatRequest
+        do {
+            translated = try AnthropicRequestTranslator.translate(body: body)
+        } catch {
+            return HTTPResponse.text(400, "{\"error\":\"\(error.localizedDescription)\"}", contentType: "application/json")
+        }
+
+        guard let resolution = router.resolve(translated.model) else {
+            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(translated.model)\"}", contentType: "application/json")
+        }
+        guard let provider = registry.provider(for: resolution.providerID) else {
+            return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+        }
+        if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
+            return forbidden
+        }
+
+        var forwarded = translated
+        let userModels = config.providers[resolution.providerID]?.userModels ?? []
+        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+            ?? resolution.modelID
+        forwarded.model = realModelName
+        forwarded.rawBody = translated.rawBody
+
+        let credential = config.credential(for: resolution.providerID)
+        let start = Date()
+        let messageID = "msg_\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))"
+        do {
+            let isStreaming = translated.stream == true
+            let upstream = try await provider.chat(
+                request: forwarded,
+                rawBody: forwarded.rawBody,
+                credential: credential
+            )
+            if !isStreaming {
+                let aggregated = try await Self.aggregateChatResponse(upstream, timeout: StreamConfig.readinessTimeout)
+                let translatedData = try AnthropicResponseTranslator.translate(chatJSON: aggregated, messageID: messageID)
+                logger.log(RequestLogEntry(
+                    timestamp: Date(),
+                    method: request.method, path: request.path,
+                    providerID: resolution.providerID, model: resolution.modelID,
+                    statusCode: 200,
+                    durationMS: Date().timeIntervalSince(start) * 1000
+                ))
+                return HTTPResponse(
+                    status: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: .data(translatedData)
+                )
+            }
+
+            // 流式：先取首个 chunk，再用 Chat normalizer 归一化后翻译成 Anthropic SSE。
+            let firstChunkBox = try await Self.openStream(
+                provider: provider,
+                request: forwarded,
+                rawBody: forwarded.rawBody,
+                credential: credential,
+                readinessTimeout: StreamConfig.readinessTimeout,
+                earlyEOFRetryLimit: StreamConfig.earlyEOFRetryLimit
+            )
+            let firstChunk = firstChunkBox.chunk
+            let remaining = firstChunkBox.remaining
+            let translator = AnthropicStreamTranslator(messageID: messageID)
+            let normalizer = SSEStreamNormalizer(format: .openaiChat)
+            let entryID = UUID()
+            let responseStream = AsyncThrowingStream<Data, Error> { continuation in
+                let task = Task.detached {
+                    defer { continuation.finish() }
+                    do {
+                        let handler = IteratorHandler(iterator: remaining.makeAsyncIterator())
+                        let idle = StreamIdleMonitor()
+                        for data in normalizer.process(firstChunk) {
+                            for translated in translator.process(data) {
+                                continuation.yield(translated)
+                            }
+                        }
+                        idle.touch()
+                        while true {
+                            let chunk = try await Self.nextChunkWithIdleWatchdog(
+                                handler: handler,
+                                idle: idle,
+                                idleTimeout: StreamConfig.idleTimeout
+                            )
+                            guard let chunk else { break }
+                            idle.touch()
+                            for data in normalizer.process(chunk) {
+                                for translated in translator.process(data) {
+                                    continuation.yield(translated)
+                                }
+                            }
+                        }
+                        for data in normalizer.finish() {
+                            for translated in translator.process(data) {
+                                continuation.yield(translated)
+                            }
+                        }
+                        for data in translator.finish() {
+                            continuation.yield(data)
+                        }
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        let code = Self.streamErrorCode(for: error)
+                        if let payload = Self.anthropicErrorPayload(error: error, code: code) {
+                            continuation.yield(payload)
+                        }
+                        logger.updateErrorCode(id: entryID, code: code.rawValue)
+                    }
+                }
+                continuation.onTermination = { reason in
+                    if case .cancelled = reason {
+                        logger.updateErrorCode(id: entryID, code: StreamErrorCode.clientDisconnected.rawValue)
+                    }
+                    task.cancel()
+                }
+            }
+
+            logger.log(RequestLogEntry(
+                id: entryID,
+                timestamp: Date(),
+                method: request.method, path: request.path,
+                providerID: resolution.providerID, model: resolution.modelID,
+                statusCode: 200,
+                durationMS: Date().timeIntervalSince(start) * 1000,
+                retries: firstChunkBox.earlyEOFRetries > 0 ? firstChunkBox.earlyEOFRetries : nil
+            ))
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "text/event-stream"],
+                body: .stream(responseStream)
+            )
+        } catch {
+            let mapping = Self.errorMapping(for: error)
+            logger.log(RequestLogEntry(
+                timestamp: Date(),
+                method: request.method, path: request.path,
+                providerID: resolution.providerID, model: resolution.modelID,
+                statusCode: mapping.statusCode,
+                durationMS: Date().timeIntervalSince(start) * 1000,
+                error: mapping.message,
+                errorCode: mapping.code.rawValue))
+            return HTTPResponse.text(
+                mapping.statusCode,
+                "{\"error\":\"upstream: \(mapping.message)\",\"code\":\"\(mapping.code.rawValue)\"}",
+                contentType: "application/json"
+            )
+        }
+    }
+
+    /// 非流式 Responses 请求体读取器（保持翻译器纯函数）。
+    private enum ResponsesRequestReader {
+        static func previousResponseID(_ body: Data) throws -> String? {
+            guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw ResponsesTranslationError("invalid JSON")
+            }
+            return json["previous_response_id"] as? String
+        }
+    }
+
+    /// 聚合上游流为单个 Chat JSON（强制流式 provider 由 Provider 层先聚合，
+    /// 这里兜底处理上游忽略 stream=false 直接返回 SSE 的情况）。
+    private static func aggregateChatResponse(
+        _ stream: AsyncThrowingStream<Data, Error>,
+        timeout: TimeInterval
+    ) async throws -> Data {
+        let handler = IteratorHandler(iterator: stream.makeAsyncIterator())
+        // 完整缓冲上游字节：socket 可能把单个 JSON 拆成多个 chunk，
+        // 不能只看首 chunk 就决定走 SSE 聚合。
+        let buffered = try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                var data = Data()
+                let idle = StreamIdleMonitor()
+                while true {
+                    let chunk = try await Self.nextChunkWithIdleWatchdog(
+                        handler: handler,
+                        idle: idle,
+                        idleTimeout: StreamConfig.idleTimeout
+                    )
+                    guard let chunk else { break }
+                    idle.touch()
+                    data.append(chunk)
+                }
+                guard !data.isEmpty else {
+                    throw StreamError(
+                        code: .streamEarlyEOF,
+                        message: "上游在首个事件前结束（empty stream）",
+                        statusCode: 502
+                    )
+                }
+                return data
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeout))
+                throw StreamError(
+                    code: .streamReadinessTimeout,
+                    message: "上游 \(Int(timeout))s 内未返回完整响应",
+                    statusCode: 504
+                )
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw StreamError(
+                        code: .streamReadinessTimeout,
+                        message: "上游 \(Int(timeout))s 内未返回完整响应",
+                        statusCode: 504
+                    )
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+
+        // 纯 JSON 上游（忽略 stream=false 或直接返回 JSON）：原样返回。
+        if isChatCompletionJSON(buffered) {
+            return buffered
+        }
+
+        // SSE 上游：交给聚合器（把已缓冲字节作为一个 chunk 喂入）。
+        let remaining = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(buffered)
+            continuation.finish()
+        }
+        return try await SSEJSONAggregator.aggregateChatCompletion(remaining)
+    }
+
+    private static func isChatCompletionJSON(_ data: Data) -> Bool {
+        let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.hasPrefix("{") else { return false }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return (json["choices"] as? [[String: Any]])?.isEmpty == false
+    }
+
+    private static func assistantContent(from chatJSON: Data) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: chatJSON) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else { return "" }
+        return content
+    }
+
+    private static func assistantToolCalls(from chatJSON: Data) -> [ToolCall]? {
+        guard let json = try? JSONSerialization.jsonObject(with: chatJSON) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let calls = message["tool_calls"] as? [[String: Any]] else { return nil }
+        return calls.map { call in
+            let function = (call["function"] as? [String: Any]) ?? [:]
+            return ToolCall(
+                id: call["id"] as? String,
+                type: call["type"] as? String,
+                function: ToolCallFunction(
+                    name: function["name"] as? String,
+                    arguments: function["arguments"] as? String
+                )
+            )
+        }
+    }
+
     /// 打开上游流：readiness 超时内取首个 chunk；首包前空流按配置最多重试一次。
     private static func openStream(
         provider: Provider,
@@ -438,6 +905,49 @@ public struct RouteHandler: Sendable {
             return Data("data: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
         }
         return json
+    }
+
+    /// Responses 流式错误帧：`event: response.failed` + Response 状态 failed，
+    /// 错误信息放 `response.error`，保持 Responses 协议的事件终止语义。
+    private static func responsesErrorPayload(error: Error, code: StreamErrorCode) -> Data? {
+        var errorInfo: [String: Any] = [
+            "message": "upstream: \(error.localizedDescription)",
+            "code": code.rawValue,
+            "type": code.rawValue,
+        ]
+        if case ProviderError.upstreamError(let statusCode, _) = error {
+            errorInfo["status"] = statusCode
+        }
+        let payload: [String: Any] = [
+            "type": "response.failed",
+            "response": [
+                "id": "resp_error",
+                "object": "response",
+                "created_at": Int(Date().timeIntervalSince1970),
+                "status": "failed",
+                "error": errorInfo,
+            ],
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        return Data("event: response.failed\ndata: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+    }
+
+    /// Anthropic 流式错误帧：`event: error` + Anthropic error 结构。
+    private static func anthropicErrorPayload(error: Error, code: StreamErrorCode) -> Data? {
+        var errorInfo: [String: Any] = [
+            "type": "api_error",
+            "message": "upstream: \(error.localizedDescription)",
+            "code": code.rawValue,
+        ]
+        if case ProviderError.upstreamError(let statusCode, _) = error {
+            errorInfo["status"] = statusCode
+        }
+        let payload: [String: Any] = [
+            "type": "error",
+            "error": errorInfo,
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        return Data("event: error\ndata: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
     }
 
     /// 把握手期错误映射为客户端可见的 HTTP 状态码 + 错误码：

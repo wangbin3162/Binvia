@@ -252,7 +252,6 @@ func generateAPIKey() -> String {
 - 监听端口配置（修改后需重启服务器生效）
 - 监听地址（127.0.0.1 / 0.0.0.0）
 - 配置文件路径展示
-- 环境变量说明
 - 关于信息
 
 ## 5. 关键实现细节
@@ -458,7 +457,7 @@ BinviaCore 已启用 `StrictConcurrency`。GUI 层需注意：
 
 - [ ] `UsageView.swift`：请求统计展示（总数、错误数、各 Provider 分布）
 - [ ] Metrics 定时刷新（2s Timer）
-- [ ] `SettingsView.swift`：端口配置 + 配置文件路径 + 环境变量说明
+- [ ] `SettingsView.swift`：端口配置 + 配置文件路径
 - [ ] 配置热更新（修改后无需重启服务器即生效）
 - [ ] 验证：修改配置后即时生效，统计数据实时刷新
 

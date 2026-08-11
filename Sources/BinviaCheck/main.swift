@@ -3729,6 +3729,552 @@ func codeBuddySanitizeBodyTests() {
     expectEqual(normalized[1].role, .user, "ChatRequest 路径 user 不动")
 }
 
+// MARK: - Responses 格式翻译与端点
+
+/// 非流式 Responses 请求 → ChatRequest 翻译。
+func responsesRequestTranslatorTests() throws {
+    // 1) input 字符串 + instructions + 工具
+    let body = Data(#"""
+    {"model":"cbcn/glm-5.2","instructions":"be concise","input":"hi","stream":false,
+     "max_output_tokens":128,"temperature":0.4,"tools":[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object"}}}]}
+    """#.utf8)
+    let request = try ResponsesRequestTranslator.translate(body: body)
+    expectEqual(request.model, "cbcn/glm-5.2", "model 保留")
+    expectEqual(request.stream, false, "stream 透传")
+    expectEqual(request.maxTokens, 128, "max_output_tokens → max_tokens")
+    expectEqual(request.temperature, 0.4, "temperature 透传")
+    expectEqual(request.messages.count, 2, "instructions + input 两条消息")
+    expectEqual(request.messages[0].role, .system, "instructions 变成 system 消息")
+    expectEqual(request.messages[0].content?.textValue, "be concise", "system 消息文本")
+    expectEqual(request.messages[1].role, .user, "input 字符串变成 user 消息")
+    expectEqual(request.messages[1].content?.textValue, "hi", "input 文本")
+    expectTrue(String(data: request.rawBody ?? Data(), encoding: .utf8)?.contains("\"tools\"") == true,
+               "Chat body 保留 tools")
+
+    // 1b) Responses 原生工具格式 {type,name,description,parameters}
+    let nativeToolBody = Data(#"""
+    {"model":"m","input":"hi","tools":[
+      {"type":"function","name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}
+    ]}
+    """#.utf8)
+    let nativeRequest = try ResponsesRequestTranslator.translate(body: nativeToolBody)
+    let nativeRaw = String(data: nativeRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(nativeRaw.contains("\"get_weather\""), "原生工具名进入 Chat body")
+    expectTrue(nativeRaw.contains("\"parameters\""), "原生工具 parameters 进入 Chat body")
+
+    // 1c) namespace 工具组拍平成 namespace.name
+    let namespaceBody = Data(#"""
+    {"model":"m","input":"hi","tools":[
+      {"type":"namespace","namespace":"mcp__fs","tools":[
+        {"type":"function","name":"read","description":"read","parameters":{"type":"object"}}
+      ]},
+      {"type":"custom","name":"apply_patch","input":"x"},
+      {"type":"tool_search","filters":[]}
+    ]}
+    """#.utf8)
+    let namespaceRequest = try ResponsesRequestTranslator.translate(body: namespaceBody)
+    let namespaceRaw = String(data: namespaceRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(namespaceRaw.contains("\"mcp__fs.read\""), "namespace 子工具拍平成前缀名")
+    expectFalse(namespaceRaw.contains("apply_patch"), "custom 元数据工具跳过")
+
+    // 2) input 数组：message / function_call / function_call_output，reasoning 跳过
+    let toolBody = Data(#"""
+    {"model":"m","input":[
+      {"type":"message","role":"user","content":[{"type":"input_text","text":"weather?"}]},
+      {"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"sh\"}"},
+      {"type":"function_call_output","call_id":"call_1","output":"sunny"},
+      {"type":"message","role":"user","content":"thanks"},
+      {"type":"reasoning","summary":[{"type":"summary_text","text":"hidden"}]}
+    ]}
+    """#.utf8)
+    let toolRequest = try ResponsesRequestTranslator.translate(body: toolBody)
+    expectEqual(toolRequest.messages.count, 4, "input 数组翻译为 user/assistant(tool_calls)/tool/user")
+    expectEqual(toolRequest.messages[0].role, .user, "首条消息 user")
+    expectEqual(toolRequest.messages[1].role, .assistant, "function_call 归入 assistant")
+    expectEqual(toolRequest.messages[1].toolCalls?.first?.function?.name, "get_weather", "工具名保留")
+    expectEqual(toolRequest.messages[1].toolCalls?.first?.function?.arguments, #"{"city":"sh"}"#, "工具参数保留")
+    expectEqual(toolRequest.messages[2].role, .tool, "function_call_output 变成 tool 消息")
+    expectEqual(toolRequest.messages[2].toolCallID, "call_1", "tool_call_id 保留")
+    expectEqual(toolRequest.messages[2].content?.textValue, "sunny", "tool 输出文本")
+    expectEqual(toolRequest.messages[3].content?.textValue, "thanks", "后续 user 消息保留")
+
+    // 3) reasoning effort 映射
+    let reasoningBody = Data(#"{"model":"m","input":"hi","reasoning":{"effort":"high"}}"#.utf8)
+    let reasoningRequest = try ResponsesRequestTranslator.translate(body: reasoningBody)
+    expectTrue(String(data: reasoningRequest.rawBody ?? Data(), encoding: .utf8)?.contains("\"reasoning_effort\":\"high\"") == true,
+               "reasoning.effort → reasoning_effort")
+
+    // 4) 高级工具（web_search 等）第一版跳过，不阻断 Codex 主对话
+    let webSearch = Data(#"{"model":"m","input":"hi","tools":[{"type":"web_search"}]}"#.utf8)
+    let webSearchRequest = try ResponsesRequestTranslator.translate(body: webSearch)
+    let webSearchRaw = String(data: webSearchRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectFalse(webSearchRaw.contains("web_search"), "web_search 工具跳过，不进入 Chat body")
+
+    // 5) 真正未知的工具类型仍明确 400
+    let unknownTool = Data(#"{"model":"m","input":"hi","tools":[{"type":"mystery_tool"}]}"#.utf8)
+    do {
+        _ = try ResponsesRequestTranslator.translate(body: unknownTool)
+        failed += 1
+        print("FAIL: mystery_tool 应抛不支持错误")
+    } catch {
+        let message = (error as? ResponsesTranslationError)?.message ?? "\(error)"
+        expectTrue(message.contains("unsupported"), "mystery_tool 错误信息包含 unsupported")
+    }
+}
+
+/// Chat JSON → Responses JSON 翻译。
+func responsesResponseTranslatorTests() throws {
+    let chat = Data(#"""
+    {"id":"chatcmpl-1","model":"glm-5.2","choices":[{
+      "message":{"role":"assistant","content":"answer","reasoning_content":"think","tool_calls":[
+        {"id":"call_x","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}
+      ]},
+      "finish_reason":"tool_calls"}],
+      "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+    """#.utf8)
+    let data = try ResponsesResponseTranslator.translate(chatJSON: chat, responseID: "resp_test")
+    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    expectEqual(json?["object"] as? String, "response", "object 为 response")
+    expectEqual(json?["id"] as? String, "resp_test", "response id 保留")
+    expectEqual(json?["status"] as? String, "completed", "tool_calls → completed")
+    let output = json?["output"] as? [[String: Any]] ?? []
+    expectEqual(output.count, 3, "reasoning + message + function_call")
+    expectEqual(output[0]["type"] as? String, "reasoning", "reasoning item")
+    expectEqual(output[1]["type"] as? String, "message", "message item")
+    let content = (output[1]["content"] as? [[String: Any]])?.first
+    expectEqual(content?["type"] as? String, "output_text", "content part 类型")
+    expectEqual(content?["text"] as? String, "answer", "content 文本")
+    expectEqual(output[2]["type"] as? String, "function_call", "function_call item")
+    expectEqual(output[2]["call_id"] as? String, "call_x", "call_id 保留")
+    expectEqual(output[2]["name"] as? String, "f", "工具名保留")
+    let usage = json?["usage"] as? [String: Any]
+    expectEqual(usage?["input_tokens"] as? Int, 10, "prompt_tokens → input_tokens")
+    expectEqual(usage?["output_tokens"] as? Int, 5, "completion_tokens → output_tokens")
+
+    // content_filter → incomplete
+    let filtered = Data(#"{"model":"m","choices":[{"message":{"role":"assistant","content":"x"},"finish_reason":"content_filter"}]}"#.utf8)
+    let filteredJSON = try JSONSerialization.jsonObject(
+        with: try ResponsesResponseTranslator.translate(chatJSON: filtered, responseID: "resp_f")
+    ) as? [String: Any]
+    expectEqual(filteredJSON?["status"] as? String, "incomplete", "content_filter → incomplete")
+}
+
+/// 内存会话表与 previous_response_id。
+func responsesSessionStoreTests() {
+    ResponsesSessionStore.shared.reset()
+    expectNil(ResponsesSessionStore.shared.history(for: "resp_missing"), "未知 id 返回 nil")
+    let messages = [ChatMessage(role: .user, content: .text("hi"))]
+    ResponsesSessionStore.shared.store(responseID: "resp_a", messages: messages)
+    expectEqual(ResponsesSessionStore.shared.history(for: "resp_a")?.count, 1, "会话表可读")
+    ResponsesSessionStore.shared.reset()
+    expectNil(ResponsesSessionStore.shared.history(for: "resp_a"), "reset 清空会话表")
+}
+
+/// 供 /v1/responses 集成测试使用的固定响应 Provider。
+private struct MockResponsesProvider: Provider {
+    let id: String
+    let json: String
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [Model(id: "m")] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data(json.utf8))
+            continuation.finish()
+        }
+    }
+}
+
+/// 返回真实 Chat SSE 流（跨 chunk、含推理/工具/usage）的 mock 上游。
+private struct MockResponsesStreamProvider: Provider {
+    let id = "responses-sse"
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [Model(id: "m")] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        let chunk1 = sseChunk(#"{"id":"chatcmpl-s","model":"m","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#)
+        let chunk2 = sseChunk(#"{"id":"chatcmpl-s","model":"m","created":1,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}"#)
+        let chunk3 = sseChunk(#"{"id":"chatcmpl-s","model":"m","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"sh\"}"}}]},"finish_reason":null}]}"#)
+        let chunk4 = sseChunk(#"{"id":"chatcmpl-s","model":"m","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}"#) + "data: [DONE]\n\n"
+        return AsyncThrowingStream { continuation in
+            continuation.yield(Data((chunk1 + chunk2.prefix(20)).utf8))
+            let second = String(chunk2.dropFirst(20)) + String(chunk3.prefix(30))
+            continuation.yield(Data(second.utf8))
+            let third = String(chunk3.dropFirst(30)) + chunk4
+            continuation.yield(Data(third.utf8))
+            continuation.finish()
+        }
+    }
+}
+
+func responsesRouteHandlerTests() async throws {
+    unsetenv("BINVIA_ENABLE_RESPONSES")
+    defer { unsetenv("BINVIA_ENABLE_RESPONSES") }
+
+    let providerID = "responses-mock"
+    ProviderRegistry.shared.unregister(providerID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: providerID, displayName: "Responses Mock", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: {
+            MockResponsesProvider(
+                id: providerID,
+                json: #"{"id":"chatcmpl-m","model":"m","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#
+            )
+        }
+    ))
+    defer { ProviderRegistry.shared.unregister(providerID) }
+
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            providerID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    func responsesRequest(_ body: String, stream: Bool = false) -> HTTPRequest {
+        HTTPRequest(
+            method: "POST", path: "/v1/responses", queryItems: [:],
+            headers: ["authorization": "Bearer test-key"],
+            body: Data(#"{"model":"\#(providerID)/m","input":"hi","stream":\#(stream),\#(body)}"#.utf8)
+        )
+    }
+
+    // 1) 非流式返回合法 Response JSON
+    let response = try await handler.handle(responsesRequest("\"instructions\":\"be nice\""))
+    expectEqual(response.status, 200, "/v1/responses 非流式 200")
+    if case .data(let data) = response.body,
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        expectEqual(json["object"] as? String, "response", "响应 object")
+        expectEqual(json["status"] as? String, "completed", "响应 status")
+        let output = json["output"] as? [[String: Any]] ?? []
+        expectEqual(output.count, 1, "仅 message output")
+        let content = (output.first?["content"] as? [[String: Any]])?.first
+        expectEqual(content?["text"] as? String, "hello", "output_text 内容")
+        let usage = json["usage"] as? [String: Any]
+        expectEqual(usage?["input_tokens"] as? Int, 3, "usage input_tokens")
+        expectEqual(usage?["output_tokens"] as? Int, 2, "usage output_tokens")
+    } else {
+        failed += 1
+        print("FAIL: /v1/responses 响应 JSON 解析失败")
+    }
+
+    // 2) previous_response_id 续接：第一次结果进会话表，第二次翻译含历史
+    ResponsesSessionStore.shared.reset()
+    _ = try await handler.handle(responsesRequest("\"instructions\":\"be nice\""))
+    let secondBody = Data(#"{"model":"\#(providerID)/m","input":"again","previous_response_id":"resp_first"}"#.utf8)
+    let secondRequest = HTTPRequest(
+        method: "POST", path: "/v1/responses", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: secondBody
+    )
+    let secondResponse = try await handler.handle(secondRequest)
+    expectEqual(secondResponse.status, 200, "unknown previous_response_id 返回 200（第一版不强制）")
+
+    // 3) 流式请求：返回 Responses SSE 事件序列
+    let streamResponse = try await handler.handle(responsesRequest("", stream: true))
+    expectEqual(streamResponse.status, 200, "/v1/responses 流式 200")
+    if case .stream(let stream) = streamResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let createdIndex = text.range(of: "response.created")?.lowerBound
+        let deltaIndex = text.range(of: "response.output_text.delta")?.lowerBound
+        let completedIndex = text.range(of: "response.completed")?.lowerBound
+        expectTrue(createdIndex != nil, "流式先发 response.created")
+        expectTrue(deltaIndex != nil, "流式发 output_text.delta")
+        expectTrue(completedIndex != nil, "流式以 response.completed 结束")
+        expectTrue(
+            createdIndex != nil && deltaIndex != nil && completedIndex != nil
+                && createdIndex! < deltaIndex! && deltaIndex! < completedIndex!,
+            "流式事件顺序 created → delta → completed"
+        )
+        expectFalse(text.contains("[DONE]"), "Responses 流不发送 [DONE]")
+    } else {
+        failed += 1
+        print("FAIL: 流式响应应为 .stream")
+    }
+
+    // 5) Chat SSE 上游：跨 chunk + reasoning + tool_calls → Responses 事件顺序
+    let sseProviderID = "responses-sse"
+    ProviderRegistry.shared.unregister(sseProviderID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: sseProviderID, displayName: "Responses SSE", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: { MockResponsesStreamProvider() }
+    ))
+    defer { ProviderRegistry.shared.unregister(sseProviderID) }
+
+    let sseHandler = RouteHandler(config: RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            sseProviderID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    ))
+    let sseResponse = try await sseHandler.handle(HTTPRequest(
+        method: "POST", path: "/v1/responses", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: Data(#"{"model":"\#(sseProviderID)/m","input":"hi","stream":true}"#.utf8)
+    ))
+    expectEqual(sseResponse.status, 200, "SSE 流式 200")
+    if case .stream(let stream) = sseResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("response.reasoning_summary_text.delta"), "推理内容映射 reasoning delta")
+        expectTrue(text.contains("response.function_call_arguments.delta"), "工具调用映射 arguments delta")
+        expectTrue(text.contains("response.function_call_arguments.done"), "工具调用 done")
+        expectTrue(text.contains("response.completed"), "SSE 流以 completed 结束")
+        let created = text.range(of: "response.created")?.lowerBound
+        let completed = text.range(of: "response.completed")?.lowerBound
+        expectTrue(created != nil && completed != nil && created! < completed!, "created 在 completed 之前")
+        expectFalse(text.contains("[DONE]"), "SSE 流不发送 [DONE]")
+    } else {
+        failed += 1
+        print("FAIL: SSE 流式响应应为 .stream")
+    }
+
+    // 4) 端点开关关闭 → 404
+    setenv("BINVIA_ENABLE_RESPONSES", "0", 1)
+    let disabled = try await handler.handle(responsesRequest(""))
+    expectEqual(disabled.status, 404, "BINVIA_ENABLE_RESPONSES=0 时 /v1/responses 404")
+    unsetenv("BINVIA_ENABLE_RESPONSES")
+}
+
+func inboundFormatDetectorTests() {
+    expectEqual(InboundFormatDetector.detect(path: "/v1/responses", body: nil), .responses, "路径识别 responses")
+    expectEqual(InboundFormatDetector.detect(path: "/v1/chat/completions", body: nil), .openaiChat, "路径识别 chat")
+    let responsesBody = Data(#"{"input":"hi"}"#.utf8)
+    expectEqual(InboundFormatDetector.detect(path: "/v1/chat/completions", body: responsesBody), .responses,
+                "body 双识别 input 字段")
+    expectEqual(InboundFormatDetector.detect(path: "/v1/chat/completions", body: Data(#"{"messages":[]}"#.utf8)),
+                .openaiChat, "普通 chat body 仍识别 chat")
+}
+
+// MARK: - Anthropic Messages 翻译与端点
+
+func anthropicRequestTranslatorTests() throws {
+    // 1) system + 文本消息 + tools
+    let body = Data(#"""
+    {"model":"cbcn/glm-5.2","system":"be concise","max_tokens":256,"stream":false,
+     "messages":[{"role":"user","content":"hi"}],
+     "tools":[{"name":"get_weather","description":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}
+    """#.utf8)
+    let request = try AnthropicRequestTranslator.translate(body: body)
+    expectEqual(request.model, "cbcn/glm-5.2", "model 保留")
+    expectEqual(request.maxTokens, 256, "max_tokens 保留")
+    expectEqual(request.stream, false, "stream 透传")
+    expectEqual(request.messages.count, 2, "system + user")
+    expectEqual(request.messages[0].role, .system, "system 消息")
+    expectEqual(request.messages[0].content?.textValue, "be concise", "system 文本")
+    expectTrue(String(data: request.rawBody ?? Data(), encoding: .utf8)?.contains("\"get_weather\"") == true,
+               "工具名进入 Chat body")
+
+    // 2) tool_use + tool_result 转 tool_calls / tool 消息
+    let toolBody = Data(#"""
+    {"model":"m","messages":[
+      {"role":"user","content":[{"type":"text","text":"weather?"}]},
+      {"role":"assistant","content":[
+        {"type":"text","text":"checking"},
+        {"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"sh"}}
+      ]},
+      {"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_1","content":"sunny"}
+      ]}
+    ]}
+    """#.utf8)
+    let toolRequest = try AnthropicRequestTranslator.translate(body: toolBody)
+    expectEqual(toolRequest.messages.count, 3, "user + assistant(tool_calls) + tool")
+    expectEqual(toolRequest.messages[1].role, .assistant, "tool_use 归入 assistant")
+    expectEqual(toolRequest.messages[1].toolCalls?.first?.function?.name, "get_weather", "工具名保留")
+    expectEqual(toolRequest.messages[1].toolCalls?.first?.function?.arguments, #"{"city":"sh"}"#, "工具参数 JSON 化")
+    expectEqual(toolRequest.messages[2].role, .tool, "tool_result 变成 tool 消息")
+    expectEqual(toolRequest.messages[2].toolCallID, "toolu_1", "tool_use_id 保留")
+    expectEqual(toolRequest.messages[2].content?.textValue, "sunny", "tool 输出文本")
+
+    // 3) thinking → reasoning_effort
+    let thinkingBody = Data(#"{"model":"m","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":5000}}"#.utf8)
+    let thinkingRequest = try AnthropicRequestTranslator.translate(body: thinkingBody)
+    expectTrue(String(data: thinkingRequest.rawBody ?? Data(), encoding: .utf8)?.contains("\"reasoning_effort\":\"medium\"") == true,
+               "thinking budget → medium")
+}
+
+func anthropicResponseTranslatorTests() throws {
+    let chat = Data(#"""
+    {"id":"chatcmpl-1","model":"glm-5.2","choices":[{
+      "message":{"role":"assistant","content":"answer","reasoning_content":"think","tool_calls":[
+        {"id":"call_x","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}
+      ]},
+      "finish_reason":"tool_calls"}],
+      "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+    """#.utf8)
+    let data = try AnthropicResponseTranslator.translate(chatJSON: chat, messageID: "msg_test")
+    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    expectEqual(json?["type"] as? String, "message", "Claude message 类型")
+    expectEqual(json?["id"] as? String, "msg_test", "message id")
+    let content = json?["content"] as? [[String: Any]] ?? []
+    expectEqual(content.count, 3, "thinking + text + tool_use")
+    expectEqual(content[0]["type"] as? String, "thinking", "推理块")
+    expectEqual(content[1]["type"] as? String, "text", "文本块")
+    expectEqual(content[2]["type"] as? String, "tool_use", "工具块")
+    expectEqual(json?["stop_reason"] as? String, "end_turn", "tool_calls → end_turn")
+    let usage = json?["usage"] as? [String: Any]
+    expectEqual(usage?["input_tokens"] as? Int, 10, "prompt_tokens → input_tokens")
+    expectEqual(usage?["output_tokens"] as? Int, 5, "completion_tokens → output_tokens")
+}
+
+/// 返回真实 Chat SSE 流（含推理/工具）的 Anthropic mock 上游。
+private struct MockAnthropicStreamProvider: Provider {
+    let id: String
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [Model(id: "m")] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        let chunk1 = sseChunk(#"{"id":"chatcmpl-a","model":"m","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#)
+        let chunk2 = sseChunk(#"{"id":"chatcmpl-a","model":"m","created":1,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}"#)
+        let chunk3 = sseChunk(#"{"id":"chatcmpl-a","model":"m","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}"#)
+        let chunk4 = sseChunk(#"{"id":"chatcmpl-a","model":"m","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}"#) + "data: [DONE]\n\n"
+        return AsyncThrowingStream { continuation in
+            continuation.yield(Data((chunk1 + chunk2.prefix(15)).utf8))
+            let second = String(chunk2.dropFirst(15)) + String(chunk3.prefix(25))
+            continuation.yield(Data(second.utf8))
+            let third = String(chunk3.dropFirst(25)) + chunk4
+            continuation.yield(Data(third.utf8))
+            continuation.finish()
+        }
+    }
+}
+
+func anthropicRouteHandlerTests() async throws {
+    unsetenv("BINVIA_ENABLE_MESSAGES")
+    defer { unsetenv("BINVIA_ENABLE_MESSAGES") }
+
+    let providerID = "anthropic-mock"
+    ProviderRegistry.shared.unregister(providerID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: providerID, displayName: "Anthropic Mock", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: {
+            MockResponsesProvider(
+                id: providerID,
+                json: #"{"id":"chatcmpl-a","model":"m","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#
+            )
+        }
+    ))
+    defer { ProviderRegistry.shared.unregister(providerID) }
+
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            providerID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    func messagesRequest(stream: Bool = false) -> HTTPRequest {
+        HTTPRequest(
+            method: "POST", path: "/v1/messages", queryItems: [:],
+            headers: ["authorization": "Bearer test-key", "anthropic-version": "2023-06-01"],
+            body: Data(#"{"model":"\#(providerID)/m","max_tokens":128,"stream":\#(stream),"messages":[{"role":"user","content":"hi"}]}"#.utf8)
+        )
+    }
+
+    // 1) 非流式 Claude JSON
+    let response = try await handler.handle(messagesRequest())
+    expectEqual(response.status, 200, "/v1/messages 非流式 200")
+    if case .data(let data) = response.body,
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        expectEqual(json["type"] as? String, "message", "Claude message")
+        expectEqual(json["stop_reason"] as? String, "end_turn", "stop_reason end_turn")
+        let content = json["content"] as? [[String: Any]] ?? []
+        expectEqual(content.first?["type"] as? String, "text", "content text block")
+        expectEqual(content.first?["text"] as? String, "hello", "文本内容")
+    } else {
+        failed += 1
+        print("FAIL: /v1/messages 响应 JSON 解析失败")
+    }
+
+    // 2) 流式 Anthropic SSE
+    let sseProviderID = "anthropic-sse"
+    ProviderRegistry.shared.unregister(sseProviderID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: sseProviderID, displayName: "Anthropic SSE", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: { MockAnthropicStreamProvider(id: sseProviderID) }
+    ))
+    defer { ProviderRegistry.shared.unregister(sseProviderID) }
+    let sseHandler = RouteHandler(config: RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            sseProviderID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    ))
+    let sseResponse = try await sseHandler.handle(HTTPRequest(
+        method: "POST", path: "/v1/messages", queryItems: [:],
+        headers: ["authorization": "Bearer test-key", "anthropic-version": "2023-06-01"],
+        body: Data(#"{"model":"\#(sseProviderID)/m","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#.utf8)
+    ))
+    expectEqual(sseResponse.status, 200, "/v1/messages 流式 200")
+    if case .stream(let stream) = sseResponse.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        expectTrue(text.contains("message_start"), "流式先发 message_start")
+        expectTrue(text.contains("thinking_delta"), "推理映射 thinking_delta")
+        expectTrue(text.contains("text_delta"), "文本映射 text_delta")
+        expectTrue(text.contains("input_json_delta"), "工具参数映射 input_json_delta")
+        expectTrue(text.contains("message_delta"), "message_delta")
+        expectTrue(text.contains("message_stop"), "message_stop")
+        let start = text.range(of: "message_start")?.lowerBound
+        let stop = text.range(of: "message_stop")?.lowerBound
+        expectTrue(start != nil && stop != nil && start! < stop!, "message_start 在 message_stop 之前")
+        expectFalse(text.contains("[DONE]"), "Anthropic 流不发送 [DONE]")
+    } else {
+        failed += 1
+        print("FAIL: /v1/messages 流式响应应为 .stream")
+    }
+
+    // 3) 端点开关关闭 → 404
+    setenv("BINVIA_ENABLE_MESSAGES", "0", 1)
+    let disabled = try await handler.handle(messagesRequest())
+    expectEqual(disabled.status, 404, "BINVIA_ENABLE_MESSAGES=0 时 /v1/messages 404")
+    unsetenv("BINVIA_ENABLE_MESSAGES")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -3814,6 +4360,14 @@ await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)
 await run("CustomProviderDef 配置编解码", customProviderConfigCodecTests)
 await run("ChatMessage 宽容解码（developer/content 数组）", chatMessageTolerantDecodeTests)
 await run("CodeBuddy 角色改写 developer→system", codeBuddySanitizeBodyTests)
+await run("Responses 请求翻译", responsesRequestTranslatorTests)
+await run("Responses 响应翻译", responsesResponseTranslatorTests)
+await run("Responses 会话表", responsesSessionStoreTests)
+await run("Responses 端点集成", responsesRouteHandlerTests)
+await run("入站格式识别", inboundFormatDetectorTests)
+await run("Anthropic 请求翻译", anthropicRequestTranslatorTests)
+await run("Anthropic 响应翻译", anthropicResponseTranslatorTests)
+await run("Anthropic 端点集成", anthropicRouteHandlerTests)
 await run("在线更新检查（版本比较 + GitHub API 解析）", updateCheckerTests)
 
 print("")

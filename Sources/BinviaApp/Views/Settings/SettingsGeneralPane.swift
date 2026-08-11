@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// 设置窗口「通用」面板：监听地址/端口、API 端点、配置文件路径、环境变量说明、保存并应用。
+/// 设置窗口「通用」面板：监听地址/端口、API 端点、配置文件路径、保存并应用。
 /// 样式与 CodexBar `GeneralPane` 一致：`Form` + `.formStyle(.grouped)` + `.scrollContentBackground(.hidden)`。
 struct SettingsGeneralPane: View {
     @EnvironmentObject private var appState: AppState
@@ -10,14 +10,6 @@ struct SettingsGeneralPane: View {
     @State private var saveMessage: String?
     @State private var endpointCopied = false
     @State private var pathCopied = false
-
-    private let envVars = [
-        "BINVIA_CONFIG",
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_BASE_URL",
-        "CODEBUDDY_CN_ACCESS_TOKEN",
-        "CODEBUDDY_CN_BASE_URL",
-    ]
 
     var body: some View {
         Form {
@@ -116,25 +108,6 @@ struct SettingsGeneralPane: View {
                 Text("配置文件")
             } footer: {
                 Text("配置以 JSON 保存在磁盘，也可用 BINVIA_CONFIG 环境变量覆盖。")
-            }
-
-            Section {
-                ForEach(envVars, id: \.self) { name in
-                    HStack(spacing: 6) {
-                        Image(systemName: "terminal")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 14)
-                        Text(name)
-                            .font(.caption)
-                            .monospaced()
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } header: {
-                Text("环境变量")
-            } footer: {
-                Text("以下变量在进程环境中存在时会被读取，优先级低于面板中保存的配置。")
             }
 
             Section {

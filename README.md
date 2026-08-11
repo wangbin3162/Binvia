@@ -12,7 +12,8 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 
 - **多供应商聚合**：一个 OpenAI 兼容端点路由到 DeepSeek / CodeBuddy 等 8 家供应商
 - **模型路由**：`provider/model` 语法或别名（`ds` / `cbcn`），裸模型名自动归属
-- **完整 OpenAI 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/usage`、`/v1/health`
+- **OpenAI / Anthropic 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（非流式 + 流式）、`/v1/messages`（非流式 + 流式）、`/v1/models`、`/v1/usage`、`/v1/health`
+- **多入站格式**：Codex CLI（`wire_api = "responses"`）可直接使用 `/v1/responses`；Claude Code / Anthropic SDK 可直接使用 `/v1/messages`
 - **网关 Key 认证**：`sk-bv-` 开头网关 Key 白名单；上游多 Key 自动轮换（401/403 时切换）
 - **SSE 流式透传**：逐事件实时转发；强制流式上游对非流式客户端自动聚合为 JSON
 - **可靠重试**：408/429/5xx 指数退避重试，尊重 `Retry-After` 头
@@ -124,6 +125,19 @@ curl -N http://localhost:20427/v1/chat/completions \
   -H "Authorization: Bearer sk-bv-xxx" \
   -d '{"model":"ds/deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
+# OpenAI Responses API（Codex CLI 兼容）
+curl -N http://localhost:20427/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-bv-xxx" \
+  -d '{"model":"ds/deepseek-v4-pro","input":"hi","stream":true}'
+
+# Anthropic Messages API（Claude Code 兼容）
+curl -N http://localhost:20427/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-bv-xxx" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"ds/deepseek-v4-pro","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}'
+
 # 用量统计
 curl http://localhost:20427/v1/usage
 ```
@@ -164,6 +178,8 @@ curl http://localhost:20427/v1/usage
 | `BINVIA_STREAM_READINESS_TIMEOUT` | 首个事件超时（秒），默认 60 |
 | `BINVIA_STREAM_IDLE_TIMEOUT` | 两次事件之间的空闲超时（秒），默认 120 |
 | `BINVIA_STREAM_EARLY_EOF_RETRY` | 首包前早断最大重试次数，默认 1（0 关闭） |
+| `BINVIA_ENABLE_RESPONSES` | 关闭后 `/v1/responses` 返回 404，默认开启 |
+| `BINVIA_ENABLE_MESSAGES` | 关闭后 `/v1/messages` 返回 404，默认开启 |
 
 > 未配置任何 Key 时为开发模式（匿名访问）；配置后所有 `/v1/*` 端点均需携带有效网关 Key。
 
@@ -171,7 +187,7 @@ curl http://localhost:20427/v1/usage
 
 ```bash
 swift build          # 构建
-make test            # 运行全部测试（591 项断言，无需 Xcode）
+make test            # 运行全部测试（694 项断言，无需 Xcode）
 make run             # 启动服务器
 make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```

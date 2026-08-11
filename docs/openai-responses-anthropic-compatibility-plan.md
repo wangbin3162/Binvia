@@ -3,6 +3,11 @@
 > 制定日期：2026-08-11
 > 前置依赖：`docs/streaming-alignment-omniroute-plan.md`（先完成该计划的
 > Phase 1-4，再开始本计划）
+> 实施状态：阶段 A/B/C/D 已完成（Responses 非流式 + 流式、Anthropic 非流式 + 流式、
+> `BINVIA_ENABLE_RESPONSES` / `BINVIA_ENABLE_MESSAGES` 开关、单元/集成测试）；
+> 真实 Codex CLI（`wire_api = "responses"`）一轮对话已通过；真实 Claude Code 一轮对话
+> 待本机安装 Claude CLI 后收尾。工具兼容：原生 function / namespace 拍平转发，
+> web_search 等高级工具第一版跳过，未知工具类型仍返回 400。
 > 参考：OmniRoute `src/app/api/v1/responses/route.ts`、
 > `src/app/api/v1/messages/route.ts`、`open-sse/translator/`
 
@@ -341,3 +346,236 @@ wire_api = "responses"
 2. 再按本计划阶段 A → C → D 实施，`/v1/responses`（Codex）优先；
 3. `/v1/messages`（Anthropic）随后；
 4. 每个阶段都跑 mock 集成与真实客户端验证后再进下一阶段。
+
+## 12. 后续实现计划（v1.1：高级工具 / 多模态 / 会话 / 协议打磨）
+
+> 说明：第一版已完成阶段 A-D，并通过真实 Codex CLI 一轮对话。为兼容 Codex CLI，
+> 第一版对 `web_search` / `file_search` / `image_generation` / `custom` /
+> `command` / `local_shell` / `tool_search` 工具采用「跳过」而非 §9 所述的 400；
+> 未知工具类型仍返回 400。后续计划按 P0 → P2 排列，每阶段完成后跑 `make test`
+> 全量回归，再做真实客户端验证。
+
+### 阶段 F：工具调用闭环（P0，Codex 优先）
+
+目标：让 Codex CLI 的多轮工具调用（MCP namespace、apply_patch 等）完整可用，
+并让 `web_search` / `file_search` 具备明确的能力开关，而不是一律跳过。
+
+#### F1 请求侧工具收集对齐 OmniRoute
+
+现状：
+
+- `ResponsesRequestTranslator` 只读取顶层 `tools`，忽略 input items 里的
+  `{type:"additional_tools", tools:[...]}`；
+- namespace 拍平直接拼 `"\(namespace).\(name)"`，与 OmniRoute 的
+  `"\(namespace)__\(leaf)"` + 64 字符 hash 截断规则不一致，跨 namespace 同名
+  子工具可能仍冲突。
+
+改造：
+
+- 新增 `ResponsesToolCollector`（纯函数）：合并顶层 `tools` 与 input items 中
+  的 `additional_tools`，显式顶层声明优先，同名 namespace 合并；
+- 引入 `flattenNamespaceToolName`：`ns` 缺失保留 leaf；leaf 已含 `__` 不重复
+  加前缀；超过 64 字符用确定性 hash 截断（参考 OmniRoute
+  `namespaceFlatten.ts`）；
+- `ResponsesRequestTranslator.translate` 改为消费收集结果，保留 Chat 兼容
+  与 Responses 原生两种工具形态（第一版已支持）。
+
+参考：OmniRoute
+`open-sse/translator/request/openai-responses/additionalTools.ts`、
+`namespaceFlatten.ts`。
+
+验收：
+
+- fixtures 覆盖 `additional_tools`、同名 namespace 合并、64 字符截断；
+- `make test` 全量通过。
+
+#### F2 namespace 工具身份回传
+
+现状：拍平后丢失 `{namespace, name}`，Responses 响应里的 `function_call` 只有
+拍平后的 name，Codex 对 MCP namespace 子工具的 dispatch 可能出错。
+
+改造：
+
+- 新增请求级 `ResponsesToolIdentityMap`（`wireName -> {namespace, name}`），
+  由 `ResponsesRequestTranslator` 返回给 `RouteHandler`；
+- `ResponsesResponseTranslator` / `ResponsesStreamTranslator` 接收该 map，
+  输出 `function_call` item 时把 `name` 还原为 leaf，并补充 `namespace` 字段；
+- map 只随单次请求传递，不进入 ChatRequest 编解码，避免污染 rawBody。
+
+参考：OmniRoute
+`open-sse/translator/response/openai-responses/requestToolIdentity.ts`、
+`responsesToolItem.ts`、`openai-responses.ts` 的 `closeToolCall`。
+
+验收：
+
+- mock 上游返回 `mcp__fs.read`，客户端收到
+  `{type:"function_call", name:"read", namespace:"mcp__fs"}`；
+- 真实 Codex CLI 完成至少一轮「模型调用 MCP/apply_patch 工具 → 提交
+  function_call_output → 继续回答」的多轮对话。
+
+#### F3 工具参数增量去重
+
+现状：`ResponsesStreamTranslator` / `AnthropicStreamTranslator` 直接
+`buffer += arguments`；上游若重复发送完整快照（常见于部分兼容实现），
+参数会重复拼接。
+
+改造：
+
+- 新增共享 `appendToolCallArgumentDelta(existing:incoming:)`：
+  - incoming 与 existing 相同 → 保持原值；
+  - incoming 以 existing 开头（完整快照增长）→ 整体替换；
+  - 其余视为增量碎片 → 原样追加；
+  - incoming 为对象/数组 → `JSON.stringify` 后进入同一逻辑；
+  - 禁止模糊前后缀裁剪，避免把合法增量 `ll` 截成 `l`。
+- 两个流式 translator 统一改用该函数。
+
+参考：OmniRoute `open-sse/utils/toolCallArguments.ts`。
+
+验收：mock 分别发送增量碎片与完整快照，客户端拼出的 `arguments` 不重复、
+不截断。
+
+#### F4 web_search / file_search 高级工具
+
+现状：第一版跳过，Codex 能对话但无法使用搜索/文件检索。
+
+改造（不做猜测性降级）：
+
+- 新增 provider 级能力开关：`BINVIA_SERVER_TOOLS`（默认 `0`，保持第一版
+  跳过行为）；
+- 开关开启后，`web_search` / `file_search` 保留原始工具定义透传到 Chat
+  请求体（上游 OpenAI 兼容端点若支持则直接可用）；
+- 上游返回 400 时**不自动降级重试**，原样透传错误并记录工具类型，
+  符合「禁止兜底、猜测性修补」原则；
+- 入站仍允许 Anthropic versioned web search 形态
+  （`web_search_20250305` 等）识别为同一类。
+
+参考：OmniRoute `openai-responses.ts` 的 `WEB_SEARCH_TOOL_TYPES` /
+`TOOL_SEARCH_TOOL_TYPES`、`claude-to-openai.ts` 的
+`convertClaudeServerWebSearchTool`。
+
+验收：开关开启时 mock 上游收到 web_search 工具；关闭时跳过；未知工具类型
+仍 400。
+
+### 阶段 G：多模态（P1）
+
+目标：Responses `input_image` / `input_file` 与 Anthropic `image` 块能双向
+翻译，不再只保留文本。
+
+#### G1 Responses 入站
+
+- `input_image` → Chat `image_url` part（`image_url` 支持字符串或对象形态）；
+- `input_file` → Chat file part（`file_data` / `file_id` / `file_url` /
+  `filename` 映射，参考 OmniRoute 的 `file` / `document` 分支）；
+- `ChatContentPart` 增加 file 相关可选字段，并保持宽容解码。
+
+参考：OmniRoute `openai-responses.ts` 的 `input_image` / `input_file` 转换。
+
+#### G2 Anthropic 入站
+
+- `image` 块（`source.type == base64|url`）→ `image_url` part；
+- `tool_result` 内容里的 image 提升为后续 user 消息（OpenAI `tool` 消息不能
+  带图片），文本部分留在 tool 消息。
+
+参考：OmniRoute `claude-to-openai.ts` 的 `image` / `tool_result` 分支。
+
+#### G3 出站
+
+- Chat `image_url` → Responses `output_image` / Anthropic `image` block；
+- 非流式与流式两个响应翻译器都输出图片 content block；
+- 多模态 content 数组在 `chatMessageJSON` 中保留 parts，不再退化成
+  `textValue` 拼接。
+
+验收：
+
+- fixtures 双向翻译 base64 / URL 图片与 file part；
+- `make test` 全量通过；
+- 真实客户端发图（可选，视环境）。
+
+风险：base64 图片可能显著放大请求/日志体积，翻译层需对 `rawBody` 与日志
+大小做上限保护。
+
+### 阶段 H：previous_response_id 会话持久化（P1）
+
+现状：`ResponsesSessionStore` 为内存版（重启失效、上限 200），未知 id 返回
+200 空历史，未按计划文档「无法还原时 400」处理。
+
+改造：
+
+- 持久化到 `~/.config/binvia/responses-sessions.json`（原子写、0600 权限），
+  或复用仓库已有 SQLite3 依赖建表；
+- 条目含 `responseID -> {messages, createdAt}`，TTL 24h，启动与写入时清理，
+  上限 200 条；
+- 未知 / 过期 `previous_response_id` 返回 400
+  `{"error":"unknown previous_response_id"}`；
+- 流式与非流式完成路径统一写入（现有逻辑迁移到持久化 store）；
+- `ResponsesSessionStore` 抽成协议 + 文件实现，RouteHandler 通过注入使用，
+  便于测试替换。
+
+参考：OmniRoute `open-sse/utils/responsesStatePolicy.ts` 的
+preserve / strip / auto 模式语义（我们保留本地还原语义，不依赖上游 state）。
+
+验收：
+
+- 重启进程后仍可用 previous_response_id 续接；
+- 未知 id 返回 400；
+- TTL 过期与 200 条上限测试通过。
+
+### 阶段 I：Anthropic 协议完善（P2）
+
+现状：第一版已覆盖文本、thinking、tool_use / tool_result、usage；以下字段
+仍缺失。
+
+改造：
+
+- 请求：`stop_sequences` → Chat `stop`；`tool_choice`（auto / any / tool）
+  转 Chat `tool_choice`（ChatRequest 增加可选字段或放入 rawBody）；
+- 请求：`cache_control` 在 provider 支持时保留（参考 OmniRoute
+  `_preserveCacheControl`），默认剥离；
+- 请求：`redacted_thinking` 保留占位，不丢弃；
+- 响应：`message_delta.usage` 细分（`cache_read_input_tokens` 已有基础，
+  补 `cache_creation_input_tokens`）；
+- 流式：tool_use 的 id 与 name 分 chunk 到达时，延迟
+  `content_block_start` 直到 name 可用（第一版已部分实现，补充边界测试）。
+
+参考：OmniRoute `claude-to-openai.ts`、`openai-to-claude.ts`。
+
+验收：fixtures 覆盖 stop_sequences / tool_choice / cache_control /
+redacted_thinking；`make test` 全量通过；Claude Code 真实验证（可选，环境
+具备时补充）。
+
+### 阶段 J：协议打磨与发布收尾（P2）
+
+目标：把 Responses / Anthropic 的错误帧、心跳、CORS 与发布流程对齐到
+OmniRoute 的成熟度。
+
+改造：
+
+- 错误帧：流式错误统一输出 `event: response.failed` / `event: error`，非流式
+  错误 JSON 结构与 OpenAI / Anthropic 官方 error 对象对齐；
+- 心跳：参考 OmniRoute `earlyStreamKeepalive.ts`，在首个有用字节前的等待期
+  给 Codex 客户端发 `response.in_progress` 心跳（阈值按模型可配），避免
+  Codex 5s 首字节看门狗断连；
+- CORS / OPTIONS：按 OmniRoute `responses/route.ts`、`messages/route.ts`
+  补 `Access-Control-Allow-*`；
+- 回归：`/v1/chat/completions` 行为不变；
+- 发布：`make release` 产物自检 + `BinviaApp --smoke-test` + 真实 Codex
+  工具调用循环回归。
+
+### 里程碑与优先级
+
+| 优先级 | 阶段 | 内容 | 客户端验收 |
+|---|---|---|---|
+| P0 | F | 工具收集、namespace 身份回传、参数去重 | 真实 Codex 工具调用多轮 |
+| P1 | G | 多模态双向翻译 | 真实客户端发图（可选） |
+| P1 | H | previous_response_id 持久化 | 重启续接 + 400 语义 |
+| P2 | I | Anthropic 字段完善 | Claude Code（可选） |
+| P2 | J | 错误帧 / 心跳 / CORS / 发布 | `make release` 回归 |
+
+### 风险与约束
+
+- F2 修改 namespace wire name 规则会改变现有 Codex 行为，必须先回归真实
+  Codex 一轮对话，再进多轮工具测试；
+- 高级工具透传依赖上游能力，禁止自动降级掩盖上游 400；
+- 多模态 base64 体积大，翻译层需要体积上限保护；
+- 会话持久化引入文件 I/O，需保证 RouteHandler 热更新与并发写不受影响；
+- 所有新翻译器继续保持纯函数 / 无共享可变状态，便于单测。
