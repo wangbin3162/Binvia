@@ -1,6 +1,6 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.2.1）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.2.2）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
@@ -148,11 +148,19 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.2.2 | 2026-08-11 | 移除 Antigravity 供应商支持（见下） | `Binvia-0.2.2-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.1 | 2026-08-11 | 恢复 Antigravity 供应商支持（Google OAuth 授权已恢复可用，见下） | `Binvia-0.2.1-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.0 | 2026-08-11 | OpenCode / OpenCode Go Cookie 用量查询；GUI 调整（令牌管理/调用测试/服务管理）；DeepSeek 令牌轮换扩展（见下） | `Binvia-0.2.0-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.7 | 2026-08-07 | 模型列表修复（对齐/重名操作/上下文填充）；/v1/models 附带 context_length（见下） | `Binvia-0.1.7-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.2.2 变更内容
+
+- **移除 Antigravity 供应商支持**：删除 Antigravity provider 目录（Provider / OAuth 客户端 / 请求体
+  翻译器 / 用量查询器）、GUI OAuth 登录与授权码输入、路由注册与模型反向索引；同步移除
+  README 供应商表与环境变量、AGENTS.md 说明、BinviaCheck 相关集成/工具调用/用量测试。
+  路由规则 `claude-*` / `gemini-*` 不再归属 Antigravity，已有 Antigravity 配置与凭据不再使用。
 
 ### v0.2.1 变更内容
 
