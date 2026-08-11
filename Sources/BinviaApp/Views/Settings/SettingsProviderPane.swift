@@ -21,7 +21,7 @@ struct SettingsProviderPane: View {
     @State private var newTokenLabel = ""
     /// 令牌添加行的密钥输入。
     @State private var newTokenValue = ""
-    /// OAuth (Antigravity) 手动 Token 草稿。
+    /// OAuth 型供应商手动 Token 草稿。
     @State private var manualToken = ""
     @State private var manualRefreshToken = ""
     /// CodeBuddy 企业 ID（积分查询用，存 credential.workspaceId）。
@@ -35,11 +35,7 @@ struct SettingsProviderPane: View {
     @State private var fetchMessage: String?
 
     var body: some View {
-        if appState.isShowingCodeInput {
-            // Antigravity PKCE：等待用户在设置窗口中粘贴授权码。
-            CodeInputSheet()
-                .padding(20)
-        } else if let descriptor = ProviderRegistry.shared.descriptor(for: providerID) {
+        if let descriptor = ProviderRegistry.shared.descriptor(for: providerID) {
             Form {
                 // 第一个 Section：头部（logo + 名称 + 开关）+ 基础信息（仿 CodexBar ProviderDetailView）
                 Section {
@@ -250,7 +246,7 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// Antigravity：OAuth PKCE 登录（需粘贴授权码）+ 手动 Access/Refresh Token。
+    /// OAuth 型供应商：OAuth 登录（设备码 / PKCE）+ 手动粘贴 Token。
     private var oauthConnectionSection: some View {
         Section {
             OAuthLoginButton(providerID: providerID)
@@ -285,7 +281,7 @@ struct SettingsProviderPane: View {
         } header: {
             Text("Access Token")
         } footer: {
-            Text("使用 Google OAuth (PKCE) 登录：授权后在弹窗中粘贴授权码完成连接。也可手动粘贴 Token。")
+            Text("使用 OAuth (PKCE) 登录：授权后完成连接。也可手动粘贴 Token。")
         }
     }
 
@@ -665,7 +661,7 @@ struct SettingsProviderPane: View {
             draftTokens = stored
         }
 
-        // oauth (Antigravity)：单 token 草稿
+        // oauth 型：单 token 草稿
         if manualToken.isEmpty, let token = pc?.credential.accessToken, !token.isEmpty,
            ProviderRegistry.shared.descriptor(for: providerID)?.metadata.authType == .oauth {
             manualToken = token

@@ -57,7 +57,6 @@ struct ProviderBrandIcon: View {
         switch providerID {
         case "deepseek": return "D"
         case "codebuddy-cn": return "B"
-        case "antigravity": return "A"
         default:
             // 自定义 provider：优先用 displayName 首字符（支持中文/Unicode），回退到 id 首字母
             if let displayName = ProviderRegistry.shared.descriptor(for: providerID)?.displayName,

@@ -21,7 +21,6 @@ enum OAuthFlowState: Equatable {
     case idle
     case requestingCode        // 正在请求授权码 / 打开浏览器
     case waitingForAuth        // 等待用户在浏览器完成授权
-    case waitingForCodeInput   // Antigravity：等待用户粘贴授权码
     case connected
     case failed(String)
 }
@@ -52,16 +51,9 @@ final class AppState: ObservableObject {
     /// 各 provider 的 OAuth 登录状态。
     @Published var oauthStates: [String: OAuthFlowState] = [:]
 
-    /// OAuth 授权码输入（由 sheet 触发，PKCE 粘贴授权码；Antigravity）。
-    @Published var isShowingCodeInput = false
-
     private var server: HTTPServer?
     private var refreshTimer: Timer?
     private var usageRefreshTimer: Timer?
-    private var oauthRefreshTimer: Timer?
-    private var codeContinuation: CheckedContinuation<String, Error>?
-    /// 正在等待授权码的 provider id（cancel 时恢复其 oauth 状态）。
-    private var codeInputProviderID: String?
     /// 配置读取失败时保留错误状态，禁止后续用空配置覆盖磁盘原配置。
     private let configLoadError: String?
 
@@ -117,7 +109,7 @@ final class AppState: ObservableObject {
 
         // 恢复 OAuth/设备码登录状态：有 accessToken 且带登录账号标识的 provider 标为已连接，
         // 使「已连接 · 账号」在重启后仍然展示（否则按钮退回「登录」，造成未登录假象）。
-        for id in ["codebuddy-cn", "antigravity"] {
+        for id in ["codebuddy-cn"] {
             guard ProviderRegistry.shared.descriptor(for: id) != nil else { continue }
             if let pc = loaded.providers[id],
                !(pc.credential.accessToken ?? "").isEmpty,
@@ -310,7 +302,7 @@ final class AppState: ObservableObject {
 
     // MARK: - 手动 token 凭据
 
-    /// 保存手动粘贴的 token 凭据（CodeBuddy / Antigravity 的“手动配置 Token”）。
+    /// 保存手动粘贴的 token 凭据（OAuth 型供应商的“手动配置 Token”）。
     func saveManualToken(accessToken: String, refreshToken: String?, for providerID: String) throws {
         let trimmedAccess = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedRefresh = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -578,139 +570,8 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Antigravity PKCE 流登录。自动打开浏览器，等待用户在 GUI 粘贴授权码。
-    func loginAntigravity() async {
-        oauthStates["antigravity"] = .requestingCode
-        do {
-            let client = AntigravityOAuthClient(config: .live())
-            let credentials = try await client.login(
-                openURL: { url in
-                    Task { @MainActor in
-                        NSWorkspace.shared.open(url)
-                        self.oauthStates["antigravity"] = .waitingForAuth
-                    }
-                },
-                codeProvider: { _ in
-                    try await self.waitForAuthCode(for: "antigravity")
-                }
-            )
-            let credential = ProviderCredential(
-                accessToken: credentials.accessToken,
-                refreshToken: credentials.refreshToken,
-                email: credentials.email,
-                expiresAt: credentials.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
-            )
-            try saveCredential(credential, for: "antigravity")
-            oauthStates["antigravity"] = .connected
-        } catch {
-            oauthStates["antigravity"] = .failed(error.localizedDescription)
-        }
-    }
-
-    // MARK: - OAuth 状态引导 & token 刷新（Phase 20）
-
-    /// 启动时恢复 OAuth 状态：已配置 accessToken 的 oauth provider 标记为已连接，
-    /// 并主动刷新一次 Antigravity token（避免启动后仍用已过期 token）。
-    func bootstrapOAuth() async {
-        for (providerID, pc) in config.providers
-        where ProviderRegistry.shared.descriptor(for: providerID)?.metadata.authType == .oauth {
-            if !(pc.credential.accessToken ?? "").isEmpty {
-                oauthStates[providerID] = .connected
-            }
-        }
-        await refreshAntigravityToken()
-    }
-
-    /// 启动 OAuth token 周期刷新（每 25 分钟，token 约 1 小时过期）。
-    /// 与 metrics/usage 轮询并行，随菜单面板出现而启动。
-    func startOAuthRefresh() {
-        guard oauthRefreshTimer == nil else { return }
-        oauthRefreshTimer = Timer.scheduledTimer(withTimeInterval: 25 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.refreshAntigravityToken()
-            }
-        }
-    }
-
-    /// 用 refreshToken 主动刷新 Antigravity access token，并把新 token（含旋转后的
-    /// refreshToken）、过期时间、邮箱（为空时补抓）持久化回 config。刷新失败不覆盖旧凭据。
-    func refreshAntigravityToken() async {
-        // 未注册（如 Antigravity 临时下线）时不发起 token 刷新，避免后台访问不可用的授权端点。
-        guard ProviderRegistry.shared.descriptor(for: "antigravity") != nil else { return }
-        guard let pc = config.providers["antigravity"],
-              !(pc.credential.accessToken ?? "").isEmpty,
-              let refresh = pc.credential.refreshToken, !refresh.isEmpty else {
-            return
-        }
-        let client = AntigravityOAuthClient(config: .live())
-        do {
-            let refreshed = try await client.refreshAccessToken(refreshToken: refresh)
-            var credential = pc.credential
-            credential.accessToken = refreshed.accessToken
-            if let rt = refreshed.refreshToken, !rt.isEmpty {
-                credential.refreshToken = rt
-            }
-            if let exp = refreshed.expiresIn {
-                credential.expiresAt = Date().addingTimeInterval(TimeInterval(exp))
-            }
-            if (credential.email ?? "").isEmpty,
-               let email = await client.fetchUserEmail(accessToken: refreshed.accessToken),
-               !email.isEmpty {
-                credential.email = email
-            }
-            try saveCredential(credential, for: "antigravity")
-            oauthStates["antigravity"] = .connected
-        } catch {
-            // invalid_grant / 网络失败：保留旧凭据，状态标为失败以便用户重新登录。
-            oauthStates["antigravity"] = .failed(error.localizedDescription)
-        }
-    }
-
     func resetOAuthState(_ providerID: String) {
         oauthStates[providerID] = .idle
-    }
-
-    // MARK: - OAuth 授权码输入（CheckedContinuation 桥接）
-
-    private func waitForAuthCode(for providerID: String) async throws -> String {
-        oauthStates[providerID] = .waitingForCodeInput
-        codeInputProviderID = providerID
-        isShowingCodeInput = true
-        defer {
-            isShowingCodeInput = false
-            codeInputProviderID = nil
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            codeContinuation = continuation
-        }
-    }
-
-    func submitAuthCode(_ input: String) {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let code = extractAuthorizationCode(from: trimmed)
-        codeContinuation?.resume(returning: code)
-        codeContinuation = nil
-        isShowingCodeInput = false
-    }
-
-    func cancelAuthCode() {
-        codeContinuation?.resume(throwing: CancellationError())
-        codeContinuation = nil
-        isShowingCodeInput = false
-        if let providerID = codeInputProviderID {
-            oauthStates[providerID] = .idle
-        }
-    }
-
-    private func extractAuthorizationCode(from input: String) -> String {
-        if let url = URL(string: input),
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
-           !code.isEmpty {
-            return code
-        }
-        return input
     }
 
     // MARK: - 网关 API Key

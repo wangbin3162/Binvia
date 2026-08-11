@@ -8,7 +8,7 @@ import AppKit
 // 用法：
 //   BinviaCLI providers list
 //   BinviaCLI test <provider>
-//   BinviaCLI oauth login <codebuddy-cn|antigravity>
+//   BinviaCLI oauth login <codebuddy-cn>
 //   BinviaCLI config path
 //   BinviaCLI serve [--port N] [--config PATH]
 
@@ -20,7 +20,7 @@ func usage() {
     Usage:
       BinviaCLI providers list
       BinviaCLI test <provider|alias>
-      BinviaCLI oauth login <codebuddy-cn|antigravity>
+      BinviaCLI oauth login <codebuddy-cn>
       BinviaCLI config path
       BinviaCLI serve [--port N] [--config PATH]
     """)
@@ -39,19 +39,6 @@ func openInBrowser(_ url: URL) {
     #else
     print("请手动在浏览器打开：\(url.absoluteString)")
     #endif
-}
-
-/// 从用户粘贴的重定向 URL 或 authorization code 中提取 code。
-func extractAuthorizationCode(from input: String) -> String? {
-    let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return nil }
-    if let url = URL(string: trimmed),
-       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-       let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
-       !code.isEmpty {
-        return code
-    }
-    return trimmed
 }
 
 /// 把登录得到的凭据写回 config。
@@ -112,7 +99,7 @@ case "test":
 
 case "oauth":
     guard args.count >= 3, args[1] == "login" else {
-        print("usage: BinviaCLI oauth login <codebuddy-cn|antigravity>")
+        print("usage: BinviaCLI oauth login <codebuddy-cn>")
         exit(1)
     }
     let providerName = args[2]
@@ -125,33 +112,8 @@ case "oauth":
         }
         try saveCredential(credential, for: "codebuddy-cn", configPath: value(for: "--config"))
         print("CodeBuddy CN 登录成功。可用 `BinviaCLI test codebuddy-cn` 验证。")
-    case "antigravity", "agy":
-        let client = AntigravityOAuthClient(config: .live())
-        let credentials = try await client.login(
-            openURL: { url in
-                print("请在浏览器中打开授权地址…")
-                openInBrowser(url)
-            },
-            codeProvider: { _ in
-                print("请在浏览器完成授权后，把重定向地址（或 authorization code）粘贴到这里：")
-                guard let line = readLine(), let code = extractAuthorizationCode(from: line) else {
-                    throw ProviderError.missingCredentials("未提供 authorization code")
-                }
-                return code
-            }
-        )
-        let credential = ProviderCredential(
-            accessToken: credentials.accessToken,
-            refreshToken: credentials.refreshToken
-        )
-        try saveCredential(credential, for: "antigravity", configPath: value(for: "--config"))
-        if let projectId = credentials.projectId {
-            print("Antigravity 登录成功（projectId: \(projectId)）。可用 `BinviaCLI test antigravity` 验证。")
-        } else {
-            print("Antigravity 登录成功（未获取到 projectId，运行时将自动发现）。")
-        }
     default:
-        print("未知供应商：\(providerName)（支持 codebuddy-cn / antigravity）")
+        print("未知供应商：\(providerName)（支持 codebuddy-cn）")
         exit(1)
     }
 

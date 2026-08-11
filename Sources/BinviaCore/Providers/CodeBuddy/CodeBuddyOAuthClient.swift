@@ -271,7 +271,7 @@ public struct CodeBuddyOAuthClient: Sendable {
         print(device.authUrl.absoluteString)
         openURL(device.authUrl)
         let tokens = try await pollToken(state: device.state)
-        // 登录账号标识（对齐 Antigravity 显示登录用户）：token 响应字段优先，
+        // 登录账号标识（对齐 OAuth 型供应商显示登录用户）：token 响应字段优先，
         // accessToken 为 JWT 时再从 payload 提取（best-effort，失败不阻塞登录）。
         let identity = tokens.identity ?? Self.jwtIdentity(tokens.accessToken)
         return ProviderCredential(

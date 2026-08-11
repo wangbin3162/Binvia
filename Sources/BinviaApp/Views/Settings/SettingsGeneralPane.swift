@@ -17,7 +17,6 @@ struct SettingsGeneralPane: View {
         "DEEPSEEK_BASE_URL",
         "CODEBUDDY_CN_ACCESS_TOKEN",
         "CODEBUDDY_CN_BASE_URL",
-        "ANTIGRAVITY_BASE_URL",
     ]
 
     var body: some View {

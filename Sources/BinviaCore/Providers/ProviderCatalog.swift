@@ -6,7 +6,6 @@ public enum ProviderCatalog {
     public static func registerAll() {
         ProviderRegistry.shared.register(DeepSeekProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(CodeBuddyCNProviderDescriptor.descriptor)
-        ProviderRegistry.shared.register(AntigravityProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(OpenCodeProviderDescriptor.descriptor)
         ProviderRegistry.shared.register(KimiProviderDescriptor.descriptor)
         // Phase 18：OpenAI 兼容（opencode-go / xiaomi-mimo）
@@ -47,7 +46,7 @@ public enum ProviderCatalog {
     }
 
     /// 未在配置中出现（`config.providers` 无条目）时的默认启用状态。
-    /// 目前 DeepSeek / CodeBuddy / Antigravity 已配置可用，其余供应商暂无 key，默认禁用；
+    /// 目前 DeepSeek / CodeBuddy 已配置可用，其余供应商暂无 key，默认禁用；
     /// 一旦用户在 GUI 中保存过凭据或手动切换，config 条目即存在，以显式值为准。
     /// 供应商默认启用状态。当前策略：**全部默认禁用**（新装用户需在设置面板逐个启用），
     /// 避免未配置凭据的供应商被误路由；用户显式配置/启用后以 config 为准。

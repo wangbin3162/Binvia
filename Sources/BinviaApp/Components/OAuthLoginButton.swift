@@ -11,7 +11,7 @@ struct OAuthLoginButton: View {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                // 显示当前登录账号（Antigravity userinfo email；无则仅“已连接”）
+                // 显示当前登录账号（OAuth userinfo email；无则仅“已连接”）
                 if let email = appState.config.providers[providerID]?.credential.email, !email.isEmpty {
                     Text("已连接 · \(email)")
                         .foregroundStyle(.secondary)
@@ -39,13 +39,6 @@ struct OAuthLoginButton: View {
                 Text("请在浏览器中完成授权…")
                     .foregroundStyle(.secondary)
             }
-        case .waitingForCodeInput:
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("请在浏览器完成授权后，在弹窗中粘贴授权码")
-                    .foregroundStyle(.secondary)
-            }
         case .failed(let msg):
             VStack(alignment: .leading, spacing: 6) {
                 Text(msg)
@@ -64,8 +57,6 @@ struct OAuthLoginButton: View {
     private func startLogin() {
         if providerID == "codebuddy-cn" {
             Task { await appState.loginCodeBuddy() }
-        } else if providerID == "antigravity" {
-            Task { await appState.loginAntigravity() }
         }
     }
 }

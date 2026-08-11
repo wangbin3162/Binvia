@@ -61,10 +61,6 @@ struct MenuPanelView: View {
         .onAppear {
             appState.startMetricsRefresh()
             appState.startUsageRefresh()
-            appState.startOAuthRefresh()
-            Task { @MainActor in
-                await appState.bootstrapOAuth()
-            }
         }
         // §6.5：用户移除某 provider 后 `selectedTab` 可能指向不存在的 Tab，重置回 overview。
         .onChange(of: appState.configuredProviders.map(\.id)) { _, newIDs in

@@ -12,7 +12,7 @@ public protocol ProviderUsageFetcher: Sendable {
     func fetchUsage(credential: ProviderCredential) async throws -> ProviderUsageSnapshot
 }
 
-/// 配额窗口（如 Antigravity 的 5h / 周窗口）。
+/// 配额窗口（如 CodeBuddy 的积分配额窗口）。
 public struct QuotaWindow: Sendable, Codable, Equatable {
     /// 展示用名称（如 "5h"、"Weekly"、模型组名）。
     public let label: String
@@ -49,7 +49,7 @@ public struct QuotaWindow: Sendable, Codable, Equatable {
     }
 }
 
-/// 模型级配额（如 Antigravity `retrieveUserQuota` 的 per-model bucket）。
+/// 模型级配额（按模型的剩余配额 bucket）。
 public struct ModelQuota: Sendable, Codable, Equatable {
     public let modelID: String
     public let remainingFraction: Double
@@ -92,7 +92,7 @@ public struct ProviderUsageSnapshot: Sendable, Codable, Equatable {
     public let currency: String?
     /// 多 Key 余额条目（DeepSeek 多 api-key 各自余额）。非空时 GUI 逐 Key 展示。
     public let balances: [KeyedBalance]
-    /// 配额窗口（Antigravity 5h / 周；无则空数组）。
+    /// 配额窗口（无则空数组）。
     public let quotaWindows: [QuotaWindow]
     /// 模型级配额。
     public let modelQuotas: [ModelQuota]

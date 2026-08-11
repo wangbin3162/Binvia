@@ -10,9 +10,8 @@ import Foundation
 /// 二期消歧升级（Phase 12，OmniRoute 风格三段式 + 兜底）：
 /// 1. **显式前缀**：`provider/model`、`alias/model` → 直接命中，最高优先。
 /// 2. **单候选直选**：裸模型名全局唯一供应商拥有 → 直接命中。
-/// 3. **前缀启发式**：按模型名前缀推断归属（`claude-*` → Claude 系、`gemini-*` → Gemini 系、
-///    `gpt-*` → OpenAI 系、`glm-*` → GLM 系、`deepseek-*` → DeepSeek 等），仅在多个供应商
-///    拥有同名模型时生效。
+/// 3. **前缀启发式**：按模型名前缀推断归属（`gpt-*` → OpenAI 系、`glm-*` → GLM 系、
+///    `deepseek-*` → DeepSeek 等），仅在多个供应商拥有同名模型时生效。
 /// 4. **前缀优先 + 字母序兜底**：模型 id 以供应商 id/别名开头者优先，仍歧义取字母序第一个。
 public struct Router: Sendable {
     public let registry: ProviderRegistry
@@ -75,13 +74,10 @@ public struct Router: Sendable {
     }
 
     /// 前缀启发式：模型家族前缀 → 供应商映射。仅当对应供应商确实拥有该模型时生效。
-    /// 映射规则（Phase 2 对齐）：`claude-*`/`gemini-*` → Antigravity（Claude/Gemini 系）、
-    /// `glm-*` → CodeBuddyCN/GLM 系、`deepseek-*` → DeepSeek、`kimi-*` → Kimi、
-    /// `minimax*` → MiniMax、`mimo-*` → XiaomiMiMo。
+    /// 映射规则（Phase 2 对齐）：`glm-*` → CodeBuddyCN/GLM 系、`deepseek-*` → DeepSeek、
+    /// `kimi-*` → Kimi、`minimax*` → MiniMax、`mimo-*` → XiaomiMiMo。
     private func prefixHeuristicMatch(_ modelID: String, owners: [String]) -> String? {
         let rules: [(prefix: String, providerID: String)] = [
-            ("claude", "antigravity"),   // Anthropic 系
-            ("gemini", "antigravity"),   // Gemini 系
             ("glm", "codebuddy-cn"),     // GLM 系（CodeBuddyCN / z.ai）
             ("deepseek", "deepseek"),
             ("kimi", "kimi"),

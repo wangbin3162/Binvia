@@ -1,7 +1,7 @@
 import Foundation
 
 /// 把「强制流式」上游的 OpenAI chat completion SSE chunk 流聚合成单个 JSON 响应。
-/// 用于 CodeBuddy / Antigravity 等上游只支持流式的供应商：客户端请求 `stream=false` 时，
+/// 用于 CodeBuddy 等上游只支持流式的供应商：客户端请求 `stream=false` 时，
 /// Provider 执行器用本工具把 SSE 聚合为 OpenAI JSON 结构再返回。
 ///
 /// 工具调用：`delta.tool_calls` 按 `index` 增量累加（name / arguments 拼接），

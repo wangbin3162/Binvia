@@ -102,7 +102,7 @@ public extension Provider {
 
     /// 默认实现（Phase 13，需求 7）：「`ModelCache` 优先 → 上游 `modelsURL` → 静态兜底」。
     /// 仅支持 OpenAI 兼容的 `/v1/models` 响应（`{"data":[{"id":...}]}`）；已有自定义逻辑的
-    /// 供应商（DeepSeek / Antigravity / CodeBuddyCN）仍覆盖本实现。
+    /// 供应商（DeepSeek / CodeBuddyCN）仍覆盖本实现。
     func listModels(credential: ProviderCredential?) async throws -> [Model] {
         let descriptor = ProviderRegistry.shared.descriptor(for: id)
         let staticModels = descriptor?.models ?? []

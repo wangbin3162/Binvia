@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-Binvia is a macOS local AI-provider aggregation gateway. It exposes an OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, `/v1/usage`, `/v1/health`) on a local port and routes requests to DeepSeek, Tencent CodeBuddy, and Google Antigravity. Pure Swift + native POSIX sockets, **zero third-party dependencies**.
+Binvia is a macOS local AI-provider aggregation gateway. It exposes an OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, `/v1/usage`, `/v1/health`) on a local port and routes requests to DeepSeek, Tencent CodeBuddy, and other OpenAI-compatible providers. Pure Swift + native POSIX sockets, **zero third-party dependencies**.
 
 ## Project Structure & Module Organization
 
@@ -9,7 +9,7 @@ Swift Package (5 targets, `Package.swift`), all with `StrictConcurrency` enabled
 ```
 Sources/
 ├── BinviaCore/        # 核心库：Provider 协议/注册表、Router、Auth、Config、Networking、Server、Monitoring
-│   └── Providers/         # deepseek / codebuddy-cn / antigravity（每供应商一个目录）
+│   └── Providers/         # deepseek / codebuddy-cn / opencode 等（每供应商一个目录）
 ├── BinviaServer/      # 服务器入口 main.swift
 ├── BinviaCLI/          # CLI：providers / test / oauth / config / serve
 ├── BinviaApp/          # 菜单栏 GUI（SwiftUI + AppKit），含 --smoke-test
@@ -62,13 +62,13 @@ PRs should:
 `docs/` holds analysis reports for the two upstream projects this codebase borrows from. Read the relevant report **before** modifying code derived from it; consult the upstream source only when the report is insufficient.
 
 - **CodexBar** (macOS menu-bar AI usage monitor, Swift) — source of the `ProviderDescriptor`/registry, `ProviderHTTPClient`, `ConfigStore`, and menu-bar GUI patterns. Read `docs/codexbar-analysis.md` first; if needed, inspect the source at `/Users/wangbin/workspace/temp/my-token-route/CodexBar`.
-- **OmniRoute** (AI routing gateway, TypeScript) — source of the `provider/model` routing syntax, api-key auth, SSE chat handler, provider registry, and the CodeBuddy/Antigravity request headers and model catalogs. Read `docs/omniroute-analysis.md` first; if needed, inspect the source at `/Users/wangbin/workspace/temp/my-token-route/OmniRoute`.
+- **OmniRoute** (AI routing gateway, TypeScript) — source of the `provider/model` routing syntax, api-key auth, SSE chat handler, provider registry, and the CodeBuddy request headers and model catalogs. Read `docs/omniroute-analysis.md` first; if needed, inspect the source at `/Users/wangbin/workspace/temp/my-token-route/OmniRoute`.
 - **GUI** — menu-bar app, settings window, OAuth flows, and metrics polling must follow `docs/gui-implementation-guide.md`.
 
 ## Notes
 
-- Config file: `~/.config/binvia/config.json` (`BINVIA_CONFIG` overrides). Credential env vars: `DEEPSEEK_API_KEY`, `CODEBUDDY_CN_ACCESS_TOKEN`, `ANTIGRAVITY_ACCESS_TOKEN`. Gateway keys: `BINVIA_API_KEY` / `ROUTER_API_KEY`.
-- Forced-streaming upstreams (CodeBuddy, Antigravity) aggregate SSE to JSON for non-streaming clients via `SSEJSONAggregator`; follow this pattern for new OAuth-based providers.
+- Config file: `~/.config/binvia/config.json` (`BINVIA_CONFIG` overrides). Credential env vars: `DEEPSEEK_API_KEY`, `CODEBUDDY_CN_ACCESS_TOKEN`. Gateway keys: `BINVIA_API_KEY` / `ROUTER_API_KEY`.
+- Forced-streaming upstreams (CodeBuddy) aggregate SSE to JSON for non-streaming clients via `SSEJSONAggregator`; follow this pattern for new forced-streaming providers.
 - `HTTPServer.setHandler()` supports runtime hot-replacement of the route handler — the GUI's hot-reload depends on it; don't break this contract.
 
 ## Lessons
