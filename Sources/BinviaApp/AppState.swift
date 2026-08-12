@@ -45,6 +45,8 @@ final class AppState: ObservableObject {
 
     /// 各 provider 的用量快照（Phase 16：余额 / 配额窗口 / 模型配额）。由 5min 轮询或手动刷新填充。
     @Published var usageSnapshots: [String: ProviderUsageSnapshot] = [:]
+    /// 当前正在请求用量的 provider，供 GUI 展示加载状态并防止重复点击。
+    @Published var refreshingUsageProviders: Set<String> = []
 
     /// 各 provider 的连通性测试结果。
     @Published var testStates: [String: ProviderTestState] = [:]
@@ -689,6 +691,9 @@ final class AppState: ObservableObject {
     /// 刷新单个 provider 的用量（GUI「刷新用量」按钮入口）。
     /// 强制绕过缓存打上游；失败时写入带 `error` 的快照，绝不崩溃。
     func refreshUsageNow(for providerID: String) async {
+        guard !refreshingUsageProviders.contains(providerID) else { return }
+        refreshingUsageProviders.insert(providerID)
+        defer { refreshingUsageProviders.remove(providerID) }
         await refreshUsage(for: providerID, force: true)
     }
 
