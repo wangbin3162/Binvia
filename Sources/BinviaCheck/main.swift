@@ -284,12 +284,13 @@ func routeConfigTests() throws {
     expectEqual(cfg4.apiKeys(for: "deepseek"), ["only-env"], "apiKeys 仅 env")
     unsetenv("DEEPSEEK_API_KEY")
 
-    // 旧格式 JSON 解码（无 apiKeys 字段 → 回退空数组）
+    // 旧格式 JSON 解码：credential.apiKey 自动迁移为启用令牌
     let legacy = #"{"enabled": true, "credential": {"apiKey": "legacy-key"}}"#
     let decoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacy.utf8))
     expectEqual(decoded.enabled, true, "legacy enabled")
     expectEqual(decoded.credential.apiKey, "legacy-key", "legacy credential apiKey")
-    expectEqual(decoded.apiKeys, [], "legacy apiKeys 回退空数组")
+    expectEqual(decoded.apiKeyValues, ["legacy-key"], "legacy credential.apiKey 迁移为令牌")
+    expectEqual(decoded.apiKeys.first?.enabled, true, "legacy credential.apiKey 默认启用")
 
     // 旧格式 apiKeys: [String] → 自动迁移为 KeyedToken（掩码标签）
     let legacyKeys = #"{"enabled": true, "apiKeys": ["sk-abcdef1234567890"]}"#
@@ -310,8 +311,13 @@ func routeConfigTests() throws {
     let pc = ProviderConfig(enabled: false, credential: ProviderCredential(apiKey: "k", accessToken: "t"), apiKeys: [kt("a", label: "主"), kt("b")])
     let pcData = try JSONEncoder().encode(pc)
     let pcDecoded = try JSONDecoder().decode(ProviderConfig.self, from: pcData)
-    expectEqual(pcDecoded, pc, "ProviderConfig round trip")
-    expectEqual(pcDecoded.apiKeyValues, ["a", "b"], "apiKeyValues 返回全部令牌值")
+    let expectedPC = ProviderConfig(
+        enabled: false,
+        credential: ProviderCredential(apiKey: "k", accessToken: "t"),
+        apiKeys: [KeyedToken(value: "k", enabled: true), kt("a", label: "主"), kt("b")]
+    )
+    expectEqual(pcDecoded, expectedPC, "ProviderConfig round trip 保留旧 credential.apiKey 迁移令牌")
+    expectEqual(pcDecoded.apiKeyValues, ["k", "a", "b"], "apiKeyValues 返回迁移后全部令牌值")
 
     let rc = RouteConfig(
         version: 1, host: "0.0.0.0", port: 9999,
@@ -320,7 +326,16 @@ func routeConfigTests() throws {
     )
     let rcData = try JSONEncoder().encode(rc)
     let rcDecoded = try JSONDecoder().decode(RouteConfig.self, from: rcData)
-    expectEqual(rcDecoded, rc, "RouteConfig round trip")
+    let expectedRC = RouteConfig(
+        version: 1, host: "0.0.0.0", port: 9999,
+        apiKeys: [GatewayKeyConfig(key: "router-key", enabledModels: ["ds/deepseek-v4-pro"])],
+        providers: ["deepseek": ProviderConfig(
+            enabled: true,
+            credential: ProviderCredential(apiKey: "k"),
+            apiKeys: [KeyedToken(value: "k", enabled: true), kt("a")]
+        )]
+    )
+    expectEqual(rcDecoded, expectedRC, "RouteConfig round trip 保留旧 credential.apiKey 迁移令牌")
 
     // 选择的令牌填入 credential.apiKey（GUI 单 key 存 apiKeys[]）
     let cfg5 = RouteConfig(providers: [
@@ -334,11 +349,11 @@ func routeConfigTests() throws {
     ])
     expectEqual(cfg5b.credential(for: "opencode").apiKey, "gui-key", "禁用态仍返回合并后的凭据")
 
-    // 旧 credential.apiKey 优先迁移为启用令牌
+    // 显式启用的 token 优先于旧 credential.apiKey
     let cfg6 = RouteConfig(providers: [
         "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: [KeyedToken(value: "explicit", enabled: true), kt("first-rotation")])
     ])
-    expectEqual(cfg6.credential(for: "deepseek").apiKey, "first-rotation", "启用令牌优先于旧 apiKey")
+    expectEqual(cfg6.credential(for: "deepseek").apiKey, "explicit", "显式启用令牌优先于旧 apiKey")
 
     // Phase 20: credential(for:) 透传 ProviderConfig.region
     let cfg7 = RouteConfig(providers: [
@@ -783,7 +798,10 @@ func routeHandlerTests() async throws {
     let config = RouteConfig(
         host: "127.0.0.1", port: 0,
         apiKeys: [GatewayKeyConfig(key: "test-key")],
-       providers: ["codebuddy-cn": ProviderConfig(enabled: true, userModels: [ProviderModelEntry(modelName: "glm-5.2")])]
+       providers: [
+           "codebuddy-cn": ProviderConfig(enabled: true, userModels: [ProviderModelEntry(modelName: "glm-5.2")]),
+           "deepseek": ProviderConfig(enabled: true)
+       ]
    )
    let handler = RouteHandler(config: config)
 
