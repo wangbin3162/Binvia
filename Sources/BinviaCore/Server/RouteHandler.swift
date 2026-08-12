@@ -101,6 +101,26 @@ public struct RouteHandler: Sendable {
         )
     }
 
+    private func providerIsEnabled(_ providerID: String) -> Bool {
+        config.providers[providerID]?.enabled ?? ProviderCatalog.isEnabledByDefault(providerID)
+    }
+
+    /// 配置了用户模型时，以用户模型为准；未配置时保留内置静态目录路由。
+    private func modelIsAvailable(_ providerID: String, modelID: String) -> Bool {
+        if let userModels = config.providers[providerID]?.userModels, !userModels.isEmpty {
+            return userModels.contains {
+                $0.effectiveDisplayName == modelID || $0.modelName == modelID
+            }
+        }
+        return registry.descriptor(for: providerID)?.models.contains { $0.id == modelID } ?? false
+    }
+
+    private static func jsonError(_ status: Int, message: String) -> HTTPResponse {
+        let payload: [String: String] = ["error": message]
+        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{\"error\":\"request failed\"}".utf8)
+        return HTTPResponse(status: status, headers: ["Content-Type": "application/json"], body: .data(data))
+    }
+
     /// 归一化模型 ID：`"<alias>/<modelID>"`（无别名用 provider id），与 enabledModels 白名单格式一致。
     private func normalizedModelID(providerID: String, modelID: String) -> String {
         let alias = registry.descriptor(for: providerID)?.alias ?? providerID
@@ -178,21 +198,25 @@ public struct RouteHandler: Sendable {
     private func handleChat(_ request: HTTPRequest) async throws -> HTTPResponse {
         guard authorized(request) else { return unauthorized() }
         guard let body = request.body, !body.isEmpty else {
-            return HTTPResponse.text(400, "{\"error\":\"empty body\"}", contentType: "application/json")
+            return Self.jsonError(400, message: "empty body")
         }
 
         let chatRequest: ChatRequest
         do {
             chatRequest = try JSONDecoder().decode(ChatRequest.self, from: body)
         } catch {
-            return HTTPResponse.text(400, "{\"error\":\"invalid JSON: \(error.localizedDescription)\"}", contentType: "application/json")
+            return Self.jsonError(400, message: "invalid JSON: \(error.localizedDescription)")
         }
 
         guard let resolution = router.resolve(chatRequest.model) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(chatRequest.model)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown model: \(chatRequest.model)")
         }
         guard let provider = registry.provider(for: resolution.providerID) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown provider: \(resolution.providerID)")
+        }
+        guard providerIsEnabled(resolution.providerID),
+              modelIsAvailable(resolution.providerID, modelID: resolution.modelID) else {
+            return Self.jsonError(404, message: "Unknown model: \(chatRequest.model)")
         }
 
         // 网关 key 级白名单过滤（Phase 12）：key.enabledModels 非 nil 且模型不在其中 → 403
@@ -253,7 +277,8 @@ public struct RouteHandler: Sendable {
                         let handler = IteratorHandler(iterator: remaining.makeAsyncIterator())
                         let idle = StreamIdleMonitor()
                         if let normalizer {
-                            for data in normalizer.process(firstChunk) {
+                            let parsedChunk = extractor.process(firstChunk)
+                            for data in normalizer.process(parsedChunk) {
                                 continuation.yield(data)
                             }
                         } else {
@@ -269,7 +294,8 @@ public struct RouteHandler: Sendable {
                             guard let chunk else { break }
                             idle.touch()
                             if let normalizer {
-                                for data in normalizer.process(chunk) {
+                                let parsedChunk = extractor.process(chunk)
+                                for data in normalizer.process(parsedChunk) {
                                     continuation.yield(data)
                                 }
                             } else {
@@ -380,10 +406,14 @@ public struct RouteHandler: Sendable {
         let translated = translation.request
 
         guard let resolution = router.resolve(translated.model) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(translated.model)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown model: \(translated.model)")
         }
         guard let provider = registry.provider(for: resolution.providerID) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown provider: \(resolution.providerID)")
+        }
+        guard providerIsEnabled(resolution.providerID),
+              modelIsAvailable(resolution.providerID, modelID: resolution.modelID) else {
+            return Self.jsonError(404, message: "Unknown model: \(translated.model)")
         }
         if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
             return forbidden
@@ -537,10 +567,14 @@ public struct RouteHandler: Sendable {
         }
 
         guard let resolution = router.resolve(translated.model) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown model: \(translated.model)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown model: \(translated.model)")
         }
         guard let provider = registry.provider(for: resolution.providerID) else {
-            return HTTPResponse.text(404, "{\"error\":\"Unknown provider: \(resolution.providerID)\"}", contentType: "application/json")
+            return Self.jsonError(404, message: "Unknown provider: \(resolution.providerID)")
+        }
+        guard providerIsEnabled(resolution.providerID),
+              modelIsAvailable(resolution.providerID, modelID: resolution.modelID) else {
+            return Self.jsonError(404, message: "Unknown model: \(translated.model)")
         }
         if let forbidden = enforceEnabledModels(authenticatedKey(request), providerID: resolution.providerID, modelID: resolution.modelID) {
             return forbidden

@@ -108,6 +108,11 @@ public final class HTTPServer: @unchecked Sendable {
     public func start(host: String = "localhost", port: Int) throws {
         let fd = try SocketUtil.createListener(host: host, port: port)
         lifecycleLock.lock()
+        guard listenFD == nil else {
+            lifecycleLock.unlock()
+            close(fd)
+            throw SocketError.alreadyRunning
+        }
         self.stopped = false
         self.listenFD = fd
         lifecycleLock.unlock()
@@ -151,6 +156,8 @@ enum SocketError: Error {
     case readTimeout
     case closed
     case malformedRequest
+    case requestBodyTooLarge
+    case alreadyRunning
 }
 
 enum SocketUtil {
@@ -239,6 +246,14 @@ enum SocketUtil {
             let response = try await handler(request)
             try await writeResponse(response, to: fd)
         } catch {
+            if case SocketError.requestBodyTooLarge = error {
+                let body = Data("{\"error\":\"request body too large\"}".utf8)
+                _ = try? writeAll(
+                    fd,
+                    Data("HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body
+                )
+                return
+            }
             // 尽力返回 500
             let message = "Internal Server Error: \(error.localizedDescription)"
             let body = Data(message.utf8)
@@ -252,6 +267,7 @@ enum SocketUtil {
     // MARK: 读取请求
 
     static func readRequest(_ fd: Int32) throws -> HTTPRequest {
+        let maxBodyBytes = 16 * 1024 * 1024
         // 接收超时 10s
         var tv = timeval(tv_sec: 10, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -298,12 +314,20 @@ enum SocketUtil {
 
         // 读取 body
         if let contentLengthStr = headers["content-length"], let contentLength = Int(contentLengthStr) {
+            guard contentLength >= 0, contentLength <= maxBodyBytes else {
+                throw SocketError.requestBodyTooLarge
+            }
             while bodyData.count < contentLength {
                 let n = read(fd, &temp, temp.count)
                 if n <= 0 { throw SocketError.closed }
                 bodyData.append(contentsOf: temp[0 ..< n])
+                if bodyData.count > maxBodyBytes {
+                    throw SocketError.requestBodyTooLarge
+                }
             }
             bodyData = bodyData.prefix(contentLength)
+        } else if bodyData.count > maxBodyBytes {
+            throw SocketError.requestBodyTooLarge
         }
 
         var components = URLComponents(string: target) ?? URLComponents()
