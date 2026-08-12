@@ -1,6 +1,6 @@
 # Binvia 构建与发布指南
 
-> 适用版本：v0.1.0 起（当前最新：v0.2.2）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
+> 适用版本：v0.1.0 起（当前最新：v0.2.3）。本文档描述**本地打包**与 **GitHub Release 发布**的完整流程。
 
 ---
 
@@ -148,12 +148,22 @@ open Binvia-0.1.x-macos-arm64-x86_64.dmg   # 打开确认样式背景与拖入�
 
 | 版本 | 日期 | 内容 | 产物（bin/） |
 |---|---|---|---|
+| v0.2.3 | 2026-08-12 | 流式请求默认超时提升（见下） | `Binvia-0.2.3-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.2 | 2026-08-11 | 移除 Antigravity 供应商支持（见下） | `Binvia-0.2.2-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.1 | 2026-08-11 | 恢复 Antigravity 供应商支持（Google OAuth 授权已恢复可用，见下） | `Binvia-0.2.1-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.2.0 | 2026-08-11 | OpenCode / OpenCode Go Cookie 用量查询；GUI 调整（令牌管理/调用测试/服务管理）；DeepSeek 令牌轮换扩展（见下） | `Binvia-0.2.0-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.7 | 2026-08-07 | 模型列表修复（对齐/重名操作/上下文填充）；/v1/models 附带 context_length（见下） | `Binvia-0.1.7-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.6 | 2026-08-06 | 移除 Cursor 供应商支持；禁用 provider 不轮询用量/不显示 Tab；MiniMax/Zai 切 OpenAI 兼容（见下） | `Binvia-0.1.6-macos-arm64-x86_64.dmg` / `.tar.gz` |
 | v0.1.5 | 2026-08-06 | 请求响应速度优化（见下） | `Binvia-0.1.5-macos-arm64-x86_64.dmg` / `.tar.gz` |
+
+### v0.2.3 变更内容
+
+- **流式请求默认超时提升到 `streamingIdleTimeout`**：`URLRequest` 缺省 `timeoutInterval` 为
+  60s（URLSessionConfiguration 默认），对推理模型（如 CodeBuddy 高 effort 思考）的长静默会被
+  误杀 —— 实测上游断流报 `NSURLErrorTimedOut`（"The request timed out."），导致 codex 重试后
+  拿到截断回答。`ProviderHTTPClient.applyStreamingTimeout` 统一归一化：默认/更短超时提升到
+  `StreamConfig.idleTimeout`（默认 120s）；显式更长超时保持既有封顶语义（> idleTimeout 封顶到
+  idleTimeout）。新增 BinviaCheck 用例验证默认流式请求的 `timeoutInterval` 已提升。
 
 ### v0.2.2 变更内容
 
