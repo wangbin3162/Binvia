@@ -14,6 +14,8 @@ import Foundation
 /// 每次调用返回 0..n 个完整 SSE 事件字节。
 public final class ResponsesStreamTranslator: @unchecked Sendable {
     private let responseID: String
+    private let toolIdentity: ResponsesToolIdentityMap
+    private let emitStartEventsEnabled: Bool
     private let created: Int
     private var parser = SSEParser()
 
@@ -27,7 +29,9 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
 
     // message item 状态（按输出 index）
     private var msgItemAdded: [Int: Bool] = [:]
-    private var msgContentAdded: [Int: Bool] = [:]
+    private var msgContentCount: [Int: Int] = [:]
+    private var msgTextContentIndex: [Int: Int] = [:]
+    private var msgImageParts: [Int: [(index: Int, part: [String: Any])]] = [:]
     private var msgItemDone: [Int: Bool] = [:]
     private var msgTextBuf: [Int: String] = [:]
 
@@ -46,8 +50,14 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
 
     private var completedOutputItems: [(outputIndex: Int, item: [String: Any], seq: Int)] = []
 
-    public init(responseID: String) {
+    public init(
+        responseID: String,
+        toolIdentity: ResponsesToolIdentityMap = ResponsesToolIdentityMap(),
+        emitStartEventsEnabled: Bool = true
+    ) {
         self.responseID = responseID
+        self.toolIdentity = toolIdentity
+        self.emitStartEventsEnabled = emitStartEventsEnabled
         self.created = Int(Date().timeIntervalSince1970)
     }
 
@@ -119,7 +129,9 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
         var out: [Data] = []
         if !started {
             started = true
-            out.append(contentsOf: emitStartEvents())
+            if emitStartEventsEnabled {
+                out.append(contentsOf: emitStartEvents())
+            }
         }
 
         let index = (choice["index"] as? Int) ?? 0
@@ -131,48 +143,25 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
         }
 
         if let content = delta["content"] as? String, !content.isEmpty {
-            if reasoningID != nil && !reasoningDone {
-                out.append(contentsOf: closeReasoning())
+            out.append(contentsOf: processTextDelta(content, index: index))
+        } else if let parts = delta["content"] as? [[String: Any]], !parts.isEmpty {
+            for part in parts {
+                switch part["type"] as? String {
+                case "text", "input_text", "output_text":
+                    if let text = part["text"] as? String, !text.isEmpty {
+                        out.append(contentsOf: processTextDelta(text, index: index))
+                    }
+                case "image_url":
+                    let imageURL = Self.imageURL(from: part["image_url"])
+                    if !imageURL.isEmpty {
+                        out.append(contentsOf: processImageDelta(imageURL, index: index))
+                    }
+                default:
+                    if let text = part["text"] as? String, !text.isEmpty {
+                        out.append(contentsOf: processTextDelta(text, index: index))
+                    }
+                }
             }
-            let msgIndex = reasoningID != nil ? reasoningIndex + 1 : index
-            if msgItemAdded[msgIndex] != true {
-                msgItemAdded[msgIndex] = true
-                let msgID = "msg_\(responseID)_\(msgIndex)"
-                out.append(contentsOf: emitEvent(
-                    "response.output_item.added",
-                    payload: [
-                        "type": "response.output_item.added",
-                        "output_index": msgIndex,
-                        "item": ["id": msgID, "type": "message", "content": [], "role": "assistant"],
-                    ]
-                ))
-            }
-            if msgContentAdded[msgIndex] != true {
-                msgContentAdded[msgIndex] = true
-                let msgID = "msg_\(responseID)_\(msgIndex)"
-                out.append(contentsOf: emitEvent(
-                    "response.content_part.added",
-                    payload: [
-                        "type": "response.content_part.added",
-                        "item_id": msgID,
-                        "output_index": msgIndex,
-                        "content_index": 0,
-                        "part": ["type": "output_text", "annotations": [], "logprobs": [], "text": ""],
-                    ]
-                ))
-            }
-            msgTextBuf[msgIndex, default: ""] += content
-            out.append(contentsOf: emitEvent(
-                "response.output_text.delta",
-                payload: [
-                    "type": "response.output_text.delta",
-                    "item_id": "msg_\(responseID)_\(msgIndex)",
-                    "output_index": msgIndex,
-                    "content_index": 0,
-                    "delta": content,
-                    "logprobs": [],
-                ]
-            ))
         }
 
         if let calls = delta["tool_calls"] as? [[String: Any]] {
@@ -212,18 +201,15 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
                             payload: [
                                 "type": "response.output_item.added",
                                 "output_index": outputIndex,
-                                "item": [
-                                    "id": "fc_\(callID)",
-                                    "type": "function_call",
-                                    "arguments": "",
-                                    "call_id": callID,
-                                    "name": toolName,
-                                ],
+                                "item": toolCallItem(id: "fc_\(callID)", callID: callID, wireName: toolName, arguments: "", status: "in_progress"),
                             ]
                         ))
                     }
                     if !args.isEmpty {
-                        funcArgsBuf[tcIndex, default: ""] += args
+                        funcArgsBuf[tcIndex] = ToolCallArgumentDelta.append(
+                            existing: funcArgsBuf[tcIndex],
+                            incoming: args
+                        )
                         out.append(contentsOf: emitEvent(
                             "response.function_call_arguments.delta",
                             payload: [
@@ -254,6 +240,113 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
             }
         }
         return out
+    }
+
+    private func processTextDelta(_ content: String, index: Int) -> [Data] {
+        var out: [Data] = []
+        if reasoningID != nil && !reasoningDone {
+            out.append(contentsOf: closeReasoning())
+        }
+        let msgIndex = reasoningID != nil ? reasoningIndex + 1 : index
+        if msgItemAdded[msgIndex] != true {
+            msgItemAdded[msgIndex] = true
+            let msgID = "msg_\(responseID)_\(msgIndex)"
+            out.append(contentsOf: emitEvent(
+                "response.output_item.added",
+                payload: [
+                    "type": "response.output_item.added",
+                    "output_index": msgIndex,
+                    "item": ["id": msgID, "type": "message", "content": [], "role": "assistant"],
+                ]
+            ))
+        }
+        if msgTextContentIndex[msgIndex] == nil {
+            let partIndex = msgContentCount[msgIndex] ?? 0
+            msgTextContentIndex[msgIndex] = partIndex
+            msgContentCount[msgIndex] = partIndex + 1
+            let msgID = "msg_\(responseID)_\(msgIndex)"
+            out.append(contentsOf: emitEvent(
+                "response.content_part.added",
+                payload: [
+                    "type": "response.content_part.added",
+                    "item_id": msgID,
+                    "output_index": msgIndex,
+                    "content_index": partIndex,
+                    "part": ["type": "output_text", "annotations": [], "logprobs": [], "text": ""],
+                ]
+            ))
+        }
+        msgTextBuf[msgIndex, default: ""] += content
+        out.append(contentsOf: emitEvent(
+            "response.output_text.delta",
+            payload: [
+                "type": "response.output_text.delta",
+                "item_id": "msg_\(responseID)_\(msgIndex)",
+                "output_index": msgIndex,
+                "content_index": msgTextContentIndex[msgIndex] ?? 0,
+                "delta": content,
+                "logprobs": [],
+            ]
+        ))
+        return out
+    }
+
+    private func processImageDelta(_ imageURL: String, index: Int) -> [Data] {
+        var out: [Data] = []
+        if reasoningID != nil && !reasoningDone {
+            out.append(contentsOf: closeReasoning())
+        }
+        let msgIndex = reasoningID != nil ? reasoningIndex + 1 : index
+        if msgItemAdded[msgIndex] != true {
+            msgItemAdded[msgIndex] = true
+            let msgID = "msg_\(responseID)_\(msgIndex)"
+            out.append(contentsOf: emitEvent(
+                "response.output_item.added",
+                payload: [
+                    "type": "response.output_item.added",
+                    "output_index": msgIndex,
+                    "item": ["id": msgID, "type": "message", "content": [], "role": "assistant"],
+                ]
+            ))
+        }
+        let partIndex = msgContentCount[msgIndex] ?? 0
+        msgContentCount[msgIndex] = partIndex + 1
+        let msgID = "msg_\(responseID)_\(msgIndex)"
+        msgImageParts[msgIndex, default: []].append((
+            index: partIndex,
+            part: [
+                "type": "output_image",
+                "image_url": imageURL,
+                "annotations": [],
+            ]
+        ))
+        out.append(contentsOf: emitEvent(
+            "response.content_part.added",
+            payload: [
+                "type": "response.content_part.added",
+                "item_id": msgID,
+                "output_index": msgIndex,
+                "content_index": partIndex,
+                "part": ["type": "output_image", "image_url": imageURL, "annotations": []],
+            ]
+        ))
+        out.append(contentsOf: emitEvent(
+            "response.output_image.delta",
+            payload: [
+                "type": "response.output_image.delta",
+                "item_id": msgID,
+                "output_index": msgIndex,
+                "content_index": partIndex,
+                "delta": ["image_url": imageURL],
+            ]
+        ))
+        return out
+    }
+
+    private static func imageURL(from value: Any?) -> String {
+        if let string = value as? String { return string }
+        if let obj = value as? [String: Any] { return obj["url"] as? String ?? "" }
+        return ""
     }
 
     private func emitStartEvents() -> [Data] {
@@ -385,14 +478,37 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
                 "type": "response.content_part.done",
                 "item_id": msgID,
                 "output_index": index,
-                "content_index": 0,
+                "content_index": msgTextContentIndex[index] ?? 0,
                 "part": ["type": "output_text", "annotations": [], "logprobs": [], "text": fullText],
             ]
         ))
+        var contentParts: [(index: Int, part: [String: Any])] = []
+        if let textIndex = msgTextContentIndex[index] {
+            contentParts.append((
+                index: textIndex,
+                part: ["type": "output_text", "annotations": [], "logprobs": [], "text": fullText]
+            ))
+        }
+        if let images = msgImageParts[index], !images.isEmpty {
+            for image in images {
+                out.append(contentsOf: emitEvent(
+                    "response.output_image.done",
+                    payload: [
+                        "type": "response.output_image.done",
+                        "item_id": msgID,
+                        "output_index": index,
+                        "content_index": image.index,
+                        "image": image.part,
+                    ]
+                ))
+            }
+            contentParts.append(contentsOf: images)
+        }
+        contentParts.sort { $0.index < $1.index }
         let item: [String: Any] = [
             "id": msgID,
             "type": "message",
-            "content": [["type": "output_text", "annotations": [], "logprobs": [], "text": fullText]],
+            "content": contentParts.map(\.part),
             "role": "assistant",
         ]
         out.append(contentsOf: emitEvent(
@@ -423,14 +539,13 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
                 "arguments": args,
             ]
         ))
-        let item: [String: Any] = [
-            "id": "fc_\(callID)",
-            "type": "function_call",
-            "arguments": args,
-            "call_id": callID,
-            "name": name,
-            "status": "completed",
-        ]
+        let item = toolCallItem(
+            id: "fc_\(callID)",
+            callID: callID,
+            wireName: name,
+            arguments: args,
+            status: "completed"
+        )
         out.append(contentsOf: emitEvent(
             "response.output_item.done",
             payload: [
@@ -443,6 +558,29 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
             completedOutputItems.append((outputIndex, item, seq))
         }
         return out
+    }
+
+    /// function_call item：namespace 子工具还原 leaf 名并补 `namespace` 字段（F2）。
+    private func toolCallItem(
+        id: String,
+        callID: String,
+        wireName: String,
+        arguments: String,
+        status: String
+    ) -> [String: Any] {
+        var item: [String: Any] = [
+            "id": id,
+            "type": "function_call",
+            "arguments": arguments,
+            "call_id": callID,
+            "name": wireName,
+            "status": status,
+        ]
+        if let identity = toolIdentity.identity(forWireName: wireName) {
+            item["name"] = identity.name
+            item["namespace"] = identity.namespace
+        }
+        return item
     }
 
     private func sendCompletedIfNeeded() -> [Data] {

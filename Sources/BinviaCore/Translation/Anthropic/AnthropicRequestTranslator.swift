@@ -9,7 +9,7 @@ import Foundation
 /// - `max_tokens` / `temperature` / `top_p` / `stream` 透传；
 /// - `thinking` 有上游支持时映射 reasoning_effort，否则剥离。
 public enum AnthropicRequestTranslator {
-    public static func translate(body: Data) throws -> ChatRequest {
+    public static func translate(body: Data, serverToolsEnabled: Bool = false) throws -> ChatRequest {
         guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             throw ResponsesTranslationError("invalid JSON")
         }
@@ -39,6 +39,12 @@ public enum AnthropicRequestTranslator {
         let tools = (json["tools"] as? [[String: Any]]) ?? []
         var chatTools: [[String: Any]] = []
         for tool in tools {
+            let toolType = (tool["type"] as? String) ?? ""
+            if ServerToolTypes.isServerTool(toolType) {
+                // F4：高级工具开关开启时保留原始定义透传（Anthropic versioned web search 等）。
+                if serverToolsEnabled { chatTools.append(tool) }
+                continue
+            }
             guard let name = tool["name"] as? String, !name.isEmpty else { continue }
             var function: [String: Any] = ["name": name]
             if let description = tool["description"] as? String, !description.isEmpty {
@@ -54,12 +60,16 @@ public enum AnthropicRequestTranslator {
 
         var chatBody: [String: Any] = [
             "model": model,
-            "messages": messages.map(Self.chatMessageJSON),
+            "messages": messages.map(ChatMessageJSON.make),
         ]
         if let stream = json["stream"] as? Bool { chatBody["stream"] = stream }
         if let maxTokens = json["max_tokens"] as? Int { chatBody["max_tokens"] = maxTokens }
         if let temperature = json["temperature"] as? Double { chatBody["temperature"] = temperature }
         if let topP = json["top_p"] as? Double { chatBody["top_p"] = topP }
+        if let stop = json["stop_sequences"] { chatBody["stop"] = stop }
+        if let choice = json["tool_choice"] {
+            chatBody["tool_choice"] = Self.toolChoiceJSON(choice)
+        }
         if !chatTools.isEmpty { chatBody["tools"] = chatTools }
 
         // Anthropic thinking → OpenAI reasoning_effort（上游不支持时由 Provider 层剥离）。
@@ -85,6 +95,21 @@ public enum AnthropicRequestTranslator {
         return request
     }
 
+    /// Anthropic tool_choice → OpenAI Chat tool_choice：`any` → `required`，
+    /// `{type:"tool", tool:{name}}` → function 形态，其余（auto/none/未知）原样保留。
+    private static func toolChoiceJSON(_ value: Any) -> Any {
+        if let string = value as? String {
+            return string == "any" ? "required" : string
+        }
+        if let obj = value as? [String: Any],
+           obj["type"] as? String == "tool",
+           let name = obj["name"] as? String,
+           !name.isEmpty {
+            return ["type": "function", "function": ["name": name]]
+        }
+        return value
+    }
+
     private static func appendMessage(role: ChatRole, content: Any?, to messages: inout [ChatMessage]) {
         if let string = content as? String {
             messages.append(ChatMessage(role: role, content: .text(string)))
@@ -96,8 +121,10 @@ public enum AnthropicRequestTranslator {
         }
 
         var textParts: [String] = []
+        var imageParts: [ChatContentPart] = []
         var toolCalls: [ToolCall] = []
         var toolResults: [ChatMessage] = []
+        var toolResultImages: [ChatContentPart] = []
         var reasoning: String?
 
         for block in blocks {
@@ -106,10 +133,18 @@ public enum AnthropicRequestTranslator {
                 if let text = block["text"] as? String, !text.isEmpty {
                     textParts.append(text)
                 }
+            case "image":
+                if let source = block["source"] as? [String: Any],
+                   let url = Self.imageURL(from: source) {
+                    imageParts.append(ChatContentPart(type: "image_url", imageURL: url))
+                }
             case "thinking":
                 if let thinking = block["thinking"] as? String {
                     reasoning = (reasoning ?? "") + thinking
                 }
+            case "redacted_thinking":
+                // 保留占位：不丢块，也不把密文当普通文本注入。
+                reasoning = (reasoning ?? "") + "[redacted thinking]"
             case "tool_use":
                 let id = (block["id"] as? String) ?? ""
                 let name = (block["name"] as? String) ?? ""
@@ -127,47 +162,105 @@ public enum AnthropicRequestTranslator {
                 ))
             case "tool_result":
                 let id = (block["tool_use_id"] as? String) ?? ""
-                let result = toolResultText(block["content"])
+                let (result, images) = toolResultText(block["content"])
                 toolResults.append(ChatMessage(
                     role: .tool,
                     content: .text(result),
                     toolCallID: id.isEmpty ? nil : id
                 ))
+                toolResultImages.append(contentsOf: images)
             default:
                 continue
             }
         }
 
-        // tool_result 与 tool_use 分属不同消息：先输出 assistant tool_calls，再输出 tool 消息。
+        let userParts = textParts.map { ChatContentPart(type: "text", text: $0) }
+            + imageParts
+            + toolResultImages
+
+        // tool_result 图片提升为后续 user 消息（OpenAI tool 消息不能带图片），
+        // 文本留在 tool 消息；tool_use 与 tool_result 分属不同消息。
         if !toolCalls.isEmpty {
             let text = textParts.joined(separator: "\n")
             messages.append(ChatMessage(
                 role: .assistant,
                 content: text.isEmpty ? nil : .text(text),
-                toolCalls: toolCalls
+                toolCalls: toolCalls,
+                reasoningContent: reasoning
             ))
             messages.append(contentsOf: toolResults)
+            // 只提升图片到后续 user 消息；assistant 文本已随 tool_calls 输出。
+            let liftedImages = imageParts + toolResultImages
+            if !liftedImages.isEmpty {
+                messages.append(ChatMessage(role: .user, content: .parts(liftedImages)))
+            }
             return
         }
 
         if !toolResults.isEmpty {
             messages.append(contentsOf: toolResults)
-            if !textParts.isEmpty {
+            if userParts.contains(where: { $0.type == "image_url" }) {
+                messages.append(ChatMessage(role: .user, content: .parts(userParts)))
+            } else if !textParts.isEmpty {
                 messages.append(ChatMessage(role: .user, content: .text(textParts.joined(separator: "\n"))))
             }
             return
         }
 
+        if !imageParts.isEmpty {
+            messages.append(ChatMessage(role: role, content: .parts(userParts)))
+            return
+        }
+
         let text = textParts.joined(separator: "\n")
-        let message = ChatMessage(role: role, content: text.isEmpty ? nil : .text(text))
+        let message = ChatMessage(
+            role: role,
+            content: text.isEmpty ? nil : .text(text),
+            reasoningContent: role == .assistant ? reasoning : nil
+        )
         messages.append(message)
     }
 
-    private static func toolResultText(_ content: Any?) -> String {
-        if let string = content as? String { return string }
-        guard let parts = content as? [[String: Any]] else { return "" }
-        let texts = parts.compactMap { $0["text"] as? String }
-        return texts.joined(separator: "\n")
+    /// tool_result content：文本留在 tool 消息；base64/url 图片提升为后续 user 消息。
+    private static func toolResultText(_ content: Any?) -> (String, [ChatContentPart]) {
+        if let string = content as? String { return (string, []) }
+        guard let parts = content as? [[String: Any]] else { return ("", []) }
+        var texts: [String] = []
+        var images: [ChatContentPart] = []
+        for part in parts {
+            switch part["type"] as? String {
+            case "text":
+                if let text = part["text"] as? String, !text.isEmpty {
+                    texts.append(text)
+                }
+            case "image":
+                if let source = part["source"] as? [String: Any],
+                   let url = Self.imageURL(from: source) {
+                    images.append(ChatContentPart(type: "image_url", imageURL: url))
+                }
+            default:
+                continue
+            }
+        }
+        let result = texts.joined(separator: "\n")
+        if result.isEmpty && !images.isEmpty {
+            return ("[tool returned an image; see attached]", images)
+        }
+        return (result, images)
+    }
+
+    /// Anthropic image source → Chat image_url（base64 转 data URL，url 原样）。
+    private static func imageURL(from source: [String: Any]) -> String? {
+        switch source["type"] as? String {
+        case "base64":
+            let mediaType = source["media_type"] as? String ?? "image/png"
+            let data = source["data"] as? String ?? ""
+            return "data:\(mediaType);base64,\(data)"
+        case "url":
+            return source["url"] as? String
+        default:
+            return nil
+        }
     }
 
     private static func systemText(_ system: Any) -> String {
@@ -188,23 +281,4 @@ public enum AnthropicRequestTranslator {
         return string
     }
 
-    private static func chatMessageJSON(_ message: ChatMessage) -> [String: Any] {
-        var json: [String: Any] = ["role": message.role.rawValue]
-        json["content"] = message.content?.textValue ?? ""
-        if let name = message.name { json["name"] = name }
-        if let toolCallID = message.toolCallID { json["tool_call_id"] = toolCallID }
-        if let calls = message.toolCalls {
-            json["tool_calls"] = calls.map { call in
-                var callJSON: [String: Any] = [:]
-                if let id = call.id { callJSON["id"] = id }
-                if let type = call.type { callJSON["type"] = type }
-                callJSON["function"] = [
-                    "name": call.function?.name ?? "",
-                    "arguments": call.function?.arguments ?? "{}",
-                ]
-                return callJSON
-            }
-        }
-        return json
-    }
 }

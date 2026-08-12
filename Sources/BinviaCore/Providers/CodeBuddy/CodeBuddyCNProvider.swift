@@ -149,6 +149,23 @@ public struct CodeBuddyCNProvider: Provider {
         return out
     }
 
+    /// `reasoning_effort` 卫生化（对齐 OmniRoute `CodeBuddyCnExecutor.transformRequest`）。
+    ///
+    /// - `"none"` / `"off"`：CodeBuddy 网关没有该取值，直接删除字段（pi 等客户端对
+    ///   推理模型默认发 `reasoning: {effort:"none"}`，透传会被上游拒绝）。
+    /// - 其余取值：镜像 CodeBuddy CLI 行为补 `reasoning_summary: "auto"`，
+    ///   否则上游可能误判内容审核（同 OmniRoute 踩坑记录）。
+    public static func normalizeReasoning(_ json: [String: Any]) -> [String: Any] {
+        var out = json
+        guard let effort = out["reasoning_effort"] as? String else { return out }
+        if effort == "none" || effort == "off" {
+            out.removeValue(forKey: "reasoning_effort")
+        } else {
+            out["reasoning_summary"] = "auto"
+        }
+        return out
+    }
+
     // MARK: - Provider
 
     public func listModels(credential: ProviderCredential?) async throws -> [Model] {
@@ -175,6 +192,8 @@ public struct CodeBuddyCNProvider: Provider {
             }
             // developer→system 角色改写（CodeBuddy 对 developer 角色误判内容审核）
             json = Self.sanitizeBody(json)
+            // reasoning_effort 卫生化（none/off 删除；其余补 reasoning_summary）
+            json = Self.normalizeReasoning(json)
             json["stream"] = true
             json["model"] = request.model
             bodyData = try JSONSerialization.data(withJSONObject: json)

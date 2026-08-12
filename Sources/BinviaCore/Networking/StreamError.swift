@@ -48,9 +48,26 @@ public enum StreamConfig {
     /// 空闲看门狗检查周期（秒）。
     public static let watchdogInterval: TimeInterval = 10
 
+    /// 流式响应提前提交阈值：上游首包超过该时长未到时，先回 200 SSE 并开始心跳
+    /// （Codex 等客户端有 ~5s 首字节看门狗）。
+    public static var heartbeatThreshold: TimeInterval {
+        envMS("BINVIA_STREAM_HEARTBEAT_THRESHOLD_MS", default: 2000)
+    }
+
+    /// 心跳帧间隔（必须小于客户端空闲看门狗时长）。
+    public static var heartbeatInterval: TimeInterval {
+        envMS("BINVIA_STREAM_HEARTBEAT_INTERVAL_MS", default: 2000)
+    }
+
     private static func env(_ name: String, default defaultValue: TimeInterval) -> TimeInterval {
         guard let raw = ProcessInfo.processInfo.environment[name],
               let value = TimeInterval(raw), value > 0 else { return defaultValue }
         return value
+    }
+
+    private static func envMS(_ name: String, default defaultValueMS: Double) -> TimeInterval {
+        guard let raw = ProcessInfo.processInfo.environment[name],
+              let ms = TimeInterval(raw), ms >= 0 else { return defaultValueMS / 1000 }
+        return ms / 1000
     }
 }

@@ -57,9 +57,19 @@ public struct XiaomiMimoProvider: Provider {
                 throw ProviderError.invalidResponse("invalid request body")
             }
             json["model"] = request.model
+            // 对齐 OmniRoute roleNormalizer：非 OpenAI 系上游不认 developer 角色，
+            // Responses 客户端（pi/Codex）透传时归一化为 system（与 MiniMax 一致）。
+            json = RoleNormalizer.normalizeDeveloperRole(json, providerID: id)
             return try JSONSerialization.data(withJSONObject: json)
         }
-        return try JSONEncoder().encode(request)
+        var req = request
+        req.messages = req.messages.map { message in
+            guard message.role == .developer else { return message }
+            var m = message
+            m.role = .system
+            return m
+        }
+        return try JSONEncoder().encode(req)
     }
 
     public func chat(

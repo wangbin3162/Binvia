@@ -1735,6 +1735,37 @@ func runOpenAICompatSuite(
     expectTrue(text.contains(#""content":"Hi""#), "\(providerID) SSE 透传包含 Hi，实际: \(text)")
     expectTrue(text.contains("[DONE]"), "\(providerID) SSE 透传含 [DONE]")
 
+    // 3) developer 角色归一化：Responses 客户端透传 rawBody 中的 developer → system
+    //    （上游不认 developer 会 400 "unknown variant `developer`"，实测 opencode-go 下游）
+    URLProtocolMock.reset()
+    var capturedBody: String = ""
+    URLProtocolMock.requestHandler = { request in
+        if request.httpMethod == "GET" {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[]}"#.utf8))
+        }
+        capturedBody = String(data: readRequestBody(request) ?? Data(), encoding: .utf8) ?? ""
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data(sse.utf8))
+    }
+    let devRaw = Data(#"""
+    {"model":"\#(chatModel)","messages":[{"role":"developer","content":"be helpful"},{"role":"user","content":"hi"}],"stream":true}
+    """#.utf8)
+    let devStream = try await makeProvider().chat(
+        request: ChatRequest(model: chatModel, messages: [], stream: true),
+        rawBody: devRaw,
+        credential: nil
+    )
+    for try await _ in devStream {}
+    expectTrue(capturedBody.contains(#""role":"system""#), "\(providerID) rawBody 路径 developer→system，实际: \(capturedBody)")
+    expectFalse(capturedBody.contains("developer"), "\(providerID) rawBody 路径不应残留 developer 角色，实际: \(capturedBody)")
+
     await ModelCache.shared.invalidate(providerID)
 }
 
@@ -3727,18 +3758,36 @@ func codeBuddySanitizeBodyTests() {
     let normalized = CodeBuddyCNProvider.normalizeRoles([dev, usr])
     expectEqual(normalized[0].role, .system, "ChatRequest 路径 developer→system")
     expectEqual(normalized[1].role, .user, "ChatRequest 路径 user 不动")
+
+    // reasoning_effort 卫生化（对齐 OmniRoute CodeBuddyCnExecutor）：
+    // "none"/"off" 网关无此取值需删除；其余取值补 reasoning_summary="auto"。
+    let noneOut = CodeBuddyCNProvider.normalizeReasoning(["reasoning_effort": "none"])
+    expectNil(noneOut["reasoning_effort"], "reasoning_effort=none 删除字段")
+    expectNil(noneOut["reasoning_summary"], "reasoning_effort=none 不补 reasoning_summary")
+    let offOut = CodeBuddyCNProvider.normalizeReasoning(["reasoning_effort": "off"])
+    expectNil(offOut["reasoning_effort"], "reasoning_effort=off 删除字段")
+
+    let mediumOut = CodeBuddyCNProvider.normalizeReasoning(["reasoning_effort": "medium", "stream": true])
+    expectEqual(mediumOut["reasoning_effort"] as? String, "medium", "reasoning_effort=medium 保留")
+    expectEqual(mediumOut["reasoning_summary"] as? String, "auto", "reasoning_effort=medium 补 reasoning_summary=auto")
+    expectEqual(mediumOut["stream"] as? Bool, true, "其余字段保留")
+
+    let plainOut = CodeBuddyCNProvider.normalizeReasoning(["stream": true])
+    expectNil(plainOut["reasoning_summary"], "无 reasoning_effort 不补 reasoning_summary")
+    expectEqual(plainOut["stream"] as? Bool, true, "无 reasoning_effort 其余字段保留")
 }
 
 // MARK: - Responses 格式翻译与端点
 
-/// 非流式 Responses 请求 → ChatRequest 翻译。
+/// 非流式 Responses 请求 → ChatRequest 翻译（F1/F4/G1）。
 func responsesRequestTranslatorTests() throws {
     // 1) input 字符串 + instructions + 工具
     let body = Data(#"""
     {"model":"cbcn/glm-5.2","instructions":"be concise","input":"hi","stream":false,
      "max_output_tokens":128,"temperature":0.4,"tools":[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object"}}}]}
     """#.utf8)
-    let request = try ResponsesRequestTranslator.translate(body: body)
+    let result = try ResponsesRequestTranslator.translate(body: body)
+    let request = result.request
     expectEqual(request.model, "cbcn/glm-5.2", "model 保留")
     expectEqual(request.stream, false, "stream 透传")
     expectEqual(request.maxTokens, 128, "max_output_tokens → max_tokens")
@@ -3757,25 +3806,62 @@ func responsesRequestTranslatorTests() throws {
       {"type":"function","name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}
     ]}
     """#.utf8)
-    let nativeRequest = try ResponsesRequestTranslator.translate(body: nativeToolBody)
+    let nativeRequest = try ResponsesRequestTranslator.translate(body: nativeToolBody).request
     let nativeRaw = String(data: nativeRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
     expectTrue(nativeRaw.contains("\"get_weather\""), "原生工具名进入 Chat body")
     expectTrue(nativeRaw.contains("\"parameters\""), "原生工具 parameters 进入 Chat body")
 
-    // 1c) namespace 工具组拍平成 namespace.name
+    // 1c) namespace 工具组拍平成 ns__leaf（F1），并产出身份映射（F2）
     let namespaceBody = Data(#"""
     {"model":"m","input":"hi","tools":[
-      {"type":"namespace","namespace":"mcp__fs","tools":[
+      {"type":"namespace","name":"mcp__fs","tools":[
         {"type":"function","name":"read","description":"read","parameters":{"type":"object"}}
       ]},
       {"type":"custom","name":"apply_patch","input":"x"},
       {"type":"tool_search","filters":[]}
     ]}
     """#.utf8)
-    let namespaceRequest = try ResponsesRequestTranslator.translate(body: namespaceBody)
+    let namespaceResult = try ResponsesRequestTranslator.translate(body: namespaceBody)
+    let namespaceRequest = namespaceResult.request
     let namespaceRaw = String(data: namespaceRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
-    expectTrue(namespaceRaw.contains("\"mcp__fs.read\""), "namespace 子工具拍平成前缀名")
+    expectTrue(namespaceRaw.contains("\"mcp__fs__read\""), "namespace 子工具拍平成 ns__leaf")
     expectFalse(namespaceRaw.contains("apply_patch"), "custom 元数据工具跳过")
+    expectEqual(namespaceResult.toolIdentity.identity(forWireName: "mcp__fs__read")?.namespace, "mcp__fs",
+                "身份映射 namespace")
+    expectEqual(namespaceResult.toolIdentity.identity(forWireName: "mcp__fs__read")?.name, "read",
+                "身份映射 leaf name")
+
+    // 1d) additional_tools 输入项合并 + 显式顶层声明优先 + 同名 namespace 合并
+    let additionalBody = Data(#"""
+    {"model":"m","input":[
+      {"type":"message","role":"user","content":"hi"},
+      {"type":"additional_tools","tools":[
+        {"type":"namespace","name":"mcp__codex","tools":[{"type":"function","name":"apply_patch","description":"from ns"}]}
+      ]}
+    ],
+     "tools":[
+      {"type":"function","name":"apply_patch","description":"explicit"},
+      {"type":"namespace","name":"mcp__codex","tools":[
+        {"type":"function","name":"apply_patch","description":"ns duplicate"},
+        {"type":"function","name":"read","description":"read"}
+      ]}
+     ]}
+    """#.utf8)
+    let additionalResult = try ResponsesRequestTranslator.translate(body: additionalBody)
+    let additionalRaw = String(data: additionalResult.request.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(additionalRaw.contains("\"explicit\""), "显式顶层 apply_patch 优先于 namespace 同名子工具")
+    expectTrue(additionalRaw.contains("\"mcp__codex__read\""), "additional_tools 的 namespace 子工具被收集")
+    let count = additionalRaw.components(separatedBy: "\"name\":\"apply_patch\"").count - 1
+    expectEqual(count, 1, "apply_patch 只出现一次（顶层优先，namespace 重复剔除）")
+
+    // 1e) 64 字符截断：确定性 hash，跨 namespace 同名 leaf 不冲突
+    let longNS = String(repeating: "n", count: 60)
+    let leafA = "search"
+    let wireA = ResponsesToolCollector.flattenNamespaceToolName(namespace: longNS, leaf: leafA)
+    let wireB = ResponsesToolCollector.flattenNamespaceToolName(namespace: String(repeating: "m", count: 60), leaf: leafA)
+    expectTrue(wireA.count <= 64, "拍平名不超过 64 字符")
+    expectTrue(wireA != wireB, "不同 namespace 同名 leaf 拍平后不冲突")
+    expectTrue(wireA.hasSuffix("search") == false, "超长名用 hash 截断")
 
     // 2) input 数组：message / function_call / function_call_output，reasoning 跳过
     let toolBody = Data(#"""
@@ -3787,7 +3873,7 @@ func responsesRequestTranslatorTests() throws {
       {"type":"reasoning","summary":[{"type":"summary_text","text":"hidden"}]}
     ]}
     """#.utf8)
-    let toolRequest = try ResponsesRequestTranslator.translate(body: toolBody)
+    let toolRequest = try ResponsesRequestTranslator.translate(body: toolBody).request
     expectEqual(toolRequest.messages.count, 4, "input 数组翻译为 user/assistant(tool_calls)/tool/user")
     expectEqual(toolRequest.messages[0].role, .user, "首条消息 user")
     expectEqual(toolRequest.messages[1].role, .assistant, "function_call 归入 assistant")
@@ -3800,15 +3886,21 @@ func responsesRequestTranslatorTests() throws {
 
     // 3) reasoning effort 映射
     let reasoningBody = Data(#"{"model":"m","input":"hi","reasoning":{"effort":"high"}}"#.utf8)
-    let reasoningRequest = try ResponsesRequestTranslator.translate(body: reasoningBody)
+    let reasoningRequest = try ResponsesRequestTranslator.translate(body: reasoningBody).request
     expectTrue(String(data: reasoningRequest.rawBody ?? Data(), encoding: .utf8)?.contains("\"reasoning_effort\":\"high\"") == true,
                "reasoning.effort → reasoning_effort")
 
-    // 4) 高级工具（web_search 等）第一版跳过，不阻断 Codex 主对话
+    // 4) 高级工具默认跳过（F4），开启后原样透传
     let webSearch = Data(#"{"model":"m","input":"hi","tools":[{"type":"web_search"}]}"#.utf8)
-    let webSearchRequest = try ResponsesRequestTranslator.translate(body: webSearch)
+    let webSearchRequest = try ResponsesRequestTranslator.translate(body: webSearch).request
     let webSearchRaw = String(data: webSearchRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
-    expectFalse(webSearchRaw.contains("web_search"), "web_search 工具跳过，不进入 Chat body")
+    expectFalse(webSearchRaw.contains("web_search"), "默认关闭时 web_search 跳过")
+
+    let serverToolsBody = Data(#"{"model":"m","input":"hi","tools":[{"type":"web_search"},{"type":"file_search","name":"fs"}]}"#.utf8)
+    let serverToolsRequest = try ResponsesRequestTranslator.translate(body: serverToolsBody, serverToolsEnabled: true).request
+    let serverToolsRaw = String(data: serverToolsRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(serverToolsRaw.contains("web_search"), "BINVIA_SERVER_TOOLS 开启时 web_search 保留")
+    expectTrue(serverToolsRaw.contains("file_search"), "BINVIA_SERVER_TOOLS 开启时 file_search 保留")
 
     // 5) 真正未知的工具类型仍明确 400
     let unknownTool = Data(#"{"model":"m","input":"hi","tools":[{"type":"mystery_tool"}]}"#.utf8)
@@ -3820,6 +3912,36 @@ func responsesRequestTranslatorTests() throws {
         let message = (error as? ResponsesTranslationError)?.message ?? "\(error)"
         expectTrue(message.contains("unsupported"), "mystery_tool 错误信息包含 unsupported")
     }
+
+    // 6) 多模态入站：input_image / input_file → Chat parts（G1）
+    let multimodalBody = Data(#"""
+    {"model":"m","input":[
+      {"type":"message","role":"user","content":[
+        {"type":"input_text","text":"what is this"},
+        {"type":"input_image","image_url":"data:image/png;base64,AAA","detail":"high"},
+        {"type":"input_file","file_data":"data:application/pdf;base64,BBB","filename":"a.pdf"}
+      ]}
+    ]}
+    """#.utf8)
+    let multimodalRequest = try ResponsesRequestTranslator.translate(body: multimodalBody).request
+    let multimodalRaw = String(data: multimodalRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(multimodalRaw.contains("\"image_url\""), "input_image 转 Chat image_url part")
+    expectTrue(multimodalRaw.contains("\"file_data\""), "input_file 转 Chat file part")
+    expectTrue(multimodalRaw.contains("base64,BBB"), "file_data 保留")
+
+    // 7) function_call_output 含图片 part：占位而非把 base64 当文本嵌入
+    let imageOutputBody = Data(#"""
+    {"model":"m","input":[
+      {"type":"function_call","call_id":"call_img","name":"capture","arguments":"{}"},
+      {"type":"function_call_output","call_id":"call_img","output":[
+        {"type":"input_image","image_url":"data:image/png;base64,ZZZ"}
+      ]}
+    ]}
+    """#.utf8)
+    let imageOutputRequest = try ResponsesRequestTranslator.translate(body: imageOutputBody).request
+    let imageOutputRaw = String(data: imageOutputRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(imageOutputRaw.contains("Image omitted"), "tool 消息图片替换为占位")
+    expectFalse(imageOutputRaw.contains("base64,ZZZ"), "tool 消息不嵌入 base64")
 }
 
 /// Chat JSON → Responses JSON 翻译。
@@ -3851,6 +3973,42 @@ func responsesResponseTranslatorTests() throws {
     expectEqual(usage?["input_tokens"] as? Int, 10, "prompt_tokens → input_tokens")
     expectEqual(usage?["output_tokens"] as? Int, 5, "completion_tokens → output_tokens")
 
+    // F2：namespace wire name 还原为 leaf 并补 namespace 字段
+    let namespaceChat = Data(#"""
+    {"model":"m","choices":[{"message":{"role":"assistant","tool_calls":[
+      {"id":"call_ns","type":"function","function":{"name":"mcp__fs__read","arguments":"{}"}}
+    ]},"finish_reason":"tool_calls"}]}
+    """#.utf8)
+    let nsIdentity = ResponsesToolIdentityMap([
+        "mcp__fs__read": ResponsesToolIdentity(namespace: "mcp__fs", name: "read"),
+    ])
+    let nsJSON = try JSONSerialization.jsonObject(
+        with: try ResponsesResponseTranslator.translate(
+            chatJSON: namespaceChat,
+            responseID: "resp_ns",
+            toolIdentity: nsIdentity
+        )
+    ) as? [String: Any]
+    let nsOutput = nsJSON?["output"] as? [[String: Any]] ?? []
+    expectEqual(nsOutput.first?["name"] as? String, "read", "namespace 工具名还原为 leaf")
+    expectEqual(nsOutput.first?["namespace"] as? String, "mcp__fs", "namespace 字段回传")
+
+    // G3：Chat 多模态 content → Responses output_image
+    let imageChat = Data(#"""
+    {"model":"m","choices":[{"message":{"role":"assistant","content":[
+      {"type":"text","text":"see:"},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}
+    ]},"finish_reason":"stop"}]}
+    """#.utf8)
+    let imageJSON = try JSONSerialization.jsonObject(
+        with: try ResponsesResponseTranslator.translate(chatJSON: imageChat, responseID: "resp_img")
+    ) as? [String: Any]
+    let imageOutput = imageJSON?["output"] as? [[String: Any]] ?? []
+    let imageParts = (imageOutput.first?["content"] as? [[String: Any]]) ?? []
+    expectEqual(imageParts.count, 2, "text + image 两个 content part")
+    expectEqual(imageParts[1]["type"] as? String, "output_image", "image_url → output_image")
+    expectEqual((imageParts[1]["image_url"] as? String)?.isEmpty, false, "output_image 带 image_url")
+
     // content_filter → incomplete
     let filtered = Data(#"{"model":"m","choices":[{"message":{"role":"assistant","content":"x"},"finish_reason":"content_filter"}]}"#.utf8)
     let filteredJSON = try JSONSerialization.jsonObject(
@@ -3859,15 +4017,40 @@ func responsesResponseTranslatorTests() throws {
     expectEqual(filteredJSON?["status"] as? String, "incomplete", "content_filter → incomplete")
 }
 
-/// 内存会话表与 previous_response_id。
-func responsesSessionStoreTests() {
-    ResponsesSessionStore.shared.reset()
-    expectNil(ResponsesSessionStore.shared.history(for: "resp_missing"), "未知 id 返回 nil")
+/// 持久化会话表与 previous_response_id（H）。
+func responsesSessionStoreTests() throws {
+    let fileURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("binvia-check-sessions-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: fileURL) }
+    let store = ResponsesSessionStore(fileURL: fileURL)
+
+    expectNil(store.history(for: "resp_missing"), "未知 id 返回 nil")
     let messages = [ChatMessage(role: .user, content: .text("hi"))]
-    ResponsesSessionStore.shared.store(responseID: "resp_a", messages: messages)
-    expectEqual(ResponsesSessionStore.shared.history(for: "resp_a")?.count, 1, "会话表可读")
-    ResponsesSessionStore.shared.reset()
-    expectNil(ResponsesSessionStore.shared.history(for: "resp_a"), "reset 清空会话表")
+    store.store(responseID: "resp_a", messages: messages)
+    expectEqual(store.history(for: "resp_a")?.count, 1, "会话表可读")
+
+    // 重启进程等价场景：新 store 实例读同一文件仍可续接
+    let reloaded = ResponsesSessionStore(fileURL: fileURL)
+    expectEqual(reloaded.history(for: "resp_a")?.count, 1, "持久化文件重启后仍可读")
+
+    // TTL 过期清理
+    let expiredURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("binvia-check-sessions-expired-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: expiredURL) }
+    let expiredStore = ResponsesSessionStore(fileURL: expiredURL)
+    expiredStore.store(responseID: "resp_old", messages: messages)
+    let now = Date()
+    let expiredEntry: [String: Any] = [
+        "messages": [["role": "user", "content": "hi"]],
+        "createdAt": now.addingTimeInterval(-ResponsesSessionStore.ttl - 60).timeIntervalSinceReferenceDate,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: ["resp_old": expiredEntry])
+    try data.write(to: expiredURL, options: .atomic)
+    let reloadedExpired = ResponsesSessionStore(fileURL: expiredURL)
+    expectNil(reloadedExpired.history(for: "resp_old"), "TTL 过期条目不可读")
+
+    store.reset()
+    expectNil(store.history(for: "resp_a"), "reset 清空会话表")
 }
 
 /// 供 /v1/responses 集成测试使用的固定响应 Provider。
@@ -3974,17 +4157,35 @@ func responsesRouteHandlerTests() async throws {
         print("FAIL: /v1/responses 响应 JSON 解析失败")
     }
 
-    // 2) previous_response_id 续接：第一次结果进会话表，第二次翻译含历史
+    // 2) previous_response_id 续接：真实 id 成功，未知 id 400
     ResponsesSessionStore.shared.reset()
-    _ = try await handler.handle(responsesRequest("\"instructions\":\"be nice\""))
-    let secondBody = Data(#"{"model":"\#(providerID)/m","input":"again","previous_response_id":"resp_first"}"#.utf8)
+    let firstResponse = try await handler.handle(responsesRequest("\"instructions\":\"be nice\""))
+    var firstResponseID = ""
+    if case .data(let data) = firstResponse.body,
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        firstResponseID = json["id"] as? String ?? ""
+    }
+    expectFalse(firstResponseID.isEmpty, "响应携带 response id")
+
+    let secondBody = Data(#"{"model":"\#(providerID)/m","input":"again","previous_response_id":"\#(firstResponseID)"}"#.utf8)
     let secondRequest = HTTPRequest(
         method: "POST", path: "/v1/responses", queryItems: [:],
         headers: ["authorization": "Bearer test-key"],
         body: secondBody
     )
     let secondResponse = try await handler.handle(secondRequest)
-    expectEqual(secondResponse.status, 200, "unknown previous_response_id 返回 200（第一版不强制）")
+    expectEqual(secondResponse.status, 200, "已知 previous_response_id 续接成功")
+
+    let unknownBody = Data(#"{"model":"\#(providerID)/m","input":"again","previous_response_id":"resp_unknown"}"#.utf8)
+    let unknownResponse = try await handler.handle(HTTPRequest(
+        method: "POST", path: "/v1/responses", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: unknownBody
+    ))
+    expectEqual(unknownResponse.status, 400, "未知 previous_response_id 返回 400")
+    let unknownBodyText = String(data: unknownResponse.bodyData() ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(unknownBodyText.contains("unknown previous_response_id"),
+               "未知 previous_response_id 错误信息明确")
 
     // 3) 流式请求：返回 Responses SSE 事件序列
     let streamResponse = try await handler.handle(responsesRequest("", stream: true))
@@ -4053,11 +4254,125 @@ func responsesRouteHandlerTests() async throws {
         print("FAIL: SSE 流式响应应为 .stream")
     }
 
+    // 6) CORS 预检
+    let preflight = try await handler.handle(HTTPRequest(
+        method: "OPTIONS", path: "/v1/responses", queryItems: [:],
+        headers: ["origin": "http://localhost", "access-control-request-method": "POST"],
+        body: nil
+    ))
+    expectEqual(preflight.status, 204, "OPTIONS 预检 204")
+    expectEqual(preflight.headers["Access-Control-Allow-Origin"], "*", "CORS Allow-Origin")
+    expectEqual(preflight.headers["Access-Control-Allow-Methods"], "GET, POST, OPTIONS", "CORS Allow-Methods")
+
     // 4) 端点开关关闭 → 404
     setenv("BINVIA_ENABLE_RESPONSES", "0", 1)
     let disabled = try await handler.handle(responsesRequest(""))
     expectEqual(disabled.status, 404, "BINVIA_ENABLE_RESPONSES=0 时 /v1/responses 404")
     unsetenv("BINVIA_ENABLE_RESPONSES")
+}
+
+/// 延迟首包的上游（心跳慢路径测试用）。
+private struct DelayedMockProvider: Provider {
+    let id: String
+    let json: String
+    let delayMS: UInt64
+
+    func listModels(credential: ProviderCredential?) async throws -> [Model] { [Model(id: "m")] }
+
+    func chat(
+        request: ChatRequest,
+        rawBody: Data?,
+        credential: ProviderCredential?
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                try? await Task.sleep(for: .milliseconds(delayMS))
+                continuation.yield(Data(json.utf8))
+                continuation.finish()
+            }
+        }
+    }
+}
+
+/// J：慢首包时提前提交 200 SSE 并心跳（Responses created/in_progress、Anthropic ping）。
+func heartbeatRouteHandlerTests() async throws {
+    setenv("BINVIA_STREAM_HEARTBEAT_THRESHOLD_MS", "50", 1)
+    setenv("BINVIA_STREAM_HEARTBEAT_INTERVAL_MS", "500", 1)
+    defer {
+        unsetenv("BINVIA_STREAM_HEARTBEAT_THRESHOLD_MS")
+        unsetenv("BINVIA_STREAM_HEARTBEAT_INTERVAL_MS")
+    }
+
+    let providerID = "heartbeat-mock"
+    ProviderRegistry.shared.unregister(providerID)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: providerID, displayName: "Heartbeat Mock", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [Model(id: "m")],
+        makeProvider: {
+            DelayedMockProvider(
+                id: providerID,
+                json: #"{"id":"chatcmpl-h","model":"m","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+                delayMS: 300
+            )
+        }
+    ))
+    defer { ProviderRegistry.shared.unregister(providerID) }
+
+    let handler = RouteHandler(config: RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            providerID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "k"),
+                userModels: [ProviderModelEntry(modelName: "m")]
+            )
+        ]
+    ))
+
+    // Responses 慢路径：心跳 created/in_progress 先于 completed，且不重复 created
+    let resp = try await handler.handle(HTTPRequest(
+        method: "POST", path: "/v1/responses", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: Data(#"{"model":"\#(providerID)/m","input":"hi","stream":true}"#.utf8)
+    ))
+    expectEqual(resp.status, 200, "心跳慢路径仍 200 SSE")
+    if case .stream(let stream) = resp.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let created = text.range(of: "event: response.created")?.lowerBound
+        let inProgress = text.range(of: "event: response.in_progress")?.lowerBound
+        let completed = text.range(of: "response.completed")?.lowerBound
+        expectTrue(created != nil && inProgress != nil && completed != nil
+                       && created! < inProgress! && inProgress! < completed!,
+                   "心跳 created → in_progress → completed 顺序")
+        expectEqual(text.components(separatedBy: "event: response.created").count - 1, 1,
+                    "心跳承担 start，翻译器不重复 created")
+        expectTrue(text.contains("output_text.delta"), "心跳后正常输出文本")
+    } else {
+        failed += 1
+        print("FAIL: 心跳慢路径应为 .stream")
+    }
+
+    // Anthropic 慢路径：ping 在 message_start 之前
+    let msg = try await handler.handle(HTTPRequest(
+        method: "POST", path: "/v1/messages", queryItems: [:],
+        headers: ["authorization": "Bearer test-key", "anthropic-version": "2023-06-01"],
+        body: Data(#"{"model":"\#(providerID)/m","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#.utf8)
+    ))
+    expectEqual(msg.status, 200, "Anthropic 心跳慢路径仍 200 SSE")
+    if case .stream(let stream) = msg.body {
+        let data = try await collectStreamData(stream, within: 5)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let ping = text.range(of: "event: ping")?.lowerBound
+        let start = text.range(of: "message_start")?.lowerBound
+        expectTrue(ping != nil && start != nil && ping! < start!, "ping 心跳在 message_start 之前")
+        expectTrue(text.contains("text_delta"), "ping 后正常输出文本")
+    } else {
+        failed += 1
+        print("FAIL: Anthropic 心跳慢路径应为 .stream")
+    }
 }
 
 func inboundFormatDetectorTests() {
@@ -4116,6 +4431,73 @@ func anthropicRequestTranslatorTests() throws {
     let thinkingRequest = try AnthropicRequestTranslator.translate(body: thinkingBody)
     expectTrue(String(data: thinkingRequest.rawBody ?? Data(), encoding: .utf8)?.contains("\"reasoning_effort\":\"medium\"") == true,
                "thinking budget → medium")
+
+    // 4) stop_sequences / tool_choice 映射（I）
+    let choiceBody = Data(#"""
+    {"model":"m","messages":[{"role":"user","content":"hi"}],
+     "stop_sequences":["END"],"tool_choice":{"type":"tool","name":"get_weather"}}
+    """#.utf8)
+    let choiceRequest = try AnthropicRequestTranslator.translate(body: choiceBody)
+    let choiceRaw = String(data: choiceRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(choiceRaw.contains("\"stop\":[\"END\"]"), "stop_sequences → Chat stop")
+    expectTrue(choiceRaw.contains("\"tool_choice\""), "tool_choice 进入 Chat body")
+    expectTrue(choiceRaw.contains("\"type\":\"function\""), "Anthropic tool choice → Chat function 形态")
+    expectTrue(choiceRaw.contains("\"name\":\"get_weather\""), "tool_choice 指定工具名")
+
+    let anyChoiceBody = Data(#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"any"}"#.utf8)
+    let anyChoiceRequest = try AnthropicRequestTranslator.translate(body: anyChoiceBody)
+    expectTrue(String(data: anyChoiceRequest.rawBody ?? Data(), encoding: .utf8)?.contains("\"tool_choice\":\"required\"") == true,
+               "Anthropic any → Chat required")
+
+    // 5) 多模态入站：image 块 + tool_result 图片提升（G2）
+    let imageBody = Data(#"""
+    {"model":"m","messages":[
+      {"role":"user","content":[
+        {"type":"text","text":"look"},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}
+      ]},
+      {"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"capture","input":{}}]},
+      {"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_2","content":[
+          {"type":"text","text":"done"},
+          {"type":"image","source":{"type":"url","url":"https://example.com/shot.png"}}
+        ]}
+      ]}
+    ]}
+    """#.utf8)
+    let imageRequest = try AnthropicRequestTranslator.translate(body: imageBody)
+    expectEqual(imageRequest.messages.count, 4, "user(image) + assistant(tool) + tool + user(image)")
+    let imageRaw = String(data: imageRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(imageRaw.contains("base64,AAA"), "image base64 → data URL image_url")
+    expectTrue(imageRaw.contains("shot.png"), "tool_result url 图片提升为 user 消息")
+    expectTrue(imageRaw.contains("\"type\":\"image_url\""), "图片以 image_url part 输出")
+
+    // 6) redacted_thinking 占位不丢（I）
+    let redactedBody = Data(#"""
+    {"model":"m","messages":[
+      {"role":"user","content":"hi"},
+      {"role":"assistant","content":[
+        {"type":"redacted_thinking","data":"secret"},
+        {"type":"text","text":"answer"}
+      ]}
+    ]}
+    """#.utf8)
+    let redactedRequest = try AnthropicRequestTranslator.translate(body: redactedBody)
+    let redactedRaw = String(data: redactedRequest.rawBody ?? Data(), encoding: .utf8) ?? ""
+    expectTrue(redactedRaw.contains("answer"), "redacted_thinking 消息文本保留")
+    expectTrue(redactedRaw.contains("redacted thinking"), "redacted_thinking 占位保留到 reasoning_content")
+
+    // 7) versioned web_search 默认跳过，开关开启后原样透传（F4）
+    let webSearchBody = Data(#"""
+    {"model":"m","messages":[{"role":"user","content":"hi"}],
+     "tools":[{"type":"web_search_20250305","name":"web_search"}]}
+    """#.utf8)
+    let webSearchOff = try AnthropicRequestTranslator.translate(body: webSearchBody)
+    expectFalse(String(data: webSearchOff.rawBody ?? Data(), encoding: .utf8)?.contains("web_search") == true,
+                "Anthropic versioned web_search 默认跳过")
+    let webSearchOn = try AnthropicRequestTranslator.translate(body: webSearchBody, serverToolsEnabled: true)
+    expectTrue(String(data: webSearchOn.rawBody ?? Data(), encoding: .utf8)?.contains("web_search_20250305") == true,
+               "Anthropic versioned web_search 开关开启后透传")
 }
 
 func anthropicResponseTranslatorTests() throws {
@@ -4140,6 +4522,118 @@ func anthropicResponseTranslatorTests() throws {
     let usage = json?["usage"] as? [String: Any]
     expectEqual(usage?["input_tokens"] as? Int, 10, "prompt_tokens → input_tokens")
     expectEqual(usage?["output_tokens"] as? Int, 5, "completion_tokens → output_tokens")
+
+    // G3：Chat 多模态 content → Anthropic image block
+    let imageChat = Data(#"""
+    {"model":"m","choices":[{"message":{"role":"assistant","content":[
+      {"type":"text","text":"see:"},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}
+    ]},"finish_reason":"stop"}],
+     "usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0,"cache_creation":7},"prompt_cache_miss_tokens":7}}
+    """#.utf8)
+    let imageData = try AnthropicResponseTranslator.translate(chatJSON: imageChat, messageID: "msg_img")
+    let imageJSON = try JSONSerialization.jsonObject(with: imageData) as? [String: Any]
+    let imageContent = imageJSON?["content"] as? [[String: Any]] ?? []
+    expectEqual(imageContent.count, 2, "text + image 两个 block")
+    expectEqual(imageContent[1]["type"] as? String, "image", "image_url → image block")
+    let source = (imageContent[1]["source"] as? [String: Any])
+    expectEqual(source?["type"] as? String, "base64", "data URL 拆成 base64 source")
+    let imageUsage = imageJSON?["usage"] as? [String: Any]
+    expectEqual(imageUsage?["cache_creation_input_tokens"] as? Int, 7, "cache_creation_input_tokens 映射")
+}
+
+/// F3：工具参数增量去重（共享逻辑）。
+func toolCallArgumentDeltaTests() {
+    expectEqual(ToolCallArgumentDelta.append(existing: nil, incoming: #"{"a""#), #"{"a""#, "首个片段原样")
+    expectEqual(ToolCallArgumentDelta.append(existing: #"{"a""#, incoming: ":1}"), #"{"a":1}"#, "增量碎片拼接")
+    expectEqual(ToolCallArgumentDelta.append(existing: #"{"a":1}"#, incoming: #"{"a":1}"#), #"{"a":1}"#, "完整快照重复不追加")
+    expectEqual(ToolCallArgumentDelta.append(existing: #"{"a""#, incoming: #"{"a":1}"#), #"{"a":1}"#, "增长快照整体替换")
+    expectEqual(ToolCallArgumentDelta.append(existing: "ls -ll", incoming: "l"), "ls -lll", "合法重复字符保留")
+    expectEqual(
+        ToolCallArgumentDelta.append(existing: #"{"a":1}"#, incoming: ["b": 2] as [String: Any]),
+        #"{"a":1}{"b":2}"#,
+        "对象序列化后追加"
+    )
+}
+
+/// Responses 流式翻译：参数去重 / namespace 身份 / 图片事件（F2/F3/G3）。
+func responsesStreamTranslatorTests() throws {
+    // 1) 增量碎片 → 完整快照 → 重复快照，最终参数不重复
+    let translator = ResponsesStreamTranslator(responseID: "resp_d")
+    let chunk1 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\""}}]},"finish_reason":null}]}"#).utf8)
+    let chunk2 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}"#).utf8)
+    let chunk3 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}"#).utf8)
+    let chunk4 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    _ = translator.process(chunk1)
+    _ = translator.process(chunk2)
+    _ = translator.process(chunk3)
+    _ = translator.process(chunk4)
+    _ = translator.finish()
+    expectEqual(translator.toolCalls.first?.function?.arguments, #"{"a":1}"#, "快照替换后参数不重复")
+
+    // 2) namespace wire name 还原 + 补 namespace 字段
+    let nsTranslator = ResponsesStreamTranslator(
+        responseID: "resp_ns",
+        toolIdentity: ResponsesToolIdentityMap([
+            "mcp__fs__read": ResponsesToolIdentity(namespace: "mcp__fs", name: "read"),
+        ])
+    )
+    let nsChunk = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"mcp__fs__read","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let nsEvents = nsTranslator.process(nsChunk) + nsTranslator.finish()
+    let nsText = nsEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectTrue(nsText.contains("\"name\":\"read\""), "流式 function_call 名称还原 leaf")
+    expectTrue(nsText.contains("\"namespace\":\"mcp__fs\""), "流式 function_call 补 namespace")
+
+    // 3) 流式图片 content part → output_image 事件
+    let imgTranslator = ResponsesStreamTranslator(responseID: "resp_img")
+    let imgChunk = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"see"},{"type":"image_url","image_url":"data:image/png;base64,AAA"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let imgEvents = imgTranslator.process(imgChunk) + imgTranslator.finish()
+    let imgText = imgEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectTrue(imgText.contains("response.output_image.delta"), "流式图片输出 output_image.delta")
+    expectTrue(imgText.contains("response.output_image.done"), "流式图片以 output_image.done 结束")
+
+    // 4) 图片先于文本：content index 按实际分配顺序
+    let orderTranslator = ResponsesStreamTranslator(responseID: "resp_order")
+    let orderChunk = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":[{"type":"image_url","image_url":"data:image/png;base64,AAA"},{"type":"text","text":"see"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let orderEvents = orderTranslator.process(orderChunk) + orderTranslator.finish()
+    let orderText = orderEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectTrue(orderText.contains("\"content_index\":0") && orderText.contains("\"image_url\""),
+               "图片 part 分配 content_index 0")
+    expectTrue(orderText.contains("\"delta\":\"see\""), "图片后文本 delta 保留")
+}
+
+/// Anthropic 流式翻译：参数去重 / tool_use 名称延迟 / 图片块（F3/G3/I）。
+func anthropicStreamTranslatorTests() throws {
+    // 1) 参数增量 + 完整快照不重复
+    let translator = AnthropicStreamTranslator(messageID: "msg_d")
+    let c1 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\""}}]},"finish_reason":null}]}"#).utf8)
+    let c2 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}"#).utf8)
+    let c3 = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    _ = translator.process(c1)
+    _ = translator.process(c2)
+    _ = translator.process(c3)
+    _ = translator.finish()
+    expectEqual(translator.assistantToolCalls.first?.function?.arguments, #"{"a":1}"#, "Anthropic 参数不重复")
+
+    // 2) id 先到、name 后到：content_block_start 延迟到 name 可用
+    let delayed = AnthropicStreamTranslator(messageID: "msg_delay")
+    let idOnly = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{}}]},"finish_reason":null}]}"#).utf8)
+    let nameOnly = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f"}}]},"finish_reason":null}]}"#).utf8)
+    let argsOnly = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"arguments":"{\"a\":1}"}}]},"finish_reason":null}]}"#).utf8)
+    let finish = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let delayedEvents = delayed.process(idOnly) + delayed.process(nameOnly) + delayed.process(argsOnly) + delayed.process(finish) + delayed.finish()
+    let delayedText = delayedEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectEqual(delayedText.components(separatedBy: "event: content_block_start").count - 1, 1, "tool_use 只 start 一次")
+    expectTrue(delayedText.contains("\"name\":\"f\""), "content_block_start 带完整 name")
+    expectTrue(delayedText.contains("partial_json"), "延迟 start 后参数 delta 补发")
+
+    // 3) 流式图片 content part → image block
+    let imgTranslator = AnthropicStreamTranslator(messageID: "msg_img")
+    let imgChunk = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"see"},{"type":"image_url","image_url":"https://example.com/a.png"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let imgEvents = imgTranslator.process(imgChunk) + imgTranslator.finish()
+    let imgText = imgEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectTrue(imgText.contains("\"type\":\"image\""), "流式图片输出 image block")
+    expectTrue(imgText.contains("example.com"), "图片 URL 保留")
 }
 
 /// 返回真实 Chat SSE 流（含推理/工具）的 Anthropic mock 上游。
@@ -4362,11 +4856,15 @@ await run("ChatMessage 宽容解码（developer/content 数组）", chatMessageT
 await run("CodeBuddy 角色改写 developer→system", codeBuddySanitizeBodyTests)
 await run("Responses 请求翻译", responsesRequestTranslatorTests)
 await run("Responses 响应翻译", responsesResponseTranslatorTests)
+await run("工具参数增量去重", toolCallArgumentDeltaTests)
+await run("Responses 流式翻译（去重/身份/图片）", responsesStreamTranslatorTests)
 await run("Responses 会话表", responsesSessionStoreTests)
 await run("Responses 端点集成", responsesRouteHandlerTests)
+await run("流式心跳（慢首包）", heartbeatRouteHandlerTests)
 await run("入站格式识别", inboundFormatDetectorTests)
 await run("Anthropic 请求翻译", anthropicRequestTranslatorTests)
 await run("Anthropic 响应翻译", anthropicResponseTranslatorTests)
+await run("Anthropic 流式翻译（去重/延迟/图片）", anthropicStreamTranslatorTests)
 await run("Anthropic 端点集成", anthropicRouteHandlerTests)
 await run("在线更新检查（版本比较 + GitHub API 解析）", updateCheckerTests)
 

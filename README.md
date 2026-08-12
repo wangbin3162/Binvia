@@ -178,8 +178,11 @@ curl http://localhost:20427/v1/usage
 | `BINVIA_STREAM_READINESS_TIMEOUT` | 首个事件超时（秒），默认 60 |
 | `BINVIA_STREAM_IDLE_TIMEOUT` | 两次事件之间的空闲超时（秒），默认 120 |
 | `BINVIA_STREAM_EARLY_EOF_RETRY` | 首包前早断最大重试次数，默认 1（0 关闭） |
+| `BINVIA_STREAM_HEARTBEAT_THRESHOLD_MS` | 流式首字节心跳阈值（毫秒），默认 2000 |
+| `BINVIA_STREAM_HEARTBEAT_INTERVAL_MS` | 流式心跳帧间隔（毫秒），默认 2000 |
 | `BINVIA_ENABLE_RESPONSES` | 关闭后 `/v1/responses` 返回 404，默认开启 |
 | `BINVIA_ENABLE_MESSAGES` | 关闭后 `/v1/messages` 返回 404，默认开启 |
+| `BINVIA_SERVER_TOOLS` | 开启后 `web_search` / `file_search` 原样透传上游（默认关闭，保持跳过） |
 
 > 未配置任何 Key 时为开发模式（匿名访问）；配置后所有 `/v1/*` 端点均需携带有效网关 Key。
 
@@ -187,7 +190,7 @@ curl http://localhost:20427/v1/usage
 
 ```bash
 swift build          # 构建
-make test            # 运行全部测试（694 项断言，无需 Xcode）
+make test            # 运行全部测试（770 项断言，无需 Xcode）
 make run             # 启动服务器
 make release         # 完整打包（双架构 + 签名 + DMG/tar.gz），产物在 bin/
 ```

@@ -29,16 +29,42 @@ public struct ChatContentPart: Sendable, Codable, Equatable {
     public var type: String?
     public var text: String?
     public var imageURL: String?
+    /// 图片 detail（`auto` / `low` / `high`）。
+    public var detail: String?
+    /// file part 字段（Responses `input_file` / Chat file part）。
+    public var fileData: String?
+    public var fileID: String?
+    public var fileURL: String?
+    public var filename: String?
 
-    public init(type: String? = nil, text: String? = nil, imageURL: String? = nil) {
+    public init(
+        type: String? = nil,
+        text: String? = nil,
+        imageURL: String? = nil,
+        detail: String? = nil,
+        fileData: String? = nil,
+        fileID: String? = nil,
+        fileURL: String? = nil,
+        filename: String? = nil
+    ) {
         self.type = type
         self.text = text
         self.imageURL = imageURL
+        self.detail = detail
+        self.fileData = fileData
+        self.fileID = fileID
+        self.fileURL = fileURL
+        self.filename = filename
     }
 
     private enum CodingKeys: String, CodingKey {
         case type, text
         case imageURL = "image_url"
+        case detail
+        case fileData = "file_data"
+        case fileID = "file_id"
+        case fileURL = "file_url"
+        case filename
     }
 
     /// 宽容解码：`image_url` 既可能是字符串（`"url"`）也可能是对象（`{"url": "...", "detail": ...}`，
@@ -54,6 +80,11 @@ public struct ChatContentPart: Sendable, Codable, Equatable {
         } else {
             imageURL = nil
         }
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        fileData = try c.decodeIfPresent(String.self, forKey: .fileData)
+        fileID = try c.decodeIfPresent(String.self, forKey: .fileID)
+        fileURL = try c.decodeIfPresent(String.self, forKey: .fileURL)
+        filename = try c.decodeIfPresent(String.self, forKey: .filename)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -61,6 +92,11 @@ public struct ChatContentPart: Sendable, Codable, Equatable {
         try c.encodeIfPresent(type, forKey: .type)
         try c.encodeIfPresent(text, forKey: .text)
         try c.encodeIfPresent(imageURL, forKey: .imageURL)
+        try c.encodeIfPresent(detail, forKey: .detail)
+        try c.encodeIfPresent(fileData, forKey: .fileData)
+        try c.encodeIfPresent(fileID, forKey: .fileID)
+        try c.encodeIfPresent(fileURL, forKey: .fileURL)
+        try c.encodeIfPresent(filename, forKey: .filename)
     }
 }
 
@@ -146,20 +182,32 @@ public struct ChatMessage: Sendable, Codable, Equatable {
     public var toolCallID: String?
     /// OpenAI `tool_calls`（assistant 消息声明函数调用）。Codable 合成，缺失时为 nil。
     public var toolCalls: [ToolCall]?
+    /// 推理内容（DeepSeek 等 OpenAI 兼容上游的 `reasoning_content`）。
+    /// Anthropic thinking / redacted_thinking 翻译成该字段，保证不丢占位。
+    public var reasoningContent: String?
 
     /// `content` 接受字符串字面量（经 `ChatContent: ExpressibleByStringLiteral` 自动包装为 `.text`）。
-    public init(role: ChatRole, content: ChatContent? = nil, name: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCall]? = nil) {
+    public init(
+        role: ChatRole,
+        content: ChatContent? = nil,
+        name: String? = nil,
+        toolCallID: String? = nil,
+        toolCalls: [ToolCall]? = nil,
+        reasoningContent: String? = nil
+    ) {
         self.role = role
         self.content = content
         self.name = name
         self.toolCallID = toolCallID
         self.toolCalls = toolCalls
+        self.reasoningContent = reasoningContent
     }
 
     private enum CodingKeys: String, CodingKey {
         case role, content, name
         case toolCallID = "tool_call_id"
         case toolCalls = "tool_calls"
+        case reasoningContent = "reasoning_content"
     }
 }
 

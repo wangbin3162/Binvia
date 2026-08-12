@@ -23,9 +23,7 @@ public enum AnthropicResponseTranslator {
         if let reasoning = message["reasoning_content"] as? String, !reasoning.isEmpty {
             content.append(["type": "thinking", "thinking": reasoning])
         }
-        if let text = message["content"] as? String, !text.isEmpty {
-            content.append(["type": "text", "text": text])
-        }
+        content.append(contentsOf: Self.contentBlocks(message["content"]))
         if let calls = message["tool_calls"] as? [[String: Any]] {
             for (index, call) in calls.enumerated() {
                 let function = (call["function"] as? [String: Any]) ?? [:]
@@ -63,6 +61,54 @@ public enum AnthropicResponseTranslator {
         }
     }
 
+    /// Chat 消息 content → Anthropic content blocks（text / image）。
+    private static func contentBlocks(_ content: Any?) -> [[String: Any]] {
+        if let string = content as? String, !string.isEmpty {
+            return [["type": "text", "text": string]]
+        }
+        guard let parts = content as? [[String: Any]] else { return [] }
+        var blocks: [[String: Any]] = []
+        for part in parts {
+            switch part["type"] as? String {
+            case "text":
+                if let text = part["text"] as? String, !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                }
+            case "image_url":
+                let imageURL = Self.imageURL(from: part["image_url"])
+                if !imageURL.isEmpty, let block = Self.imageBlock(from: imageURL) {
+                    blocks.append(block)
+                }
+            default:
+                if let text = part["text"] as? String, !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                }
+            }
+        }
+        return blocks
+    }
+
+    private static func imageURL(from value: Any?) -> String {
+        if let string = value as? String { return string }
+        if let obj = value as? [String: Any] { return obj["url"] as? String ?? "" }
+        return ""
+    }
+
+    /// Chat data URL / http URL → Anthropic image source block。
+    private static func imageBlock(from url: String) -> [String: Any]? {
+        if url.hasPrefix("data:"),
+           let range = url.range(of: ";base64,") {
+            let start = url.index(url.startIndex, offsetBy: 5)
+            let mediaType = String(url[start ..< range.lowerBound])
+            let data = String(url[range.upperBound...])
+            return [
+                "type": "image",
+                "source": ["type": "base64", "media_type": mediaType, "data": data],
+            ]
+        }
+        return ["type": "image", "source": ["type": "url", "url": url]]
+    }
+
     private static func usageJSON(_ usage: [String: Any]?) -> [String: Any] {
         guard let usage else { return ["input_tokens": 0, "output_tokens": 0] }
         let input = (usage["prompt_tokens"] as? Int) ?? 0
@@ -76,10 +122,13 @@ public enum AnthropicResponseTranslator {
            cached > 0 {
             result["cache_read_input_tokens"] = cached
         }
-        if let details = usage["completion_tokens_details"] as? [String: Any],
-           let reasoning = details["reasoning_tokens"] as? Int,
-           reasoning > 0 {
-            result["output_tokens"] = output
+        if let details = usage["prompt_tokens_details"] as? [String: Any],
+           let created = details["cache_creation"] as? Int,
+           created > 0 {
+            result["cache_creation_input_tokens"] = created
+        }
+        if let miss = usage["prompt_cache_miss_tokens"] as? Int, miss > 0 {
+            result["cache_creation_input_tokens"] = miss
         }
         return result
     }

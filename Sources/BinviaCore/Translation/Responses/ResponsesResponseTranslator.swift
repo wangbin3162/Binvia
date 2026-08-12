@@ -9,7 +9,11 @@ import Foundation
 /// - usage 字段改名（prompt_tokens → input_tokens / completion_tokens → output_tokens）。
 public enum ResponsesResponseTranslator {
     /// 把上游 Chat JSON 翻译成 Responses API Response JSON。
-    public static func translate(chatJSON: Data, responseID: String) throws -> Data {
+    public static func translate(
+        chatJSON: Data,
+        responseID: String,
+        toolIdentity: ResponsesToolIdentityMap = ResponsesToolIdentityMap()
+    ) throws -> Data {
         guard let json = try? JSONSerialization.jsonObject(with: chatJSON) as? [String: Any] else {
             throw ResponsesTranslationError("invalid upstream chat JSON")
         }
@@ -36,20 +40,14 @@ public enum ResponsesResponseTranslator {
             sequence += 1
         }
 
-        let contentText = Self.contentText(message)
-        if !contentText.isEmpty {
+        let contentParts = Self.contentParts(message)
+        if !contentParts.isEmpty {
             let itemID = "msg_\(responseID)_\(sequence)"
             output.append([
                 "id": itemID,
                 "type": "message",
                 "role": "assistant",
-                "content": [
-                    [
-                        "type": "output_text",
-                        "text": contentText,
-                        "annotations": [],
-                    ]
-                ],
+                "content": contentParts,
             ])
             sequence += 1
         }
@@ -58,14 +56,22 @@ public enum ResponsesResponseTranslator {
             for (index, call) in calls.enumerated() {
                 let callID = (call["id"] as? String) ?? "call_\(index)"
                 let function = (call["function"] as? [String: Any]) ?? [:]
-                output.append([
+                var item: [String: Any] = [
                     "id": "fc_\(callID)",
                     "type": "function_call",
                     "call_id": callID,
-                    "name": function["name"] as? String ?? "",
+                    "name": "",
                     "arguments": function["arguments"] as? String ?? "{}",
                     "status": "completed",
-                ])
+                ]
+                let wireName = function["name"] as? String ?? ""
+                if let identity = toolIdentity.identity(forWireName: wireName) {
+                    item["name"] = identity.name
+                    item["namespace"] = identity.namespace
+                } else {
+                    item["name"] = wireName
+                }
+                output.append(item)
             }
         }
 
@@ -83,15 +89,42 @@ public enum ResponsesResponseTranslator {
         return try JSONSerialization.data(withJSONObject: root)
     }
 
-    private static func contentText(_ message: [String: Any]) -> String {
-        guard let content = message["content"] else { return "" }
-        if let string = content as? String { return string }
-        if let parts = content as? [[String: Any]] {
-            return parts.compactMap { part in
-                if let text = part["text"] as? String { return text }
-                return nil
-            }.joined()
+    /// 上游 Chat 消息 content → Responses output content parts（文本 + 图片）。
+    private static func contentParts(_ message: [String: Any]) -> [[String: Any]] {
+        guard let content = message["content"] else { return [] }
+        if let string = content as? String, !string.isEmpty {
+            return [["type": "output_text", "text": string, "annotations": []]]
         }
+        guard let parts = content as? [[String: Any]] else { return [] }
+        var output: [[String: Any]] = []
+        for part in parts {
+            switch part["type"] as? String {
+            case "text":
+                if let text = part["text"] as? String, !text.isEmpty {
+                    output.append(["type": "output_text", "text": text, "annotations": []])
+                }
+            case "image_url":
+                let imageURL = Self.imageURL(from: part["image_url"])
+                if !imageURL.isEmpty {
+                    output.append([
+                        "type": "output_image",
+                        "image_url": imageURL,
+                        "detail": part["detail"] as? String ?? "auto",
+                        "annotations": [],
+                    ])
+                }
+            default:
+                if let text = part["text"] as? String, !text.isEmpty {
+                    output.append(["type": "output_text", "text": text, "annotations": []])
+                }
+            }
+        }
+        return output
+    }
+
+    private static func imageURL(from value: Any?) -> String {
+        if let string = value as? String { return string }
+        if let obj = value as? [String: Any] { return obj["url"] as? String ?? "" }
         return ""
     }
 

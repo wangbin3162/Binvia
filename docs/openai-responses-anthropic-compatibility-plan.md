@@ -109,7 +109,7 @@ Sources/BinviaCore/Translation/
 | `stream` | 透传 |
 | `max_output_tokens` | `max_tokens` |
 | `reasoning` | 有上游支持时映射 `reasoning_effort`，否则剥离 |
-| `previous_response_id` | 第一版用内存会话表还原历史消息；无法还原时 400 |
+| `previous_response_id` | 用持久化会话表还原历史消息；无法还原时 400 |
 | `temperature` / `top_p` | 透传 |
 
 ### 5.2 非流式响应：Chat JSON → Response
@@ -303,8 +303,12 @@ wire_api = "responses"
 |---|---|---|
 | `BINVIA_ENABLE_RESPONSES` | `1` | 关闭后 `/v1/responses` 返回 404 |
 | `BINVIA_ENABLE_MESSAGES` | `1` | 关闭后 `/v1/messages` 返回 404 |
+| `BINVIA_SERVER_TOOLS` | `0` | 开启后 `web_search` / `file_search` 原样透传上游 |
+| `BINVIA_STREAM_HEARTBEAT_THRESHOLD_MS` | `2000` | 流式首字节心跳阈值（毫秒） |
+| `BINVIA_STREAM_HEARTBEAT_INTERVAL_MS` | `2000` | 流式心跳帧间隔（毫秒） |
 
-`previous_response_id` 会话表建议加上限（如 200 条 / 24h），防止内存无界增长。
+`previous_response_id` 会话表持久化到 `~/.config/binvia/responses-sessions.json`
+（`BINVIA_CONFIG` 已设置时同目录），上限 200 条 / TTL 24h。
 
 ## 9. 风险与注意事项
 
@@ -314,7 +318,7 @@ wire_api = "responses"
   `function_call_arguments` / `tool_use`，且 id/index 不能错位；
 - 推理内容不能丢：上游 `reasoning_content` 要映射到
   `response.reasoning_summary_text.*` / `thinking_delta`；
-- `previous_response_id` 需要跨请求状态，先做内存版，重启即失效；
+- `previous_response_id` 需要跨请求状态，已做持久化版（JSON 原子写 + 0600），重启仍可续接；
 - 不要伪造结束原因：`content_filter` 等要映射成 `incomplete`/`refusal`，
   不能改成 `completed`；
 - 多模态、web_search、file_search 第一版明确 400，避免半支持状态；
@@ -349,18 +353,17 @@ wire_api = "responses"
 
 ## 12. 后续实现计划（v1.1：高级工具 / 多模态 / 会话 / 协议打磨）
 
-> 说明：第一版已完成阶段 A-D，并通过真实 Codex CLI 一轮对话。为兼容 Codex CLI，
-> 第一版对 `web_search` / `file_search` / `image_generation` / `custom` /
-> `command` / `local_shell` / `tool_search` 工具采用「跳过」而非 §9 所述的 400；
-> 未知工具类型仍返回 400。后续计划按 P0 → P2 排列，每阶段完成后跑 `make test`
-> 全量回归，再做真实客户端验证。
+> 实施状态（2026-08-11）：阶段 F-H（工具闭环、多模态、会话持久化）与阶段 I/J
+> （Anthropic 协议完善、错误帧 / CORS / 心跳）已实现，`make test` 全量回归通过
+> （770 项断言）。真实 Codex 多轮工具调用与 Claude Code 真实验证待客户端环境
+> 具备后收尾。后续计划按 P0 → P2 排列。
 
-### 阶段 F：工具调用闭环（P0，Codex 优先）
+### 阶段 F：工具调用闭环（P0，Codex 优先）✅ 已实现
 
 目标：让 Codex CLI 的多轮工具调用（MCP namespace、apply_patch 等）完整可用，
 并让 `web_search` / `file_search` 具备明确的能力开关，而不是一律跳过。
 
-#### F1 请求侧工具收集对齐 OmniRoute
+#### F1 请求侧工具收集对齐 OmniRoute ✅ 已实现
 
 现状：
 
@@ -389,7 +392,7 @@ wire_api = "responses"
 - fixtures 覆盖 `additional_tools`、同名 namespace 合并、64 字符截断；
 - `make test` 全量通过。
 
-#### F2 namespace 工具身份回传
+#### F2 namespace 工具身份回传 ✅ 已实现
 
 现状：拍平后丢失 `{namespace, name}`，Responses 响应里的 `function_call` 只有
 拍平后的 name，Codex 对 MCP namespace 子工具的 dispatch 可能出错。
@@ -413,7 +416,7 @@ wire_api = "responses"
 - 真实 Codex CLI 完成至少一轮「模型调用 MCP/apply_patch 工具 → 提交
   function_call_output → 继续回答」的多轮对话。
 
-#### F3 工具参数增量去重
+#### F3 工具参数增量去重 ✅ 已实现
 
 现状：`ResponsesStreamTranslator` / `AnthropicStreamTranslator` 直接
 `buffer += arguments`；上游若重复发送完整快照（常见于部分兼容实现），
@@ -434,7 +437,7 @@ wire_api = "responses"
 验收：mock 分别发送增量碎片与完整快照，客户端拼出的 `arguments` 不重复、
 不截断。
 
-#### F4 web_search / file_search 高级工具
+#### F4 web_search / file_search 高级工具 ✅ 已实现
 
 现状：第一版跳过，Codex 能对话但无法使用搜索/文件检索。
 
@@ -456,12 +459,12 @@ wire_api = "responses"
 验收：开关开启时 mock 上游收到 web_search 工具；关闭时跳过；未知工具类型
 仍 400。
 
-### 阶段 G：多模态（P1）
+### 阶段 G：多模态（P1）✅ 已实现
 
 目标：Responses `input_image` / `input_file` 与 Anthropic `image` 块能双向
 翻译，不再只保留文本。
 
-#### G1 Responses 入站
+#### G1 Responses 入站 ✅ 已实现
 
 - `input_image` → Chat `image_url` part（`image_url` 支持字符串或对象形态）；
 - `input_file` → Chat file part（`file_data` / `file_id` / `file_url` /
@@ -470,7 +473,7 @@ wire_api = "responses"
 
 参考：OmniRoute `openai-responses.ts` 的 `input_image` / `input_file` 转换。
 
-#### G2 Anthropic 入站
+#### G2 Anthropic 入站 ✅ 已实现
 
 - `image` 块（`source.type == base64|url`）→ `image_url` part；
 - `tool_result` 内容里的 image 提升为后续 user 消息（OpenAI `tool` 消息不能
@@ -478,7 +481,7 @@ wire_api = "responses"
 
 参考：OmniRoute `claude-to-openai.ts` 的 `image` / `tool_result` 分支。
 
-#### G3 出站
+#### G3 出站 ✅ 已实现
 
 - Chat `image_url` → Responses `output_image` / Anthropic `image` block；
 - 非流式与流式两个响应翻译器都输出图片 content block；
@@ -494,7 +497,7 @@ wire_api = "responses"
 风险：base64 图片可能显著放大请求/日志体积，翻译层需对 `rawBody` 与日志
 大小做上限保护。
 
-### 阶段 H：previous_response_id 会话持久化（P1）
+### 阶段 H：previous_response_id 会话持久化（P1）✅ 已实现
 
 现状：`ResponsesSessionStore` 为内存版（重启失效、上限 200），未知 id 返回
 200 空历史，未按计划文档「无法还原时 400」处理。
@@ -520,7 +523,7 @@ preserve / strip / auto 模式语义（我们保留本地还原语义，不依�
 - 未知 id 返回 400；
 - TTL 过期与 200 条上限测试通过。
 
-### 阶段 I：Anthropic 协议完善（P2）
+### 阶段 I：Anthropic 协议完善（P2）✅ 已实现
 
 现状：第一版已覆盖文本、thinking、tool_use / tool_result、usage；以下字段
 仍缺失。
@@ -543,7 +546,7 @@ preserve / strip / auto 模式语义（我们保留本地还原语义，不依�
 redacted_thinking；`make test` 全量通过；Claude Code 真实验证（可选，环境
 具备时补充）。
 
-### 阶段 J：协议打磨与发布收尾（P2）
+### 阶段 J：协议打磨与发布收尾（P2）✅ 已实现（真实客户端验证待环境）
 
 目标：把 Responses / Anthropic 的错误帧、心跳、CORS 与发布流程对齐到
 OmniRoute 的成熟度。
@@ -563,13 +566,13 @@ OmniRoute 的成熟度。
 
 ### 里程碑与优先级
 
-| 优先级 | 阶段 | 内容 | 客户端验收 |
-|---|---|---|---|
-| P0 | F | 工具收集、namespace 身份回传、参数去重 | 真实 Codex 工具调用多轮 |
-| P1 | G | 多模态双向翻译 | 真实客户端发图（可选） |
-| P1 | H | previous_response_id 持久化 | 重启续接 + 400 语义 |
-| P2 | I | Anthropic 字段完善 | Claude Code（可选） |
-| P2 | J | 错误帧 / 心跳 / CORS / 发布 | `make release` 回归 |
+| 优先级 | 阶段 | 内容 | 状态 | 客户端验收 |
+|---|---|---|---|---|
+| P0 | F | 工具收集、namespace 身份回传、参数去重 | 已实现 | 真实 Codex 工具调用多轮（待客户端环境） |
+| P1 | G | 多模态双向翻译 | 已实现 | 真实客户端发图（可选） |
+| P1 | H | previous_response_id 持久化 | 已实现 | 重启续接 + 400 语义（mock 已覆盖） |
+| P2 | I | Anthropic 字段完善 | 已实现 | Claude Code（可选） |
+| P2 | J | 错误帧 / 心跳 / CORS / 发布 | 已实现 | `make release` 回归 |
 
 ### 风险与约束
 

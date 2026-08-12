@@ -125,30 +125,24 @@ public final class AnthropicStreamTranslator: @unchecked Sendable {
         }
 
         if let content = delta["content"] as? String, !content.isEmpty {
-            stopThinkingBlockIfNeeded(&out)
-            if !textBlockStarted {
-                textBlockIndex = nextBlockIndex
-                nextBlockIndex += 1
-                textBlockStarted = true
-                textBlockClosed = false
-                out.append(contentsOf: emit(
-                    "content_block_start",
-                    payload: [
-                        "type": "content_block_start",
-                        "index": textBlockIndex!,
-                        "content_block": ["type": "text", "text": ""],
-                    ]
-                ))
+            processTextDelta(content, out: &out)
+        } else if let parts = delta["content"] as? [[String: Any]], !parts.isEmpty {
+            for part in parts {
+                switch part["type"] as? String {
+                case "text", "input_text", "output_text":
+                    if let text = part["text"] as? String, !text.isEmpty {
+                        processTextDelta(text, out: &out)
+                    }
+                case "image_url":
+                    if let url = Self.imageURL(from: part["image_url"]), !url.isEmpty {
+                        emitImageBlock(url, out: &out)
+                    }
+                default:
+                    if let text = part["text"] as? String, !text.isEmpty {
+                        processTextDelta(text, out: &out)
+                    }
+                }
             }
-            textAccumulator += content
-            out.append(contentsOf: emit(
-                "content_block_delta",
-                payload: [
-                    "type": "content_block_delta",
-                    "index": textBlockIndex!,
-                    "delta": ["type": "text_delta", "text": content],
-                ]
-            ))
         }
 
         if let calls = delta["tool_calls"] as? [[String: Any]] {
@@ -170,26 +164,41 @@ public final class AnthropicStreamTranslator: @unchecked Sendable {
                 }
                 if !id.isEmpty { info.id = id }
                 if !name.isEmpty { info.name = name }
-                if !args.isEmpty { info.argBuffer += args }
-
-                if !info.startEmitted && (!info.name.isEmpty || !info.argBuffer.isEmpty) {
-                    info.startEmitted = true
-                    out.append(contentsOf: emit(
-                        "content_block_start",
-                        payload: [
-                            "type": "content_block_start",
-                            "index": info.blockIndex,
-                            "content_block": [
-                                "type": "tool_use",
-                                "id": info.id,
-                                "name": info.name,
-                                "input": [String: Any](),
-                            ],
-                        ]
-                    ))
-                }
-                toolCalls[tcIndex] = info
                 if !args.isEmpty {
+                    info.argBuffer = ToolCallArgumentDelta.append(existing: info.argBuffer, incoming: args)
+                }
+
+                toolCalls[tcIndex] = info
+                if !info.startEmitted {
+                    // 延迟 content_block_start 直到 name 可用，避免发出无名 tool_use。
+                    if !info.name.isEmpty {
+                        info.startEmitted = true
+                        toolCalls[tcIndex] = info
+                        out.append(contentsOf: emit(
+                            "content_block_start",
+                            payload: [
+                                "type": "content_block_start",
+                                "index": info.blockIndex,
+                                "content_block": [
+                                    "type": "tool_use",
+                                    "id": info.id,
+                                    "name": info.name,
+                                    "input": [String: Any](),
+                                ],
+                            ]
+                        ))
+                        if !info.argBuffer.isEmpty {
+                            out.append(contentsOf: emit(
+                                "content_block_delta",
+                                payload: [
+                                    "type": "content_block_delta",
+                                    "index": info.blockIndex,
+                                    "delta": ["type": "input_json_delta", "partial_json": info.argBuffer],
+                                ]
+                            ))
+                        }
+                    }
+                } else if !args.isEmpty {
                     out.append(contentsOf: emit(
                         "content_block_delta",
                         payload: [
@@ -206,6 +215,69 @@ public final class AnthropicStreamTranslator: @unchecked Sendable {
             out.append(contentsOf: sendFinishIfNeeded(reason: reason))
         }
         return out
+    }
+
+    private func processTextDelta(_ content: String, out: inout [Data]) {
+        stopThinkingBlockIfNeeded(&out)
+        if !textBlockStarted {
+            textBlockIndex = nextBlockIndex
+            nextBlockIndex += 1
+            textBlockStarted = true
+            textBlockClosed = false
+            out.append(contentsOf: emit(
+                "content_block_start",
+                payload: [
+                    "type": "content_block_start",
+                    "index": textBlockIndex!,
+                    "content_block": ["type": "text", "text": ""],
+                ]
+            ))
+        }
+        textAccumulator += content
+        out.append(contentsOf: emit(
+            "content_block_delta",
+            payload: [
+                "type": "content_block_delta",
+                "index": textBlockIndex!,
+                "delta": ["type": "text_delta", "text": content],
+            ]
+        ))
+    }
+
+    private func emitImageBlock(_ imageURL: String, out: inout [Data]) {
+        stopThinkingBlockIfNeeded(&out)
+        stopTextBlockIfNeeded(&out)
+        let index = nextBlockIndex
+        nextBlockIndex += 1
+        out.append(contentsOf: emit(
+            "content_block_start",
+            payload: [
+                "type": "content_block_start",
+                "index": index,
+                "content_block": ["type": "image", "source": Self.imageSource(imageURL)],
+            ]
+        ))
+        out.append(contentsOf: emit(
+            "content_block_stop",
+            payload: ["type": "content_block_stop", "index": index]
+        ))
+    }
+
+    private static func imageURL(from value: Any?) -> String? {
+        if let string = value as? String { return string }
+        if let obj = value as? [String: Any] { return obj["url"] as? String }
+        return nil
+    }
+
+    private static func imageSource(_ url: String) -> [String: Any] {
+        if url.hasPrefix("data:"),
+           let range = url.range(of: ";base64,") {
+            let start = url.index(url.startIndex, offsetBy: 5)
+            let mediaType = String(url[start ..< range.lowerBound])
+            let data = String(url[range.upperBound...])
+            return ["type": "base64", "media_type": mediaType, "data": data]
+        }
+        return ["type": "url", "url": url]
     }
 
     private func emitMessageStart() -> [Data] {
@@ -304,6 +376,14 @@ public final class AnthropicStreamTranslator: @unchecked Sendable {
            let cached = details["cached_tokens"] as? Int,
            cached > 0 {
             result["cache_read_input_tokens"] = cached
+        }
+        if let details = usage["prompt_tokens_details"] as? [String: Any],
+           let created = details["cache_creation"] as? Int,
+           created > 0 {
+            result["cache_creation_input_tokens"] = created
+        }
+        if let miss = usage["prompt_cache_miss_tokens"] as? Int, miss > 0 {
+            result["cache_creation_input_tokens"] = miss
         }
         return result
     }

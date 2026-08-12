@@ -56,9 +56,21 @@ public struct OpenCodeGoProvider: Provider {
                 throw ProviderError.invalidResponse("invalid request body")
             }
             json["model"] = request.model
+            // 对齐 OmniRoute roleNormalizer：非 OpenAI 系上游不认 developer 角色。
+            // 实测 opencode.ai zen/go 的 deepseek-v4-flash 下游对 developer 返回
+            // 400 "unknown variant `developer`"（Responses 客户端把 system prompt
+            // 写成 developer 角色透传），统一归一化为 system。
+            json = RoleNormalizer.normalizeDeveloperRole(json, providerID: id)
             return try JSONSerialization.data(withJSONObject: json)
         }
-        return try JSONEncoder().encode(request)
+        var req = request
+        req.messages = req.messages.map { message in
+            guard message.role == .developer else { return message }
+            var m = message
+            m.role = .system
+            return m
+        }
+        return try JSONEncoder().encode(req)
     }
 
     public func chat(
