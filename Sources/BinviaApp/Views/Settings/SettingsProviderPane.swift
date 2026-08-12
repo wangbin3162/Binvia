@@ -199,9 +199,16 @@ struct SettingsProviderPane: View {
     /// 单个令牌行：图标 + 标签 + 掩码值 + 右侧「移除」按钮（对齐 CodexBar 令牌账户）。
     private func tokenRow(label: String, value: String, enabled: Bool, onSelect: @escaping () -> Void, onRemove: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
-            Toggle("启用", isOn: Binding(get: { enabled }, set: { _ in onSelect() }))
-                .labelsHidden()
-                .toggleStyle(.checkbox)
+            Button {
+                onSelect()
+            } label: {
+                Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(enabled ? Color.accentColor : Color.secondary)
+                    .font(.body)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(enabled ? "当前生效令牌" : "启用此令牌")
+            .help(enabled ? "当前生效令牌" : "启用此令牌")
             Image(systemName: "key")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
