@@ -7,7 +7,7 @@ import BinviaCore
 /// 布局借鉴 CodexBar `ProviderDetailView`：头部行（品牌图标 + 名称 + 副标题 + 启用开关）、
 /// 「连接」Section（按认证类型展示不同配置方式）、「连通性」Section、信息 Section。
 /// 连接流程参考 OmniRoute `EditConnectionModal`：
-/// - API Key 型：输入 Key → 保存（支持多 Key 轮换）；
+/// - API Key 型：输入 Key → 保存（支持手动选择生效令牌）；
 /// - OAuth 型：OAuth 登录（设备码 / PKCE）→ 状态展示；另支持手动粘贴 Token。
 struct SettingsProviderPane: View {
     let providerID: String
@@ -15,7 +15,7 @@ struct SettingsProviderPane: View {
 
     /// DeepSeek 多令牌草稿（带标签，CodexBar 令牌账户风格）。
     @State private var draftKeys: [KeyedToken] = []
-    /// CodeBuddy 多 Access Token 草稿（首 token = 主 token，其余为轮换用）。
+    /// CodeBuddy 多 Access Token 草稿（手动选择一个生效 token）。
     @State private var draftTokens: [KeyedToken] = []
     /// 令牌添加行的标签输入。
     @State private var newTokenLabel = ""
@@ -153,8 +153,12 @@ struct SettingsProviderPane: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(draftKeys.enumerated()), id: \.offset) { index, token in
-                    tokenRow(label: token.label, value: token.value) {
+                    tokenRow(label: token.label, value: token.value, enabled: token.enabled, onSelect: {
+                        draftKeys = selectToken(at: index, in: draftKeys)
+                        persistAPIKeys()
+                    }) {
                         draftKeys.remove(at: index)
+                        if !draftKeys.isEmpty && !draftKeys.contains(where: { $0.enabled }) { draftKeys[0].enabled = true }
                         persistAPIKeys()
                     }
                 }
@@ -193,8 +197,11 @@ struct SettingsProviderPane: View {
     }
 
     /// 单个令牌行：图标 + 标签 + 掩码值 + 右侧「移除」按钮（对齐 CodexBar 令牌账户）。
-    private func tokenRow(label: String, value: String, onRemove: @escaping () -> Void) -> some View {
+    private func tokenRow(label: String, value: String, enabled: Bool, onSelect: @escaping () -> Void, onRemove: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
+            Toggle("启用", isOn: Binding(get: { enabled }, set: { _ in onSelect() }))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
             Image(systemName: "key")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -213,7 +220,7 @@ struct SettingsProviderPane: View {
         }
     }
 
-    /// CodeBuddy：OAuth 设备码登录 + 手动 Access Token（支持多 token 轮换）。
+    /// CodeBuddy：OAuth 设备码登录 + 手动 Access Token（支持手动选择生效 token）。
     /// 令牌行样式对齐 DeepSeek 的 API 令牌列表（标签 + 掩码 + 移除，添加/移除即时持久化）。
     private var deviceFlowConnectionSection: some View {
         Section {
@@ -223,8 +230,12 @@ struct SettingsProviderPane: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
-                    tokenRow(label: token.label, value: token.value) {
+                    tokenRow(label: token.label, value: token.value, enabled: token.enabled, onSelect: {
+                        draftTokens = selectToken(at: index, in: draftTokens)
+                        persistDeviceTokens()
+                    }) {
                         draftTokens.remove(at: index)
+                        if !draftTokens.isEmpty && !draftTokens.contains(where: { $0.enabled }) { draftTokens[0].enabled = true }
                         persistDeviceTokens()
                     }
                 }
@@ -242,7 +253,7 @@ struct SettingsProviderPane: View {
         } header: {
             Text("模型调用 Access Token")
         } footer: {
-            Text("请求通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy；多个 token 自动轮换（首个 401/403 时试用下一个）。OAuth 登录 token 仅用于积分查询（见用量面板），不参与模型调用。")
+            Text("请求通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy；勾选项为当前生效 token。OAuth 登录 token 仅用于积分查询（见用量面板），不参与模型调用。")
         }
     }
 
@@ -679,13 +690,15 @@ struct SettingsProviderPane: View {
     }
 
     private func addAPIKey() {
-        guard let token = makeTokenFromAddRow() else { return }
+        guard var token = makeTokenFromAddRow() else { return }
+        token.enabled = draftKeys.isEmpty
         draftKeys.append(token)
         persistAPIKeys()
     }
 
     private func addDeviceToken() {
-        guard let token = makeTokenFromAddRow() else { return }
+        guard var token = makeTokenFromAddRow() else { return }
+        token.enabled = draftTokens.isEmpty
         draftTokens.append(token)
         persistDeviceTokens()
     }
@@ -701,6 +714,14 @@ struct SettingsProviderPane: View {
             tokenSaveMessage = draftTokens.isEmpty ? nil : "已保存 \(draftTokens.count) 个 Token"
         } catch {
             tokenSaveMessage = "保存失败: \(error.localizedDescription)"
+        }
+    }
+
+    private func selectToken(at index: Int, in tokens: [KeyedToken]) -> [KeyedToken] {
+        tokens.enumerated().map { offset, token in
+            var updated = token
+            updated.enabled = offset == index
+            return updated
         }
     }
 

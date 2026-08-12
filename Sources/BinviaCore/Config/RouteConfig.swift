@@ -37,15 +37,18 @@ public struct GatewayKeyConfig: Codable, Sendable, Equatable {
 public struct KeyedToken: Codable, Sendable, Equatable {
     public var label: String
     public var value: String
+    public var enabled: Bool
 
-    public init(label: String, value: String) {
+    public init(label: String, value: String, enabled: Bool = false) {
         self.label = label
         self.value = value
+        self.enabled = enabled
     }
 
-    public init(value: String) {
+    public init(value: String, enabled: Bool = false) {
         self.value = value
         self.label = Self.defaultLabel(for: value)
+        self.enabled = enabled
     }
 
     /// 默认标签：密钥掩码（前 6 位 + •••• + 后 4 位），与用量展示的掩码一致。
@@ -53,12 +56,21 @@ public struct KeyedToken: Codable, Sendable, Equatable {
         guard value.count > 10 else { return String(value.prefix(3)) + "••••" }
         return "\(String(value.prefix(6)))••••\(String(value.suffix(4)))"
     }
+
+    private enum CodingKeys: String, CodingKey { case label, value, enabled }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+    }
 }
 
 public struct ProviderConfig: Codable, Sendable, Equatable {
     public var enabled: Bool
     public var credential: ProviderCredential
-    /// 多令牌列表（label + value，key 轮换 / 多 token）。空数组表示未配置。
+    /// 多令牌列表（label + value + enabled）。空数组表示未配置。
     /// 兼容旧格式 `[String]`：解码时自动转成 `KeyedToken`（标签为掩码）。
     public var apiKeys: [KeyedToken]
     /// API 区域（如 z.ai 的 `global` / `bigmodel-cn`）。nil = 供应商默认区域。
@@ -95,9 +107,45 @@ public struct ProviderConfig: Codable, Sendable, Equatable {
         self.credential = try container.decodeIfPresent(ProviderCredential.self, forKey: .credential) ?? ProviderCredential()
         // 兼容旧格式 `[String]` 与新版 `[{label,value}]`（旧 key 自动生成掩码标签）
         if let legacy = try? container.decodeIfPresent([String].self, forKey: .apiKeys) {
-            self.apiKeys = legacy.map { KeyedToken(value: $0) }
+            var tokens = legacy.map { KeyedToken(value: $0) }
+            let preferred = self.credential.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let selectedIndex = preferred.flatMap { value in tokens.firstIndex { $0.value == value } }
+                ?? tokens.firstIndex { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if let selectedIndex { tokens[selectedIndex].enabled = true }
+            self.apiKeys = tokens
         } else {
-            self.apiKeys = try container.decodeIfPresent([KeyedToken].self, forKey: .apiKeys) ?? []
+            struct TokenPayload: Decodable {
+                let label: String?
+                let value: String?
+                let enabled: Bool?
+            }
+            let payloads = try container.decodeIfPresent([TokenPayload].self, forKey: .apiKeys) ?? []
+            let hadExplicitSelection = payloads.contains { $0.enabled != nil }
+            var tokens = payloads.map {
+                KeyedToken(label: $0.label ?? "", value: $0.value ?? "", enabled: $0.enabled ?? false)
+            }
+            if !hadExplicitSelection {
+                let preferred = self.credential.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let selectedIndex = preferred.flatMap { value in tokens.firstIndex { $0.value == value } }
+                    ?? tokens.firstIndex { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                if let selectedIndex { tokens[selectedIndex].enabled = true }
+            } else {
+                var selected = false
+                for index in tokens.indices {
+                    if tokens[index].enabled && !selected {
+                        selected = true
+                    } else {
+                        tokens[index].enabled = false
+                    }
+                }
+            }
+            if let preferred = self.credential.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !preferred.isEmpty,
+               !tokens.contains(where: { $0.value == preferred }) {
+                tokens.insert(KeyedToken(value: preferred, enabled: true), at: 0)
+                for index in tokens.indices.dropFirst() { tokens[index].enabled = false }
+            }
+            self.apiKeys = tokens
         }
         self.region = try container.decodeIfPresent(String.self, forKey: .region)
         self.userModels = try container.decodeIfPresent([ProviderModelEntry].self, forKey: .userModels) ?? []
@@ -281,28 +329,34 @@ public struct RouteConfig: Codable, Sendable, Equatable {
     /// 解析某 provider 的凭据：优先 config，回退到环境变量。
     ///
     /// 聚合语义（Phase 20）：
-    /// - `credential.apiKey` 为空但 `apiKeys[]` 非空时，用首个 key 填充（GUI 保存把单 key 存进
-    ///   `apiKeys[]`，OpenCode 等只读 `credential.apiKey` 的供应商由此获得凭据）；
+    /// - `apiKeys[]` 有启用令牌时，将该令牌填入 `credential.apiKey`；
     /// - 灌入 `ProviderConfig.region`（z.ai 区域选择透传给 provider）；
     /// - **不依赖 `enabled`**：enabled 只控制路由与模型可见性，设置面板的模型测试等场景
     ///   即使供应商处于禁用态也应能取到已保存的凭据（修复 opencode 禁用后测试报 Missing credentials）。
     public func credential(for providerID: String) -> ProviderCredential {
         if let pc = providers[providerID] {
             var cred = pc.credential
-            if (cred.apiKey ?? "").isEmpty,
-               let first = pc.apiKeys.first(where: { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-                cred.apiKey = first.value
+            if !pc.apiKeys.isEmpty {
+                cred.apiKey = selectedToken(for: providerID)?.value ?? ""
             }
             cred.region = pc.region
-            // 配置条目存在且带凭据 → 直接返回；完全空的条目回退环境变量（保持旧行为）。
+            // 配置列表存在时，空选择也必须保持为空，不能被环境变量悄悄覆盖。
             let hasCredential = !(cred.apiKey ?? "").isEmpty
                 || !(cred.accessToken ?? "").isEmpty
                 || !(cred.refreshToken ?? "").isEmpty
-            if hasCredential {
+            if hasCredential || !pc.apiKeys.isEmpty {
                 return cred
             }
         }
         return ProviderCredential(apiKey: Self.envValue(["\(providerID.uppercased().replacingOccurrences(of: "-", with: "_"))_API_KEY"]))
+    }
+
+    /// 返回供应商唯一的当前启用令牌。配置令牌存在时不回退到其他未启用令牌。
+    public func selectedToken(for providerID: String) -> KeyedToken? {
+        guard let pc = providers[providerID] else { return nil }
+        return pc.apiKeys.first {
+            $0.enabled && !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     /// 某 provider 是否已配置凭据（apiKey / accessToken / refreshToken / apiKeys[] 任一非空）。
@@ -318,8 +372,7 @@ public struct RouteConfig: Codable, Sendable, Equatable {
         return !apiKeys(for: providerID).isEmpty
     }
 
-    /// 某 provider 的全部 api-key（用于轮换）：config 的 `apiKeys` 数组 + 环境变量 key
-    /// （如 `DEEPSEEK_API_KEY`）。去重、过滤空值。
+    /// 某 provider 的全部 api-key（用于用量展示等场景）：config 的 `apiKeys` 数组 + 环境变量 key。
     public func apiKeys(for providerID: String) -> [String] {
         keyedTokens(for: providerID).map(\.value)
     }

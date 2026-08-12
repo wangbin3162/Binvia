@@ -41,7 +41,7 @@ public enum CodeBuddyCNProviderDescriptor {
 /// 腾讯 CodeBuddy 供应商（OAuth 设备码流）。Phase 2 完整实现。
 /// 依据：OmniRoute `registry/codebuddy-cn` + `oauth/providers/codebuddy-cn.ts` + `executors/codebuddy-cn.ts`。
 /// 关键点：
-/// - 认证：`Authorization: Bearer <accessToken>`（config `apiKeys` 或 env `CODEBUDDY_CN_ACCESS_TOKEN`）。
+/// - 认证：`Authorization: Bearer <accessToken>`（当前启用的 config token 或 env `CODEBUDDY_CN_ACCESS_TOKEN`）。
 /// - **OAuth 登录 token（credential.accessToken）仅用于积分查询**（CodeBuddyCnUsageFetcher），
 ///   不参与模型调用——登录 token 调用模型会报「体验版尚未激活」。
 /// - 上游强制流式（非流式请求被拒 400 code 11101）：即使客户端 `stream=false` 也发 `stream:true`，
@@ -63,14 +63,15 @@ public struct CodeBuddyCNProvider: Provider {
         static var chat: URL { URL(string: "\(base)/v2/chat/completions")! }
     }
 
-    // MARK: - 凭据解析（多 token 轮换）
+    // MARK: - 凭据解析
 
     /// 当前使用的模型调用 token：config `apiKeys` 首个 → 环境变量兜底。
     /// 注意：`credential.accessToken`（OAuth 登录 token）仅用于积分查询，不参与模型调用。
     private func resolveToken(_ credential: ProviderCredential?) throws -> String {
-        if let config = try? ConfigStore.load(),
-           let first = config.apiKeys(for: id).first, !first.isEmpty {
-            return first
+        if let configured = credential?.apiKey {
+            let token = configured.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !token.isEmpty { return token }
+            throw ProviderError.missingCredentials("请先在供应商设置中启用一个模型调用 Token")
         }
         if let token = RouteConfig.envValue(["CODEBUDDY_CN_ACCESS_TOKEN"]), !token.isEmpty {
             return token
@@ -78,30 +79,6 @@ public struct CodeBuddyCNProvider: Provider {
         throw ProviderError.missingCredentials(
             "config providers.codebuddy-cn.apiKeys 或 CODEBUDDY_CN_ACCESS_TOKEN（OAuth 登录 token 仅用于积分查询）"
         )
-    }
-
-    /// 解析全部可用模型调用 token（轮换用）：config `apiKeys` 数组 + 环境变量 token。
-    /// 不含 `credential.accessToken`（登录 token 仅积分查询，不参与调用轮换）。
-    private func resolveTokens(_ credential: ProviderCredential?) -> [String] {
-        var tokens: [String] = []
-        // 1. 配置文件中的 apiKeys 数组（模型调用 token 载体）
-        if let config = try? ConfigStore.load() {
-            tokens.append(contentsOf: config.apiKeys(for: id))
-        }
-        // 2. 环境变量显式兜底（config 读取失败时仍可用）
-        if let env = RouteConfig.envValue(["CODEBUDDY_CN_ACCESS_TOKEN"]), !env.isEmpty {
-            tokens.append(env)
-        }
-        var seen = Set<String>()
-        return tokens
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-    }
-
-    /// 是否属于可轮换的错误（401/403 鉴权失败、429 限流/额度耗尽、502 上游错误）。
-    private static func isTokenRotationError(_ error: Error) -> Bool {
-        guard case ProviderError.upstreamError(let statusCode, _) = error else { return false }
-        return statusCode == 401 || statusCode == 403 || statusCode == 429 || statusCode == 502
     }
 
     /// ChatRequest 路径的角色归一化：`developer` → `system`（CodeBuddy 对 developer 角色误判内容审核）。
@@ -178,13 +155,9 @@ public struct CodeBuddyCNProvider: Provider {
         rawBody: Data?,
         credential: ProviderCredential?
     ) async throws -> AsyncThrowingStream<Data, Error> {
-        let tokens = resolveTokens(credential)
-        guard !tokens.isEmpty else {
-            throw ProviderError.missingCredentials(
-                "CODEBUDDY_CN_ACCESS_TOKEN or config providers.codebuddy-cn.credential.accessToken"
-            )
-        }
-        // 构建一次 body，轮换时复用（仅更换 Header 中的 Authorization）。
+        let token = try resolveToken(credential)
+        let tokens = [token]
+        // 构建请求 body；后续网络重试仍使用同一个已选 token。
         let bodyData: Data
         if let rawBody {
             guard var json = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any] else {
@@ -208,7 +181,7 @@ public struct CodeBuddyCNProvider: Provider {
             print("[codebuddy-cn:debug] upstream body: \(String(data: bodyData, encoding: .utf8) ?? "<non-utf8>")")
         }
 
-        // 客户端 stream=false：上游强制流式，聚合成 JSON。需要在轮换循环内完成聚合。
+        // 客户端 stream=false：上游强制流式，聚合成 JSON。
         if request.stream != true {
             return aggregatedStream(tokens: tokens, body: bodyData)
         }
@@ -216,16 +189,16 @@ public struct CodeBuddyCNProvider: Provider {
         return streamingWithRotation(tokens: tokens, body: bodyData)
     }
 
-    /// 多 token 流式轮换：逐个尝试 token，401/403 时流转下一 token。
+    /// 使用当前选中的 token 透传 SSE。
     private func streamingWithRotation(tokens: [String], body: Data) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                for (index, token) in tokens.enumerated() {
+                for token in tokens {
                     do {
                         let upstream = makeStreamingRequest(body: body, token: token)
                         let stream = ProviderHTTPClient.shared.streamThrowing(for: upstream)
                         let handler = IteratorHandler(iterator: stream.makeAsyncIterator())
-                        // 先取首个元素：此阶段抛出 401/403 视为握手失败并轮换。
+                        // 先取首个元素，确保上游握手错误能传回客户端。
                         guard let first = try await handler.next() else {
                             continuation.finish()
                             return
@@ -237,9 +210,6 @@ public struct CodeBuddyCNProvider: Provider {
                         continuation.finish()
                         return
                     } catch {
-                        if Self.isTokenRotationError(error), index + 1 < tokens.count {
-                            continue
-                        }
                         continuation.finish(throwing: error)
                         return
                     }
@@ -250,12 +220,11 @@ public struct CodeBuddyCNProvider: Provider {
         }
     }
 
-    /// 多 token 流式轮换 → 聚合为单个 JSON（用于 stream=false 客户端）。
+    /// 使用当前选中的 token 聚合为单个 JSON。
     private func aggregatedStream(tokens: [String], body: Data) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                var lastError: Error?
-                for (index, token) in tokens.enumerated() {
+                for token in tokens {
                     do {
                         let upstream = makeStreamingRequest(body: body, token: token)
                         let stream = ProviderHTTPClient.shared.streamThrowing(for: upstream)
@@ -264,15 +233,11 @@ public struct CodeBuddyCNProvider: Provider {
                         continuation.finish()
                         return
                     } catch {
-                        if Self.isTokenRotationError(error), index + 1 < tokens.count {
-                            lastError = error
-                            continue
-                        }
                         continuation.finish(throwing: error)
                         return
                     }
                 }
-                continuation.finish(throwing: lastError ?? ProviderError.invalidResponse("no upstream response"))
+                continuation.finish(throwing: ProviderError.invalidResponse("no upstream response"))
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -297,13 +262,14 @@ public struct CodeBuddyCNProvider: Provider {
 
     public func testConnection(credential: ProviderCredential?) async throws -> ConnectionTestResult {
         let start = Date()
-        let tokens = resolveTokens(credential)
-        guard !tokens.isEmpty else {
+        let token: String
+        do { token = try resolveToken(credential) } catch {
             return ConnectionTestResult(
                 success: false,
                 message: "请先配置 Access Token"
             )
         }
+        let tokens = [token]
 
         var lastMessage: String?
         for (index, token) in tokens.enumerated() {
@@ -338,7 +304,6 @@ public struct CodeBuddyCNProvider: Provider {
                 if index + 1 < tokens.count { continue }
             } catch {
                 lastMessage = error.localizedDescription
-                if Self.isTokenRotationError(error), index + 1 < tokens.count { continue }
             }
         }
         return ConnectionTestResult(
@@ -348,23 +313,24 @@ public struct CodeBuddyCNProvider: Provider {
         )
     }
 
-    /// 模型级测试：用指定模型发送最小流式请求（多 token 轮换）。
+    /// 模型级测试：用指定模型发送最小流式请求。
     public func testModel(_ modelID: String, credential: ProviderCredential?) async throws -> ConnectionTestResult {
         let start = Date()
-        let tokens = resolveTokens(credential)
-        guard !tokens.isEmpty else {
+        let token: String
+        do { token = try resolveToken(credential) } catch {
             return ConnectionTestResult(
                 success: false,
                 message: "模型 \(modelID) 测试失败: 未配置 token"
             )
         }
+        let tokens = [token]
         let probeRequest = ChatRequest(
             model: modelID,
             messages: [ChatMessage(role: .user, content: "ping")],
             stream: true,
             maxTokens: 1
         )
-        // 构建一次 body，逐个 token 尝试。
+        // 构建一次 body。
         var bodyData: Data
         do {
             var upstreamBody = probeRequest
@@ -388,10 +354,7 @@ public struct CodeBuddyCNProvider: Provider {
                 continue
             }
         }
-        return ConnectionTestResult(
-            success: false,
-            message: "模型 \(modelID) 测试失败: 所有 token 均未通过"
-        )
+        return ConnectionTestResult(success: false, message: "模型 \(modelID) 测试失败: 当前 token 未通过")
     }
 
     // MARK: - 探测

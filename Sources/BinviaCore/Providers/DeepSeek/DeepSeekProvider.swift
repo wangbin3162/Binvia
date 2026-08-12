@@ -35,40 +35,14 @@ public struct DeepSeekProvider: Provider {
     }
 
     private func resolveKey(_ credential: ProviderCredential?) throws -> String {
-        if let key = credential?.apiKey, !key.isEmpty {
-            return key
+        if let key = credential?.apiKey {
+            if !key.isEmpty { return key }
+            throw ProviderError.missingCredentials("请先在供应商设置中启用一个 API Key")
         }
         if let key = RouteConfig.envValue(["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"]), !key.isEmpty {
             return key
         }
         throw ProviderError.missingCredentials("DEEPSEEK_API_KEY or config providers.deepseek.credential.apiKey")
-    }
-
-    /// 解析全部可用 key（轮换用）：credential.apiKey 优先，并入 config `apiKeys` 数组与环境变量 key。
-    private func resolveKeys(_ credential: ProviderCredential?) -> [String] {
-        var keys: [String] = []
-        // 1. credential.apiKey 优先（RouteHandler 传入的主 key）
-        if let apiKey = credential?.apiKey, !apiKey.isEmpty {
-            keys.append(apiKey)
-        }
-        // 2. 配置文件中的 apiKeys 数组 + 环境变量 key（RouteConfig.apiKeys 已去重过滤）
-        if let config = try? ConfigStore.load() {
-            keys.append(contentsOf: config.apiKeys(for: id))
-        }
-        // 3. 环境变量显式兜底（config 读取失败时仍可用）
-        if let env = RouteConfig.envValue(["DEEPSEEK_API_KEY"]), !env.isEmpty {
-            keys.append(env)
-        }
-        var seen = Set<String>()
-        return keys
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-    }
-
-    /// 是否属于可轮换的错误（401/403 鉴权失败、429 限流/额度耗尽、502 上游错误）。
-    private static func isTokenRotationError(_ error: Error) -> Bool {
-        guard case ProviderError.upstreamError(let statusCode, _) = error else { return false }
-        return statusCode == 401 || statusCode == 403 || statusCode == 429 || statusCode == 502
     }
 
     private struct ModelsResponse: Decodable {
@@ -85,7 +59,7 @@ public struct DeepSeekProvider: Provider {
             return cached
         }
         // 2. 无凭据时直接回退静态目录（api-key 供应商不应导致 /v1/models 报错）
-        guard let key = resolveKeys(credential).first else {
+        guard let key = try? resolveKey(credential) else {
             return DeepSeekProviderDescriptor.descriptor.models
         }
         // 3. 打上游，成功后写缓存；任何失败静默回退静态目录
@@ -107,10 +81,7 @@ public struct DeepSeekProvider: Provider {
     }
 
     public func chat(request: ChatRequest, rawBody: Data?, credential: ProviderCredential?) async throws -> AsyncThrowingStream<Data, Error> {
-        let keys = resolveKeys(credential)
-        guard !keys.isEmpty else {
-            throw ProviderError.missingCredentials("DEEPSEEK_API_KEY or config providers.deepseek.credential.apiKey")
-        }
+        let key = try resolveKey(credential)
         // 优先使用 rawBody 透传（保留客户端所有字段和正确字段名）
         let body: Data
         if let rawBody {
@@ -133,39 +104,20 @@ public struct DeepSeekProvider: Provider {
 
         return AsyncThrowingStream { continuation in
             let task = Task {
-                for (index, key) in keys.enumerated() {
-                    var upstream = URLRequest(url: Endpoint.chat)
+                var upstream = URLRequest(url: Endpoint.chat)
                     upstream.httpMethod = "POST"
                     upstream.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     upstream.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
                     upstream.httpBody = body
 
-                    let stream = ProviderHTTPClient.shared.streamThrowing(for: upstream)
-                    var iterator = stream.makeAsyncIterator()
-                    do {
-                        // 先取首个元素：此阶段抛错可判定为握手失败并轮换
-                        guard let first = try await iterator.next() else {
-                            continuation.finish()
-                            return
-                        }
-                        // 已进入传输阶段：提交给该 key，后续失败不再轮换（可接受限制）
-                        continuation.yield(first)
-                        while let chunk = try await iterator.next() {
-                            continuation.yield(chunk)
-                        }
-                        continuation.finish()
-                        return
-                    } catch {
-                        // 仅初始握手阶段的可轮换错误（401/403/429/502）；传输中途失败无法轮换（可接受限制）
-                        if Self.isTokenRotationError(error), index + 1 < keys.count {
-                            continue
-                        }
-                        continuation.finish(throwing: error)
-                        return
+                let stream = ProviderHTTPClient.shared.streamThrowing(for: upstream)
+                var iterator = stream.makeAsyncIterator()
+                do {
+                    while let chunk = try await iterator.next() {
+                        continuation.yield(chunk)
                     }
-                }
-                // 理论不可达（keys 非空时循环内必然 return）
-                continuation.finish(throwing: ProviderError.invalidResponse("no upstream response"))
+                        continuation.finish()
+                } catch { continuation.finish(throwing: error) }
             }
             continuation.onTermination = { _ in
                 task.cancel()

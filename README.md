@@ -14,7 +14,7 @@ Binvia 是运行在 macOS 上的本地应用（菜单栏 GUI + 命令行 + 后�
 - **模型路由**：`provider/model` 语法或别名（`ds` / `cbcn`），裸模型名自动归属
 - **OpenAI / Anthropic 兼容 API**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（非流式 + 流式）、`/v1/messages`（非流式 + 流式）、`/v1/models`、`/v1/usage`、`/v1/health`
 - **多入站格式**：Codex CLI（`wire_api = "responses"`）可直接使用 `/v1/responses`；Claude Code / Anthropic SDK 可直接使用 `/v1/messages`
-- **网关 Key 认证**：`sk-bv-` 开头网关 Key 白名单；上游多 Key 自动轮换（401/403 时切换）
+- **网关 Key 认证**：`sk-bv-` 开头网关 Key 白名单；供应商支持保存多个令牌并手动选择生效令牌
 - **SSE 流式透传**：逐事件实时转发；强制流式上游对非流式客户端自动聚合为 JSON
 - **可靠重试**：408/429/5xx 指数退避重试，尊重 `Retry-After` 头
 - **OAuth 免 Key**：CodeBuddy 浏览器授权登录，无需手动填 Key

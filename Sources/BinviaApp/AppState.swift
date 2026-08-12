@@ -206,11 +206,11 @@ final class AppState: ObservableObject {
         try saveConfig()
     }
 
-    /// 设置某 provider 的带标签令牌列表（DeepSeek 多 key 轮换；API 令牌 / Access Token 通用）。
+    /// 设置某 provider 的带标签令牌列表，并规范化为最多一个启用令牌。
     func setTokens(_ tokens: [KeyedToken], for providerID: String) throws {
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true
-        providerConfig.apiKeys = tokens
+        providerConfig.apiKeys = normalizeTokens(tokens)
         config.providers[providerID] = providerConfig
         try saveConfig()
     }
@@ -271,9 +271,29 @@ final class AppState: ObservableObject {
             .filter { !$0.value.isEmpty }
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true
-        providerConfig.apiKeys = cleaned
+        providerConfig.apiKeys = normalizeTokens(cleaned)
         config.providers[providerID] = providerConfig
         try saveConfig()
+    }
+
+    private func normalizeTokens(_ tokens: [KeyedToken]) -> [KeyedToken] {
+        var result: [KeyedToken] = []
+        var selected = false
+        for token in tokens {
+            let value = token.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { continue }
+            let shouldEnable = token.enabled && !selected
+            if shouldEnable { selected = true }
+            result.append(KeyedToken(
+                label: token.label.isEmpty ? KeyedToken.defaultLabel(for: value) : token.label,
+                value: value,
+                enabled: shouldEnable
+            ))
+        }
+        if !selected, !result.isEmpty {
+            result[0].enabled = true
+        }
+        return result
     }
 
     /// 仅更新 provider 的 refreshToken（登录响应已自动保存；手动修改可选）。
@@ -288,7 +308,7 @@ final class AppState: ObservableObject {
         try saveConfig()
     }
 
-    /// 读取 deviceFlow provider 的全部 access token（主 token + 轮换 token）。
+    /// 读取 deviceFlow provider 的全部 access token（用于兼容用量等旧调用方）。
     func accessTokens(for providerID: String) -> [String] {
         guard let pc = config.providers[providerID] else { return [] }
         var result: [String] = []

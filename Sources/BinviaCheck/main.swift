@@ -296,12 +296,15 @@ func routeConfigTests() throws {
     let legacyKeysDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(legacyKeys.utf8))
     expectEqual(legacyKeysDecoded.apiKeyValues, ["sk-abcdef1234567890"], "旧 [String] apiKeys 迁移为 KeyedToken")
     expectEqual(legacyKeysDecoded.apiKeys.first?.label, "sk-abc••••7890", "旧 key 自动生成掩码标签")
+    expectEqual(legacyKeysDecoded.apiKeys.first?.enabled, true, "旧 key 默认启用")
     expectEqual(KeyedToken.defaultLabel(for: "sk-abcdef1234567890"), "sk-abc••••7890", "掩码标签规则（前6后4）")
     // 新格式 {label,value} 解码
-    let newFormat = #"{"enabled": true, "apiKeys": [{"label": "主 Key", "value": "sk-xyz"}]}"#
+    let newFormat = #"{"enabled": true, "apiKeys": [{"label": "主 Key", "value": "sk-xyz", "enabled": false}, {"label": "备用", "value": "sk-backup", "enabled": true}]}"#
     let newFormatDecoded = try JSONDecoder().decode(ProviderConfig.self, from: Data(newFormat.utf8))
     expectEqual(newFormatDecoded.apiKeys.first?.label, "主 Key", "新版 {label,value} 解码标签")
     expectEqual(newFormatDecoded.apiKeys.first?.value, "sk-xyz", "新版 {label,value} 解码值")
+    expectEqual(newFormatDecoded.apiKeys.first?.enabled, false, "新格式保留未启用状态")
+    expectEqual(newFormatDecoded.apiKeys.first(where: { $0.enabled })?.value, "sk-backup", "新格式选择启用令牌")
 
     // round trip（含 KeyedToken 标签）
     let pc = ProviderConfig(enabled: false, credential: ProviderCredential(apiKey: "k", accessToken: "t"), apiKeys: [kt("a", label: "主"), kt("b")])
@@ -319,23 +322,23 @@ func routeConfigTests() throws {
     let rcDecoded = try JSONDecoder().decode(RouteConfig.self, from: rcData)
     expectEqual(rcDecoded, rc, "RouteConfig round trip")
 
-    // Phase 20: credential(for:) 把 apiKeys[0] 合并进 credential.apiKey（GUI 单 key 存 apiKeys[]）
+    // 选择的令牌填入 credential.apiKey（GUI 单 key 存 apiKeys[]）
     let cfg5 = RouteConfig(providers: [
-        "opencode": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: [kt("gui-key")])
+        "opencode": ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: [KeyedToken(value: "gui-key", enabled: true)])
     ])
     expectEqual(cfg5.credential(for: "opencode").apiKey, "gui-key", "credential(for:) 合并 apiKeys[0]")
 
     // Phase 20 补充: enabled=false 也应返回已保存凭据（禁用态仍可测试模型）
     let cfg5b = RouteConfig(providers: [
-        "opencode": ProviderConfig(enabled: false, credential: ProviderCredential(), apiKeys: [kt("gui-key")])
+        "opencode": ProviderConfig(enabled: false, credential: ProviderCredential(), apiKeys: [KeyedToken(value: "gui-key", enabled: true)])
     ])
     expectEqual(cfg5b.credential(for: "opencode").apiKey, "gui-key", "禁用态仍返回合并后的凭据")
 
-    // 已显式配置 credential.apiKey 时不被 apiKeys[] 覆盖
+    // 旧 credential.apiKey 优先迁移为启用令牌
     let cfg6 = RouteConfig(providers: [
-        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: [kt("first-rotation")])
+        "deepseek": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "explicit"), apiKeys: [KeyedToken(value: "explicit", enabled: true), kt("first-rotation")])
     ])
-    expectEqual(cfg6.credential(for: "deepseek").apiKey, "explicit", "显式 apiKey 优先于 apiKeys[]")
+    expectEqual(cfg6.credential(for: "deepseek").apiKey, "first-rotation", "启用令牌优先于旧 apiKey")
 
     // Phase 20: credential(for:) 透传 ProviderConfig.region
     let cfg7 = RouteConfig(providers: [
