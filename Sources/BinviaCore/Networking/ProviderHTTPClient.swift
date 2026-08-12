@@ -71,6 +71,23 @@ public struct ProviderHTTPClient: Sendable {
     /// 支持 `BINVIA_STREAM_READINESS_TIMEOUT` 覆盖，默认 60s。
     public static var streamingReadinessTimeout: TimeInterval { StreamConfig.readinessTimeout }
 
+    /// 流式上游请求的空闲超时归一化。
+    ///
+    /// URLRequest 缺省 `timeoutInterval` 为 60s（URLSessionConfiguration 默认），
+    /// 对推理模型（CodeBuddy 高 effort 思考）的长静默会被误杀 —— 实测 CodeBuddy
+    /// 上游断流时报 `NSURLErrorTimedOut`（"The request timed out."），导致 codex
+    /// 重试后拿到截断回答。统一把默认值提升到 `StreamConfig.idleTimeout`（默认 120s）；
+    /// 显式请求的超时保持既有封顶语义（> idleTimeout 封顶到 idleTimeout）。
+    static func applyStreamingTimeout(_ request: inout URLRequest) {
+        if request.timeoutInterval <= 60 {
+            // URLRequest 缺省 60s（或更短）：提升到配置的流式空闲超时
+            request.timeoutInterval = streamingIdleTimeout
+        } else if request.timeoutInterval > streamingIdleTimeout {
+            // 既有封顶语义不变：显式更长超时封顶到 streamingIdleTimeout
+            request.timeoutInterval = streamingIdleTimeout
+        }
+    }
+
     private let session: URLSession
 
     public init(session: URLSession = .shared) {
@@ -123,9 +140,7 @@ public struct ProviderHTTPClient: Sendable {
     /// 非 2xx 时把上游错误 body 作为数据块透传（反向代理语义），不抛错。
     public func stream(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
         var mutableRequest = request
-        if mutableRequest.timeoutInterval > Self.streamingIdleTimeout {
-            mutableRequest.timeoutInterval = Self.streamingIdleTimeout
-        }
+        Self.applyStreamingTimeout(&mutableRequest)
         let effectiveRequest = mutableRequest
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -160,9 +175,7 @@ public struct ProviderHTTPClient: Sendable {
     /// 而非透传错误 body。用于 key 轮换等需要判断握手状态的场景。
     public func streamThrowing(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
         var mutableRequest = request
-        if mutableRequest.timeoutInterval > Self.streamingIdleTimeout {
-            mutableRequest.timeoutInterval = Self.streamingIdleTimeout
-        }
+        Self.applyStreamingTimeout(&mutableRequest)
         let effectiveRequest = mutableRequest
         return AsyncThrowingStream { continuation in
             let task = Task {

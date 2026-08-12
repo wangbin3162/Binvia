@@ -2895,6 +2895,27 @@ func streamingErrorAndTimeoutTests() async throws {
     for try await _ in timeoutStream {}
     expectEqual(captured.timeout ?? -1, ProviderHTTPClient.streamingIdleTimeout, "流式请求 timeoutInterval 封顶")
 
+    // 1b) 默认 timeoutInterval（URLRequest 缺省 60s）提升到 streamingIdleTimeout：
+    //     推理模型长静默思考不会被 60s 缺省值误杀（实测 CodeBuddy 高 effort 断流
+    //     报 NSURLErrorTimedOut，codex 重试后拿到截断回答）。
+    URLProtocolMock.reset()
+    var defaultTimeout = -1.0
+    URLProtocolMock.requestHandler = { request in
+        defaultTimeout = request.timeoutInterval
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        return (response, Data("data: x\n\n".utf8))
+    }
+    var defaultRequest = URLRequest(url: URL(string: "https://mock.test/v1/chat/completions")!)
+    defaultRequest.httpMethod = "POST"
+    defaultRequest.httpBody = Data(#"{"model":"m"}"#.utf8)
+    let defaultStream = ProviderHTTPClient(session: URLProtocolMock.makeSession()).stream(for: defaultRequest)
+    for try await _ in defaultStream {}
+    expectTrue(abs(defaultTimeout - ProviderHTTPClient.streamingIdleTimeout) < 0.001,
+               "默认流式 timeoutInterval 应提升到 streamingIdleTimeout，实际 \(defaultTimeout)")
+
     // 2) RouteHandler：首个 chunk 后上游抛错 → 流必须结束并返回错误体
     let testID = "flaky-stream"
     ProviderRegistry.shared.unregister(testID)
