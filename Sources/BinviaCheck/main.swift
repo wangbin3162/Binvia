@@ -355,6 +355,26 @@ func routeConfigTests() throws {
     ])
     expectEqual(cfg6.credential(for: "deepseek").apiKey, "explicit", "显式启用令牌优先于旧 apiKey")
 
+    // 回归：GUI 勾选 CodeBuddy token 后，选择必须持久化（setModelTokens 不再丢 enabled）。
+    // 模拟设置面板行为：主 token 未启用、第二个 token 启用（用户刚勾选了第二个）。
+    // 修复前 AppState.setModelTokens 的 `.map` 重建 KeyedToken 会把 enabled 全部重置为 false，
+    // normalizeTokens 兜底启用第一个，导致"勾选后关闭面板又切回第一个"。
+    // 这里验证核心层契约：保留 enabled 的令牌列表经持久化 round trip 后选择不变。
+    do {
+        let tokens = [
+            KeyedToken(label: "main", value: "ck-first", enabled: false),
+            KeyedToken(label: "person", value: "ck-second", enabled: true),
+        ]
+        // 编解码往返后选择保持（关闭面板重新加载的行为）
+        let pc = ProviderConfig(enabled: true, credential: ProviderCredential(), apiKeys: tokens)
+        let roundTrip = try JSONDecoder().decode(ProviderConfig.self, from: JSONEncoder().encode(pc))
+        expectEqual(roundTrip.apiKeys.first(where: { $0.enabled })?.value, "ck-second", "round trip 后选择保持（不切回第一个）")
+        expectEqual(roundTrip.apiKeys.filter(\.enabled).count, 1, "最多一个 enabled")
+        // selectedToken 解析到勾选项，而非第一个
+        let cfgRoundTrip = RouteConfig(providers: ["codebuddy-cn": roundTrip])
+        expectEqual(cfgRoundTrip.selectedToken(for: "codebuddy-cn")?.value, "ck-second", "selectedToken 返回勾选项")
+    }
+
     // Phase 20: credential(for:) 透传 ProviderConfig.region
     let cfg7 = RouteConfig(providers: [
         "zai": ProviderConfig(enabled: true, credential: ProviderCredential(apiKey: "k"), apiKeys: [], region: "global")
@@ -3817,6 +3837,52 @@ func codeBuddySanitizeBodyTests() {
     let plainOut = CodeBuddyCNProvider.normalizeReasoning(["stream": true])
     expectNil(plainOut["reasoning_summary"], "无 reasoning_effort 不补 reasoning_summary")
     expectEqual(plainOut["stream"] as? Bool, true, "无 reasoning_effort 其余字段保留")
+
+    // 嵌套形态（pi / zcode 等 AI SDK 客户端直接透传）：`reasoning: {effort:"none"}` → 整个删除，
+    // 否则 CodeBuddy 上游对 none 取值误判内容审核（"敏感内容"误报）。
+    let nestedNone = CodeBuddyCNProvider.normalizeReasoning(["reasoning": ["effort": "none"], "stream": true])
+    expectNil(nestedNone["reasoning"], "嵌套 reasoning: {effort:none} 删除整个对象")
+    expectEqual(nestedNone["stream"] as? Bool, true, "嵌套 none 其余字段保留")
+    let nestedOff = CodeBuddyCNProvider.normalizeReasoning(["reasoning": ["effort": "off"]])
+    expectNil(nestedOff["reasoning"], "嵌套 reasoning: {effort:off} 删除整个对象")
+    let nestedHigh = CodeBuddyCNProvider.normalizeReasoning(["reasoning": ["effort": "high"], "stream": true])
+    expectEqual((nestedHigh["reasoning"] as? [String: Any])?["effort"] as? String, "high", "嵌套 effort=high 保留")
+    expectEqual((nestedHigh["reasoning"] as? [String: Any])?["reasoning_summary"] as? String, "auto", "嵌套 effort=high 补 reasoning_summary")
+    expectEqual(nestedHigh["stream"] as? Bool, true, "嵌套 high 其余字段保留")
+    // 顶层 + 嵌套都不存在时原样保留
+    let nestedPlain = CodeBuddyCNProvider.normalizeReasoning(["stream": true])
+    expectNil(nestedPlain["reasoning"], "无 reasoning 不新增字段")
+
+    // 内容审核误报短语卫生化（实测定位：zCode 注入的 git 快照行
+    // `Main branch (you will usually use this for PRs): main` 固定命中 CodeBuddy 审核
+    // content_filter 误报；剥掉括号说明改写为 `Main branch: main` 后同请求正常）。
+    let fpJson: [String: Any] = [
+        "messages": [
+            ["role": "system", "content": "Current branch: main\nMain branch (you will usually use this for PRs): main\nGit user: wangbin"],
+            ["role": "user", "content": "hi"],
+        ],
+    ]
+    let fpOut = CodeBuddyCNProvider.sanitizeBody(fpJson)
+    let fpMessages = fpOut["messages"] as! [[String: Any]]
+    let fpContent = fpMessages[0]["content"] as! String
+    expectTrue(fpContent.contains("Main branch: main"), "误报短语改写为 Main branch: main")
+    expectFalse(fpContent.contains("you will usually use this for PRs"), "括号说明被剥除")
+    expectEqual(fpMessages[1]["content"] as? String, "hi", "其他消息内容不动")
+    // 分支名保留（master 变体实测同样触发审核，改写后同样恢复）
+    let masterJson: [String: Any] = ["messages": [["role": "system", "content": "Main branch (you will usually use this for PRs): master"]]]
+    let masterOut = CodeBuddyCNProvider.sanitizeBody(masterJson)
+    expectEqual((masterOut["messages"] as! [[String: Any]])[0]["content"] as? String, "Main branch: master", "分支名保留")
+    // 无误报短语时原样保留
+    let cleanJson: [String: Any] = ["messages": [["role": "system", "content": "Main branch: main"]]]
+    let cleanOut = CodeBuddyCNProvider.sanitizeBody(cleanJson)
+    expectEqual((cleanOut["messages"] as! [[String: Any]])[0]["content"] as? String, "Main branch: main", "无误报短语原样保留")
+    // 内容分片数组形态（OpenAI content parts）
+    let partsJson: [String: Any] = [
+        "messages": [["role": "user", "content": [["type": "text", "text": "Main branch (you will usually use this for PRs): main"]]]],
+    ]
+    let partsOut = CodeBuddyCNProvider.sanitizeBody(partsJson)
+    let partsContent = (partsOut["messages"] as! [[String: Any]])[0]["content"] as! [[String: Any]]
+    expectEqual(partsContent[0]["text"] as? String, "Main branch: main", "分片数组 text 改写")
 }
 
 // MARK: - Responses 格式翻译与端点

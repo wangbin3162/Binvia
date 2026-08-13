@@ -269,7 +269,11 @@ final class AppState: ObservableObject {
     /// （CodeBuddy 登录 token 调用模型会报「体验版尚未激活」）。
     func setModelTokens(_ tokens: [KeyedToken], for providerID: String) throws {
         let cleaned = tokens
-            .map { KeyedToken(label: $0.label, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .map { KeyedToken(
+                label: $0.label,
+                value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines),
+                enabled: $0.enabled
+            ) }
             .filter { !$0.value.isEmpty }
         var providerConfig = config.providers[providerID] ?? ProviderConfig()
         providerConfig.enabled = true

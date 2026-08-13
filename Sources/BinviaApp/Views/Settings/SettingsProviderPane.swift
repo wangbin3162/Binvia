@@ -238,6 +238,10 @@ struct SettingsProviderPane: View {
             } else {
                 ForEach(Array(draftTokens.enumerated()), id: \.offset) { index, token in
                     tokenRow(label: token.label, value: token.value, enabled: token.enabled, onSelect: {
+                        // 勾选即切换生效令牌并立即持久化：
+                        // - 每次点击都调 `persistDeviceTokens()`，选择立刻落盘，关闭面板/重启后保持；
+                        // - `setModelTokens` 内部的 `normalizeTokens` 保证全列表最多一个 enabled，
+                        //   不会出现"点掉当前勾选导致无生效令牌"的状态。
                         draftTokens = selectToken(at: index, in: draftTokens)
                         persistDeviceTokens()
                     }) {

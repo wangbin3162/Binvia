@@ -106,19 +106,47 @@ public struct CodeBuddyCNProvider: Provider {
 
     // MARK: - 请求体卫生化
 
+    /// CodeBuddy 内容审核误报短语：zCode 等客户端注入的 git 环境快照行。
+    ///
+    /// 实测该短语（任意分支名后缀）固定命中腾讯内容审核，返回
+    /// `finish_reason: content_filter`（"抱歉，系统检测到您当前输入的信息存在敏感内容"）；
+    /// 剥掉括号说明改写为 `Main branch: <分支名>` 后同请求正常（对照：`Main branch: main`、
+    /// 任意其他括号内容均不触发，定位为整句误报）。该行是纯环境元数据，改写不丢失语义。
+    public static let codeBuddyFalsePositivePhrase = "Main branch (you will usually use this for PRs)"
+
+    /// 在消息内容里改写 CodeBuddy 审核误报短语（支持字符串与 OpenAI 内容分片数组）。
+    static func sanitizeContent(_ content: Any?) -> Any? {
+        if let text = content as? String {
+            return text.replacingOccurrences(of: codeBuddyFalsePositivePhrase, with: "Main branch")
+        }
+        if let parts = content as? [[String: Any]] {
+            return parts.map { part in
+                guard let text = part["text"] as? String else { return part }
+                var p = part
+                p["text"] = text.replacingOccurrences(of: codeBuddyFalsePositivePhrase, with: "Main branch")
+                return p
+            }
+        }
+        return content
+    }
+
     /// 把 `role: "developer"` 改写成 `role: "system"`。
     ///
     /// 腾讯 CodeBuddy 后端对 developer 角色会走更严格的内容审核路径，即使内容无害也返回
     /// `finish_reason: content_filter`（"敏感内容"误报，流式中途终止）；同内容用 system
     /// 角色则正常（实测 pi 用 developer 报错、opencode 用 system 正常）。两者在 OpenAI
     /// 规范里语义等价，转发前统一改写为 system。
+    ///
+    /// 同时改写消息内容里的审核误报短语（见 `codeBuddyFalsePositivePhrase`）。
     public static func sanitizeBody(_ json: [String: Any]) -> [String: Any] {
         var out = json
         if var messages = out["messages"] as? [[String: Any]] {
             messages = messages.map { msg in
-                guard (msg["role"] as? String) == "developer" else { return msg }
                 var m = msg
-                m["role"] = "system"
+                if (m["role"] as? String) == "developer" {
+                    m["role"] = "system"
+                }
+                m["content"] = sanitizeContent(m["content"])
                 return m
             }
             out["messages"] = messages
@@ -132,8 +160,26 @@ public struct CodeBuddyCNProvider: Provider {
     ///   推理模型默认发 `reasoning: {effort:"none"}`，透传会被上游拒绝）。
     /// - 其余取值：镜像 CodeBuddy CLI 行为补 `reasoning_summary: "auto"`，
     ///   否则上游可能误判内容审核（同 OmniRoute 踩坑记录）。
+    ///
+    /// 兼容两种入站形态：
+    /// - 顶层 `reasoning_effort`（Anthropic thinking / Responses reasoning 翻译路径）；
+    /// - 嵌套 `reasoning: { "effort": ... }`（pi / zcode 等 AI SDK 客户端直接透传的
+    ///   OpenAI 风格对象）。两者都会触发 CodeBuddy 上游更严的内容审核，需同样处理。
     public static func normalizeReasoning(_ json: [String: Any]) -> [String: Any] {
         var out = json
+        // 嵌套形态：`reasoning: { "effort": "none" }`（AI SDK 默认）→ 整个删除，
+        // 避免上游对 none 取值误判内容审核；其余 effort 补 reasoning_summary。
+        if var reasoning = out["reasoning"] as? [String: Any],
+           let nestedEffort = reasoning["effort"] as? String {
+            if nestedEffort == "none" || nestedEffort == "off" {
+                out.removeValue(forKey: "reasoning")
+            } else {
+                reasoning["reasoning_summary"] = "auto"
+                out["reasoning"] = reasoning
+            }
+            return out
+        }
+        // 顶层形态：`reasoning_effort` 字符串。
         guard let effort = out["reasoning_effort"] as? String else { return out }
         if effort == "none" || effort == "off" {
             out.removeValue(forKey: "reasoning_effort")
@@ -179,6 +225,7 @@ public struct CodeBuddyCNProvider: Provider {
         // BINVIA_DEBUG_BODY=1：打印发往上游的原始 body（含 system prompt），用于排查上游误报
         if RouteConfig.envValue(["BINVIA_DEBUG_BODY"]) != nil {
             print("[codebuddy-cn:debug] upstream body: \(String(data: bodyData, encoding: .utf8) ?? "<non-utf8>")")
+            print("[codebuddy-cn:debug] request.stream=\(String(describing: request.stream)) streamingWithRotation -> \(request.stream == true)")
         }
 
         // 客户端 stream=false：上游强制流式，聚合成 JSON。
