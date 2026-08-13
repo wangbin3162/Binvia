@@ -272,17 +272,21 @@ public struct RouteHandler: Sendable {
                     }
                     do {
                         // 流式客户端走事件级 SSE 归一化（补 finish_reason / [DONE] / JSON 转 SSE）；
-                        // 非流式客户端保持字节透传（上游返回完整 JSON，不做 SSE 改写）。
+                        // 非流式客户端保持字节透传（上游返回完整 JSON，不做 SSE 改写），
+                        // 但在流结束前对完整 body 做一次 `finish_reason:""` 清洗（见 ChatFinishReasonSanitizer），
+                        // 避免上游空串透传给严格枚举客户端导致反序列化失败。
                         let normalizer = isStreaming ? SSEStreamNormalizer() : nil
                         let handler = IteratorHandler(iterator: remaining.makeAsyncIterator())
                         let idle = StreamIdleMonitor()
+                        // 非流式缓冲：累积完整 body 后统一清洗再输出。
+                        var nonStreamingBuffer = isStreaming ? nil : Data()
                         if let normalizer {
                             let parsedChunk = extractor.process(firstChunk)
                             for data in normalizer.process(parsedChunk) {
                                 continuation.yield(data)
                             }
                         } else {
-                            continuation.yield(extractor.process(firstChunk))
+                            nonStreamingBuffer?.append(extractor.process(firstChunk))
                         }
                         idle.touch()
                         while true {
@@ -299,13 +303,16 @@ public struct RouteHandler: Sendable {
                                     continuation.yield(data)
                                 }
                             } else {
-                                continuation.yield(extractor.process(chunk))
+                                nonStreamingBuffer?.append(extractor.process(chunk))
                             }
                         }
                         if let normalizer {
                             for data in normalizer.finish() {
                                 continuation.yield(data)
                             }
+                        } else if let buffer = nonStreamingBuffer {
+                            // 非流式：对完整 body 清洗空 finish_reason 后一次性输出。
+                            continuation.yield(ChatFinishReasonSanitizer.sanitize(buffer))
                         }
                     } catch {
                         // 客户端断开时不再写错误体，由 onTermination 记录 client_disconnected。

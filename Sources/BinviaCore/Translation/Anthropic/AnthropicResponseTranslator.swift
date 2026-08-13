@@ -17,7 +17,9 @@ public enum AnthropicResponseTranslator {
         }
 
         let message = (choice["message"] as? [String: Any]) ?? [:]
-        let finishReason = (choice["finish_reason"] as? String) ?? "stop"
+        // 空串/缺失/未知值统一兜底（上游偶发 `finish_reason:""`，见 FinishReasonNormalizer）。
+        let rawReason = (choice["finish_reason"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "stop"
+        let finishReason = FinishReasonNormalizer.normalized(rawReason)
         var content: [[String: Any]] = []
 
         if let reasoning = message["reasoning_content"] as? String, !reasoning.isEmpty {

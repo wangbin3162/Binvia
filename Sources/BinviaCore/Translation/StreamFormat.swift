@@ -47,6 +47,27 @@ public enum StreamFormat: Sendable {
         }
     }
 
+    /// 清洗单个 SSE 事件：把 OpenAI Chat chunk 里的 `"finish_reason":""`（空串）
+    /// 改写为 `"finish_reason":null`，避免下游严格枚举客户端 serde 报错。
+    ///
+    /// 走定点字节重写（不解析→重序列化），保留事件其余字段顺序/精度/空白。
+    /// 非 Chat 格式或无空串命中时原样返回。空串被清洗后，`finishReason(from:)`
+    /// 返回 nil，`sawFinishReason` 不置位，末尾照常合成正确的 stop/tool_calls。
+    func sanitizeFinishReason(in event: String) -> String {
+        guard case .openaiChat = self,
+              let value = SSEEvent.dataValue(from: event) else {
+            return event
+        }
+        let cleaned = ChatFinishReasonSanitizer.sanitize(Data(value.utf8))
+        // 无改写则原样返回整事件（含 SSE 前缀），避免重组丢格式。
+        guard let cleanedText = String(data: cleaned, encoding: .utf8),
+              cleanedText != value else {
+            return event
+        }
+        // 重组事件：保留原 SSE 前缀（data: / event: / 注释行）。
+        return SSEEvent.replacingDataValue(in: event, with: cleanedText) ?? event
+    }
+
     /// 事件中是否出现工具调用 delta（缺 finish_reason 时用于合成 `tool_calls`）。
     func hasToolCallDelta(_ event: String) -> Bool {
         switch self {
@@ -147,12 +168,18 @@ public enum StreamFormat: Sendable {
 }
 
 /// finish_reason 归一化（对齐 OmniRoute `open-sse/utils/finishReason.ts`）。
+///
+/// 上游（如 opencode.ai 的 grok 模型）偶发返回空串或非标准值，下游严格枚举客户端
+/// （Rust serde）会报 `unknown variant`。这里把空串与所有未知值兜底为 `stop`，
+/// 给聚合/翻译路径统一保险（透传路径另由 `ChatFinishReasonSanitizer` 清洗）。
 public enum FinishReasonNormalizer {
     public static func normalized(_ reason: String) -> String {
         switch reason {
+        case "stop", "length", "tool_calls", "content_filter", "function_call":
+            return reason
         case "max_tokens": return "length"
         case "safety", "recitation", "prohibited_content": return "content_filter"
-        default: return reason
+        default: return "stop"
         }
     }
 }

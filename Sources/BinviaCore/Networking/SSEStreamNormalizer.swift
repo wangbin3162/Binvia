@@ -69,12 +69,16 @@ public final class SSEStreamNormalizer: @unchecked Sendable {
             pendingDone = true
             return []
         }
-        if format.finishReason(from: event) != nil {
+        // 清洗 OpenAI Chat chunk 里的空串 finish_reason（上游偶发 `finish_reason:""`），
+        // 改为 null 后再判定/转发，避免下游严格枚举客户端 serde 报错。
+        // 空串被清洗后 finishReason(from:) 返回 nil，末尾照常合成正确值。
+        let sanitized = format.sanitizeFinishReason(in: event)
+        if format.finishReason(from: sanitized) != nil {
             sawFinishReason = true
         }
-        if format.hasToolCallDelta(event) {
+        if format.hasToolCallDelta(sanitized) {
             sawToolCall = true
         }
-        return [Data((event + "\n\n").utf8)]
+        return [Data((sanitized + "\n\n").utf8)]
     }
 }

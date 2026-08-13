@@ -54,4 +54,25 @@ public enum SSEEvent {
     public static func isDone(_ value: String) -> Bool {
         value == "[DONE]"
     }
+
+    /// 把事件里所有 `data:` 行的值替换为 `newValue`，其余行（event:/注释等）原样保留。
+    /// 保留原行 `data:` 后的空白风格（`data: ` / `data:`）。无 data 行时返回 nil。
+    public static func replacingDataValue(in event: String, with newValue: String) -> String? {
+        var hasData = false
+        var rebuilt = ""
+        for line in event.components(separatedBy: "\n") {
+            let cleaned = line.hasSuffix("\r") ? String(line.dropLast()) : line
+            if cleaned.hasPrefix("data:") {
+                hasData = true
+                // 保留冒号后到原值之间的空白（常见为单个空格，也可能无空格）。
+                let afterColon = cleaned.dropFirst(5)
+                let whitespace = afterColon.prefix(while: { $0 == " " || $0 == "\t" })
+                rebuilt += "data:" + whitespace + newValue
+            } else {
+                rebuilt += line
+            }
+            rebuilt += "\n"
+        }
+        return hasData ? String(rebuilt.dropLast()) : nil
+    }
 }

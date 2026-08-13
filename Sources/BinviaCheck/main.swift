@@ -3088,6 +3088,25 @@ func sseStreamNormalizerTests() async throws {
     let withReasonTail = withReason.finish()
     expectEqual(withReasonTail.count, 1, "已有 finish_reason 只补 [DONE]")
 
+    // 3b) 上游流式 chunk 带空串 finish_reason → 清洗为 null 再转发，末尾补合成 stop
+    // 复现 cbcn 流式报错场景：含 "finish_reason":"" 的 chunk 原样透传会导致下游 serde 报错。
+    let emptyReason = SSEStreamNormalizer()
+    let emptyOut = emptyReason.process(Data("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"\"}]}\n\n".utf8))
+    let emptyText = emptyOut.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectFalse(emptyText.contains("\"finish_reason\":\"\""), "流式 chunk 空串 finish_reason 清洗掉，不透传空串")
+    expectTrue(emptyText.contains("\"finish_reason\":null"), "流式 chunk 空串改写为 null")
+    let emptyTail = emptyReason.finish()
+    let emptyTailText = emptyTail.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(emptyTailText.contains("\"finish_reason\":\"stop\""), "空串被清洗后末尾补合成 stop")
+    expectTrue(emptyTailText.contains("[DONE]"), "清洗后结束补 [DONE]")
+
+    // 3c) 非空 finish_reason 不改写（保留原值）
+    let nonEmpty = SSEStreamNormalizer()
+    let nonEmptyOut = nonEmpty.process(Data("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n".utf8))
+    let nonEmptyText = nonEmptyOut.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(nonEmptyText.contains("\"finish_reason\":\"length\""), "非空 finish_reason 原样保留")
+    expectFalse(nonEmptyText.contains("\"finish_reason\":null"), "非空值不被改写为 null")
+
     // 4) 工具调用流缺 finish_reason → 合成 tool_calls
     let toolNormalizer = SSEStreamNormalizer()
     _ = toolNormalizer.process(Data("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"f\"}}]}}]}\n\n".utf8))
@@ -3129,6 +3148,9 @@ func sseStreamNormalizerTests() async throws {
     expectEqual(FinishReasonNormalizer.normalized("prohibited_content"), "content_filter", "prohibited_content → content_filter")
     expectEqual(FinishReasonNormalizer.normalized("stop"), "stop", "stop 保持")
     expectEqual(FinishReasonNormalizer.normalized("tool_calls"), "tool_calls", "tool_calls 保持")
+    // 空串/未知值兜底为 stop（上游偶发 finish_reason:""）
+    expectEqual(FinishReasonNormalizer.normalized(""), "stop", "空串 → stop")
+    expectEqual(FinishReasonNormalizer.normalized("unknown"), "stop", "未知值 → stop")
 
     // 9) SSEJSONAggregator 聚合时 finish_reason 归一化
     let aggStream = AsyncThrowingStream<Data, Error> { continuation in
@@ -4877,6 +4899,39 @@ func anthropicRouteHandlerTests() async throws {
     unsetenv("BINVIA_ENABLE_MESSAGES")
 }
 
+// MARK: - ChatFinishReasonSanitizer 非流式 body 清洗
+
+func chatFinishReasonSanitizerTests() throws {
+    // 1) 空串 finish_reason → null，其余字段原样保留
+    let body = Data(#"{"id":"c1","model":"grok-build-0.1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":""}]}"#.utf8)
+    let out = ChatFinishReasonSanitizer.sanitize(body)
+    let text = String(data: out, encoding: .utf8) ?? ""
+    expectTrue(text.contains(#""finish_reason":null"#), "空串 finish_reason 改写为 null")
+    expectTrue(text.contains(#""model":"grok-build-0.1""#), "其余字段原样保留（model）")
+    expectFalse(text.contains(#""finish_reason":""#), "不再含空串 finish_reason")
+
+    // 2) 容忍键名与冒号间空白
+    let spaced = Data(#"{"choices":[{"finish_reason" : ""}]}"#.utf8)
+    let spacedOut = ChatFinishReasonSanitizer.sanitize(spaced)
+    expectTrue((String(data: spacedOut, encoding: .utf8) ?? "").contains(#""finish_reason" : null"#), "容忍空白改写空串")
+
+    // 3) 非空值不改写
+    let stop = Data(#"{"choices":[{"finish_reason":"stop"}]}"#.utf8)
+    let stopOut = ChatFinishReasonSanitizer.sanitize(stop)
+    expectEqual(stopOut, stop, "非空值原样返回")
+
+    // 4) 无 finish_reason 不改写
+    let none = Data(#"{"choices":[{"message":{"content":"x"}}]}"#.utf8)
+    let noneOut = ChatFinishReasonSanitizer.sanitize(none)
+    expectEqual(noneOut, none, "无 finish_reason 原样返回")
+
+    // 5) 多 choice 全部清洗
+    let multi = Data(#"[{"finish_reason":""},{"finish_reason":""}]"#.utf8)
+    let multiOut = ChatFinishReasonSanitizer.sanitize(multi)
+    let multiText = String(data: multiOut, encoding: .utf8) ?? ""
+    expectFalse(multiText.contains(#""finish_reason":""#), "多 choice 空串全部改写")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -4956,6 +5011,7 @@ await run("CodeBuddy OAuth 登录账号标识", codeBuddyIdentityTests)
 await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIProviderTests)
 await run("流式中途错误传播与超时封顶", streamingErrorAndTimeoutTests)
 await run("SSEStreamNormalizer 事件级归一化", sseStreamNormalizerTests)
+await run("ChatFinishReasonSanitizer 非流式 body 清洗", chatFinishReasonSanitizerTests)
 await run("流式服务健壮性（readiness/idle/early EOF/状态码）", streamingRobustnessTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)

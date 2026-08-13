@@ -22,7 +22,9 @@ public enum ResponsesResponseTranslator {
         }
 
         let message = (choice["message"] as? [String: Any]) ?? [:]
-        let finishReason = (choice["finish_reason"] as? String) ?? "stop"
+        // 空串/缺失/未知值统一兜底（上游偶发 `finish_reason:""`，见 FinishReasonNormalizer）。
+        let rawReason = (choice["finish_reason"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "stop"
+        let finishReason = FinishReasonNormalizer.normalized(rawReason)
         let status: String = (finishReason == "length" || finishReason == "content_filter")
             ? "incomplete"
             : "completed"
