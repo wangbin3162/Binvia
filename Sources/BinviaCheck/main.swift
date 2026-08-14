@@ -2490,7 +2490,7 @@ func openCodeGoWebUsageFetcherTests() async throws {
     }
 }
 
-/// OpenCode Go 用量查询：local-first → web overlay → Cookie 失效回退。
+/// OpenCode Go 用量查询：只走 Cookie web 链路（不再读本地 SQLite）。
 func openCodeGoOverlayTests() async throws {
     unsetenv("OPENCODE_GO_QUOTA_URL")
     unsetenv("OPENCODE_GO_BASE_URL")
@@ -2501,24 +2501,13 @@ func openCodeGoOverlayTests() async throws {
         unsetenv("OPENCODE_GO_BASE_URL")
         unsetenv("OPENCODE_GO_COOKIE")
         unsetenv("OPENCODE_GO_WORKSPACE_ID")
-        unsetenv("OPENCODE_GO_LOCAL_DIR")
     }
 
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("BinviaCheck-OpenCodeGoOverlay-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
-    let databaseURL = root.appendingPathComponent("opencode.db")
-    let now = Date()
-    let createdMs = Int64((now.timeIntervalSince1970 - 60) * 1000)
-    try makeOpenCodeGoFixtureDatabase(databaseURL: databaseURL, createdMs: createdMs, includePart: false)
-    setenv("OPENCODE_GO_LOCAL_DIR", root.path, 1)
-
-    // 1) web 成功：本地金额 + web 权威剩余/重置 + Zen 余额
+    // 1) web 成功：三窗口 + Zen 余额（Cookie 直查）
     try await withGlobalURLProtocolMock {
         URLProtocolMock.reset()
         URLProtocolMock.requestHandler = { request in
+            expectEqual(request.value(forHTTPHeaderField: "Cookie"), "auth=go-cookie", "web 请求携带过滤后 Cookie")
             let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
             if query == OpenCodeGoWebUsageFetcher.workspacesServerID {
                 let body = #"[{id:"wrk_go001",name:"Go"}]"#
@@ -2533,18 +2522,16 @@ func openCodeGoOverlayTests() async throws {
         }
         let snapshot = try await OpenCodeGoUsageFetcher().fetchUsage(
             credential: ProviderCredential(cookieHeader: "auth=go-cookie"))
-        expectNil(snapshot.error, "overlay 无 error")
-        expectEqual(snapshot.quotaWindows.map(\.label), ["$12 / 5小时", "$30 / 周", "$60 / 月"], "overlay 保留本地标签")
-        expectTrue(abs(snapshot.quotaWindows[0].remainingFraction - 0.50) < 0.001, "overlay 5h 用 web 剩余")
-        expectEqual(snapshot.quotaWindows[0].total, 12, "overlay 保留本地总配额")
-        expectEqual(snapshot.quotaWindows[0].used, 9, "overlay 保留本地已用")
-        expectTrue(abs(snapshot.quotaWindows[1].remainingFraction - 0.75) < 0.001, "overlay 周用 web 剩余")
-        expectTrue(abs(snapshot.quotaWindows[2].remainingFraction - 0.88) < 0.001, "overlay 月用 web 剩余")
-        expectEqual(snapshot.balance, Decimal(string: "12.34"), "overlay Zen 余额")
-        expectEqual(snapshot.currency, "USD", "overlay 币种 USD")
+        expectNil(snapshot.error, "Cookie web 成功快照无 error，实际: \(snapshot.error ?? "nil")")
+        expectEqual(snapshot.quotaWindows.map(\.label), ["5h 滚动", "周配额", "月配额"], "web 三窗口标签")
+        expectTrue(abs(snapshot.quotaWindows[0].remainingFraction - 0.50) < 0.001, "5h 剩余 50%")
+        expectTrue(abs(snapshot.quotaWindows[1].remainingFraction - 0.75) < 0.001, "周剩余 75%")
+        expectTrue(abs(snapshot.quotaWindows[2].remainingFraction - 0.88) < 0.001, "月剩余 88%")
+        expectEqual(snapshot.balance, Decimal(string: "12.34"), "Zen 余额 12.34")
+        expectEqual(snapshot.currency, "USD", "币种 USD")
     }
 
-    // 2) Cookie 失效：回退本地窗口 + 过期提示
+    // 2) Cookie 失效：过期提示，无窗口无余额（不联网回退本地）
     try await withGlobalURLProtocolMock {
         URLProtocolMock.reset()
         URLProtocolMock.requestHandler = { request in
@@ -2553,16 +2540,16 @@ func openCodeGoOverlayTests() async throws {
         }
         let expired = try await OpenCodeGoUsageFetcher().fetchUsage(
             credential: ProviderCredential(cookieHeader: "auth=stale"))
-        expectTrue(expired.error?.contains("回退本机") == true, "Cookie 失效 → 回退提示，实际: \(expired.error ?? "nil")")
-        expectEqual(expired.quotaWindows.map(\.label), ["$12 / 5小时", "$30 / 周", "$60 / 月"], "Cookie 失效保留本地窗口")
+        expectTrue(expired.error?.contains("Cookie 无效或已过期") == true, "Cookie 失效 → 过期提示，实际: \(expired.error ?? "nil")")
+        expectTrue(expired.quotaWindows.isEmpty, "Cookie 失效无窗口")
         expectNil(expired.balance, "Cookie 失效无余额")
     }
 
-    // 3) 无 Cookie：纯本地（不联网）
-    let localOnly = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
-    expectNil(localOnly.error, "无 Cookie 纯本地无 error")
-    expectEqual(localOnly.quotaWindows.count, 3, "无 Cookie 三窗口")
-    expectNil(localOnly.balance, "无 Cookie 无余额")
+    // 3) 无 Cookie：未配置提示（不联网）
+    let missing = try await OpenCodeGoUsageFetcher().fetchUsage(credential: ProviderCredential())
+    expectTrue(missing.error?.contains("未配置") == true, "无 Cookie → 未配置提示，实际: \(missing.error ?? "nil")")
+    expectTrue(missing.quotaWindows.isEmpty, "无 Cookie 无窗口")
+    expectNil(missing.balance, "无 Cookie 无余额")
 }
 
 /// CodeBuddy CN 用量查询器（参考 OmniRoute usage/codebuddy-cn.ts）：

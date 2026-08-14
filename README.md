@@ -173,7 +173,6 @@ curl http://localhost:20427/v1/usage
 | `BINVIA_CONFIG` | 配置文件路径覆盖 |
 | `OPENCODE_COOKIE` / `OPENCODE_GO_COOKIE` | OpenCode / OpenCode Go 浏览器会话 Cookie（用量查询，也可在 GUI 设置面板填写） |
 | `OPENCODE_WORKSPACE_ID` / `OPENCODE_GO_WORKSPACE_ID` | 跳过 workspace 发现，强制指定（接受 `wrk_...` 或完整 URL） |
-| `OPENCODE_GO_LOCAL_DIR` | 覆盖本地 opencode 数据目录（默认 `~/.local/share/opencode`） |
 | `OPENCODE_GO_QUOTA_URL` | 显式覆盖 OpenCode Go web 配额端点（默认端点上游未公开，仅供测试） |
 | `BINVIA_STREAM_READINESS_TIMEOUT` | 首个事件超时（秒），默认 60 |
 | `BINVIA_STREAM_IDLE_TIMEOUT` | 两次事件之间的空闲超时（秒），默认 120 |

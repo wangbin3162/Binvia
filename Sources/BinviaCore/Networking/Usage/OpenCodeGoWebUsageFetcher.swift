@@ -38,7 +38,7 @@ public struct OpenCodeGoWebUsage {
 /// 抓取 `https://opencode.ai/workspace/{id}/go` 解析三窗口配额（服务端权威百分比 + 重置时间），
 /// 并行抓 dashboard 页面 / `_server` billing RPC 解析 Zen 余额；余额解析失败不影响配额窗口。
 ///
-/// 本类型只做 web 查询；local-first + overlay 合并逻辑在 `OpenCodeGoUsageFetcher`。
+/// 本类型只做 web 查询；`OpenCodeGoUsageFetcher` 直接把它转成用量快照。
 public struct OpenCodeGoWebUsageFetcher {
     private let client: ProviderHTTPClient
 
@@ -90,7 +90,7 @@ public struct OpenCodeGoWebUsageFetcher {
 
         let text = try await fetchUsagePage(workspaceID: workspaceID, cookieHeader: requestCookieHeader)
         guard let windows = Self.parseWindows(text: text, now: now) else {
-            // 页面解析失败但余额可用：只回余额（上层可叠加到本地窗口）
+            // 页面解析失败但余额可用：只回余额（上层仍可展示余额）
             if let balance {
                 return OpenCodeGoWebUsage(windows: [], balanceUSD: balance)
             }

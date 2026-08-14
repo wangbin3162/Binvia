@@ -96,7 +96,7 @@ public struct CodeBuddyCNProvider: Provider {
     private func applyCodeBuddyHeaders(to request: inout URLRequest, token: String) {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("CLI/2.108.1 CodeBuddy/2.108.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("CLI/2.136.0 CodeBuddy/2.136.0", forHTTPHeaderField: "User-Agent")
         request.setValue("SaaS", forHTTPHeaderField: "X-Product")
         request.setValue("CLI", forHTTPHeaderField: "X-IDE-Type")
         request.setValue("CLI", forHTTPHeaderField: "X-IDE-Name")

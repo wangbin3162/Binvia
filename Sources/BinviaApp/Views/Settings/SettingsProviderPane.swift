@@ -171,8 +171,6 @@ struct SettingsProviderPane: View {
             // 标题黑体：分区标题用粗体（默认 Form 小标题样式偏细，用户反馈 API 令牌标题不醒目）。
             Text("API 令牌")
                 .font(.headline)
-        } footer: {
-            Text("请求会通过 Authorization: Bearer <key> 转发到 DeepSeek。保存后立即热更新。")
         }
     }
 
@@ -264,7 +262,7 @@ struct SettingsProviderPane: View {
         } header: {
             Text("模型调用 Access Token")
         } footer: {
-            Text("请求通过 Authorization: Bearer <access_token> 转发到腾讯 CodeBuddy；勾选项为当前生效 token。OAuth 登录 token 仅用于积分查询（见用量面板），不参与模型调用。")
+            Text("勾选项为当前生效 token。OAuth 登录 token 仅用于积分查询（见用量面板），不参与模型调用。")
         }
     }
 

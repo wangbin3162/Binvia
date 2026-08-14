@@ -18,7 +18,7 @@ public struct CodeBuddyOAuthConfig: Sendable {
         stateUrl: URL? = nil,
         tokenUrl: URL? = nil,
         refreshUrl: URL? = nil,
-        userAgent: String = "CLI/2.63.2 CodeBuddy/2.63.2",
+        userAgent: String = "CLI/2.136.0 CodeBuddy/2.136.0",
         platform: String = "CLI",
         pollInterval: TimeInterval = 5,
         timeout: TimeInterval = 600
