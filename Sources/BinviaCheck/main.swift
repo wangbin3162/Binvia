@@ -2847,7 +2847,44 @@ func genericOpenAIProviderTests() async throws {
         failed += 1
         print("FAIL: GenericOpenAIProvider 双重前缀路径无法解析 model 字段")
     }
+
+    // 6) listModels 带凭据时走上游 /models 端点拉取动态模型列表
+    let dynamicProvider = GenericOpenAIProvider(
+        id: "unisound",
+        baseURL: URL(string: "https://mock.test/v1")!,
+        models: [ProviderModelEntry(modelName: "glm-5.2")]
+    )
+    // 先清缓存，避免前面 nil 凭据路径的缓存残留
+    await ModelCache.shared.invalidate("unisound")
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        // 确认请求的是 /models 端点
+        expectEqual(request.url?.absoluteString, "https://mock.test/v1/models", "GenericOpenAIProvider listModels 请求 /models 端点")
+        let body = Data(#"{"data":[{"id":"glm-5.2"},{"id":"glm-5.2-flash"}]}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, body)
+    }
+    let dynamicModels = try await dynamicProvider.listModels(credential: ProviderCredential(apiKey: "sk-test"))
+    expectEqual(dynamicModels.map(\.id), ["glm-5.2", "glm-5.2-flash"], "GenericOpenAIProvider listModels 动态拉取上游模型")
+
+    // 7) listModels 上游失败时回退手动配置列表
+    await ModelCache.shared.invalidate("unisound")
+    URLProtocolMock.reset()
+    URLProtocolMock.requestHandler = { request in
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 500, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, Data(#"{"error":"server error"}"#.utf8))
+    }
+    let fallbackModels = try await dynamicProvider.listModels(credential: ProviderCredential(apiKey: "sk-test"))
+    expectEqual(fallbackModels.map(\.id), ["glm-5.2"], "GenericOpenAIProvider listModels 上游失败回退手动配置")
 }
+
+
 
 // MARK: - 流式中途错误传播 + 流式超时封顶
 
@@ -5029,6 +5066,83 @@ await run("Anthropic 请求翻译", anthropicRequestTranslatorTests)
 await run("Anthropic 响应翻译", anthropicResponseTranslatorTests)
 await run("Anthropic 流式翻译（去重/延迟/图片）", anthropicStreamTranslatorTests)
 await run("Anthropic 端点集成", anthropicRouteHandlerTests)
+
+/// 自定义 provider 的完整 chat 路由测试：验证 modelIsAvailable + 模型名映射 + chat 转发。
+func customProviderRouteHandlerTests() async throws {
+    let testID = "cp-route-test"
+    ProviderRegistry.shared.unregister(testID)
+    defer { ProviderRegistry.shared.unregister(testID) }
+
+    // 捕获 provider 收到的 model 名
+    actor Captured {
+        var model: String?
+        func set(_ m: String) { model = m }
+    }
+    let captured = Captured()
+
+    struct MockProvider: Provider {
+        let id: String
+        let captured: Captured
+        func listModels(credential: ProviderCredential?) async throws -> [Model] { [] }
+        func chat(request: ChatRequest, rawBody: Data?, credential: ProviderCredential?) async throws -> AsyncThrowingStream<Data, Error> {
+            await captured.set(request.model)
+            return AsyncThrowingStream { c in
+                c.yield(Data("data: {\"id\":\"x\",\"model\":\"\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n".utf8))
+                c.yield(Data("data: [DONE]\n\n".utf8))
+                c.finish()
+            }
+        }
+        func testConnection(credential: ProviderCredential?) async throws -> ConnectionTestResult {
+            ConnectionTestResult(success: true, message: "ok", latencyMS: 0)
+        }
+        func testModel(_ modelID: String, credential: ProviderCredential?) async throws -> ConnectionTestResult {
+            ConnectionTestResult(success: true, message: "ok", latencyMS: 0)
+        }
+    }
+
+    let provider = MockProvider(id: testID, captured: captured)
+    ProviderRegistry.shared.register(ProviderDescriptor(
+        metadata: ProviderMetadata(id: testID, alias: testID, displayName: "CP Route Test", authType: .apiKey),
+        baseURL: URL(string: "https://example.com/v1"),
+        models: [],
+        isUserDefined: true,
+        makeProvider: { provider }
+    ))
+
+    // 配置：自定义 provider 定义含模型 glm-5.2（显示名 g52），provider 启用 + 有 key
+    let config = RouteConfig(
+        host: "127.0.0.1", port: 0,
+        apiKeys: [GatewayKeyConfig(key: "test-key")],
+        providers: [
+            testID: ProviderConfig(
+                enabled: true,
+                credential: ProviderCredential(apiKey: "sk-test")
+            )
+        ],
+        customProviderDefs: [
+            CustomProviderDef(
+                id: testID,
+                displayName: "CP Route Test",
+                baseURL: "https://example.com/v1",
+                models: [ProviderModelEntry(displayName: "g52", modelName: "glm-5.2")]
+            )
+        ]
+    )
+    let handler = RouteHandler(config: config)
+
+    // 1) 用显示名请求：testID/g52 → modelIsAvailable 通过 → 映射到 glm-5.2 → 转发上游
+    let req = HTTPRequest(
+        method: "POST", path: "/v1/chat/completions", queryItems: [:],
+        headers: ["authorization": "Bearer test-key"],
+        body: Data(#"{"model":"\#(testID)/g52","messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+    )
+    let resp = try await handler.handle(req)
+    expectEqual(resp.status, 200, "自定义 provider chat 路由应返回 200")
+    let model = await captured.model
+    expectEqual(model, "glm-5.2", "自定义 provider chat 转发上游的 model 应为真实模型名")
+}
+
+await run("自定义 Provider 路由（模型可用性+名称映射）", customProviderRouteHandlerTests)
 await run("在线更新检查（版本比较 + GitHub API 解析）", updateCheckerTests)
 
 print("")

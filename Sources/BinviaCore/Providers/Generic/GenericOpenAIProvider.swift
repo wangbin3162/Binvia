@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 与内置 `OpenAIProvider` 的差异：
 /// - `baseURL`/`models` 在构造时由 config 注入（不读 env、不读静态目录）；
-/// - `listModels` 返回**不带 provider 前缀**的模型 id；前缀由 `/v1/models`、模型白名单和 UI 统一拼接，避免重复；
+/// - `listModels` 调上游 `/models` 动态拉取，无凭据/失败时回退手动配置列表；返回**不带 provider 前缀**的模型 id；
 /// - `chat` 兼容接收带前缀或重复前缀的模型名，并在转发上游前剥除；
 /// - 单 key（无轮换）；`Authorization: Bearer <key>`。
 ///
@@ -163,9 +163,15 @@ public struct GenericOpenAIProvider: Provider {
         return nil
     }
 
-    /// 直接返回构造时注入的不带前缀模型列表。不走 ModelCache / 不拉上游（用户手动维护）。
-    /// 外层统一拼接 `<provider>/<model>`，因此这里不能返回带 provider 前缀的 id。
+    /// 拉取上游 `/models` 端点获取动态模型列表；无凭据或拉取失败时回退到构造时注入的手动配置列表。
+    /// 返回的模型 id **不带 provider 前缀**，外层统一拼接 `<provider>/<model>`。
     public func listModels(credential: ProviderCredential?) async throws -> [Model] {
-        models
+        let modelsURL = baseURL.appendingPathComponent("models")
+        return await Self.fetchDynamicModels(
+            id: id,
+            modelsURL: modelsURL,
+            staticModels: models,
+            credential: credential
+        )
     }
 }

@@ -105,10 +105,19 @@ public struct RouteHandler: Sendable {
         config.providers[providerID]?.enabled ?? ProviderCatalog.isEnabledByDefault(providerID)
     }
 
+    /// 某供应商的有效模型列表：自定义 provider 从 customProviderDefs 取，内置从 userModels 取。
+    private func providerModelEntries(for providerID: String) -> [ProviderModelEntry] {
+        if let def = config.customProviderDef(for: providerID), !def.models.isEmpty {
+            return def.models
+        }
+        return config.providers[providerID]?.userModels ?? []
+    }
+
     /// 配置了用户模型时，以用户模型为准；未配置时保留内置静态目录路由。
     private func modelIsAvailable(_ providerID: String, modelID: String) -> Bool {
-        if let userModels = config.providers[providerID]?.userModels, !userModels.isEmpty {
-            return userModels.contains {
+        let entries = providerModelEntries(for: providerID)
+        if !entries.isEmpty {
+            return entries.contains {
                 $0.effectiveDisplayName == modelID || $0.modelName == modelID
             }
         }
@@ -184,8 +193,8 @@ public struct RouteHandler: Sendable {
             guard config.providers[descriptor.id]?.enabled ?? ProviderCatalog.isEnabledByDefault(descriptor.id) else { continue }
 
             let alias = descriptor.alias ?? descriptor.id
-            let userModels = config.providers[descriptor.id]?.userModels ?? []
-            for entry in userModels where isModelAllowed(alias, entry.effectiveDisplayName) {
+            let entries = providerModelEntries(for: descriptor.id)
+            for entry in entries where isModelAllowed(alias, entry.effectiveDisplayName) {
                 appendModel(alias, entry.effectiveDisplayName, descriptor.id, entry.contextLength)
             }
         }
@@ -234,8 +243,8 @@ public struct RouteHandler: Sendable {
         var forwarded = chatRequest
         // resolution.modelID 现在是显示名称（/v1/models 返回 alias/displayName），
         // 转发上游前需映射回真实模型名。找不到映射时保持原值（兼容旧路由）。
-        let userModels = config.providers[resolution.providerID]?.userModels ?? []
-        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+        let entries = providerModelEntries(for: resolution.providerID)
+        let realModelName = entries.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
             ?? resolution.modelID
         forwarded.model = realModelName
         forwarded.rawBody = body
@@ -427,8 +436,8 @@ public struct RouteHandler: Sendable {
         }
 
         var forwarded = translated
-        let userModels = config.providers[resolution.providerID]?.userModels ?? []
-        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+        let entries = providerModelEntries(for: resolution.providerID)
+        let realModelName = entries.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
             ?? resolution.modelID
         forwarded.model = realModelName
         forwarded.rawBody = translated.rawBody
@@ -588,8 +597,8 @@ public struct RouteHandler: Sendable {
         }
 
         var forwarded = translated
-        let userModels = config.providers[resolution.providerID]?.userModels ?? []
-        let realModelName = userModels.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
+        let entries = providerModelEntries(for: resolution.providerID)
+        let realModelName = entries.first { $0.effectiveDisplayName == resolution.modelID }?.modelName
             ?? resolution.modelID
         forwarded.model = realModelName
         forwarded.rawBody = translated.rawBody
