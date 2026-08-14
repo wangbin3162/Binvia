@@ -201,6 +201,18 @@ func sseTests() async throws {
 // MARK: - APIKeyAuthenticator
 
 func apiKeyAuthenticatorTests() {
+    // 清除网关 key 环境变量，避免污染「无配置 key」场景
+    let savedBinvia = getenv("BINVIA_API_KEY").map { String(cString: $0) }
+    let savedRouter = getenv("ROUTER_API_KEY").map { String(cString: $0) }
+    let savedOmni = getenv("OMNIROUTE_API_KEY").map { String(cString: $0) }
+    unsetenv("BINVIA_API_KEY")
+    unsetenv("ROUTER_API_KEY")
+    unsetenv("OMNIROUTE_API_KEY")
+    defer {
+        if let v = savedBinvia { setenv("BINVIA_API_KEY", v, 1) } else { unsetenv("BINVIA_API_KEY") }
+        if let v = savedRouter { setenv("ROUTER_API_KEY", v, 1) } else { unsetenv("ROUTER_API_KEY") }
+        if let v = savedOmni { setenv("OMNIROUTE_API_KEY", v, 1) } else { unsetenv("OMNIROUTE_API_KEY") }
+    }
     let noKeys = APIKeyAuthenticator(configuredKeys: [])
     expectFalse(noKeys.requiresAuthentication, "无配置 key 时 requiresAuthentication = false")
     expectFalse(noKeys.isValid(token: "anything"), "无配置 key 时任何 token 无效")
