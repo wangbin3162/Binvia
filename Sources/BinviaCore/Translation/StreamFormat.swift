@@ -86,11 +86,11 @@ public enum StreamFormat: Sendable {
     }
 
     /// 合成结束 chunk（缺 finish_reason 时补发）。
-    func syntheticFinishChunk(finishReason: String) -> Data? {
+    func syntheticFinishChunk(finishReason: String, id: String = "chatcmpl-binvia") -> Data? {
         switch self {
         case .openaiChat:
             let root: [String: Any] = [
-                "id": "chatcmpl-binvia",
+                "id": id,
                 "object": "chat.completion.chunk",
                 "created": Int(Date().timeIntervalSince1970),
                 "model": "unknown",

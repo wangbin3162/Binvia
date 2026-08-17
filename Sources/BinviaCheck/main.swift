@@ -3099,7 +3099,9 @@ func sseStreamNormalizerTests() async throws {
     expectTrue(partial.isEmpty, "未完整事件不转发")
     let rest = normalizer.process(Data("\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n".utf8))
     expectEqual(rest.count, 2, "完整事件逐条转发")
-    expectTrue(String(data: rest[0], encoding: .utf8)?.contains("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}") == true, "跨 chunk 事件原文保留")
+    let firstEvent = String(data: rest[0], encoding: .utf8) ?? ""
+    expectTrue(firstEvent.contains("\"content\":\"hi\""), "跨 chunk 事件内容保留")
+    expectTrue(firstEvent.contains("\"finish_reason\":null"), "跨 chunk 事件 finish_reason 保留")
     let tail = normalizer.finish()
     expectEqual(tail.count, 1, "已带 finish_reason 时只补 [DONE]")
     expectTrue(String(data: tail[0], encoding: .utf8)?.contains("[DONE]") == true, "结束补 [DONE]")
@@ -3142,6 +3144,40 @@ func sseStreamNormalizerTests() async throws {
     let nonEmptyText = nonEmptyOut.map { String(data: $0, encoding: .utf8) ?? "" }.joined()
     expectTrue(nonEmptyText.contains("\"finish_reason\":\"length\""), "非空 finish_reason 原样保留")
     expectFalse(nonEmptyText.contains("\"finish_reason\":null"), "非空值不被改写为 null")
+
+    // 3d) 上游 SSE 事件缺少 id/object/created/model 时补齐
+    let missingIdentity = SSEStreamNormalizer()
+    let identityOut = missingIdentity.process(Data("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".utf8))
+    let identityText = String(data: identityOut[0], encoding: .utf8) ?? ""
+    expectTrue(identityText.contains("\"id\":\"chatcmpl-binvia-"), "SSE 事件缺少 id 时补齐")
+    expectTrue(identityText.contains("\"object\":\"chat.completion.chunk\""), "SSE 事件缺少 object 时补齐")
+    expectTrue(identityText.contains("\"created\":"), "SSE 事件缺少 created 时补齐")
+    expectTrue(identityText.contains("\"model\":\"unknown\""), "SSE 事件缺少 model 时补齐")
+
+    // 3e) 字段齐全的事件跳过归一化，字节原样透传
+    let completeEvent = SSEStreamNormalizer()
+    let completeInput = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":123,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"
+    let completeOut = completeEvent.process(Data(completeInput.utf8))
+    expectEqual(String(data: completeOut[0], encoding: .utf8) ?? "", completeInput,
+                "字段齐全事件跳过归一化原样透传")
+
+    // 3f) 全流 id 统一：首个事件缺 id 时合成，后续带不同 id 的事件改写为同一 id
+    let mixedID = SSEStreamNormalizer()
+    _ = mixedID.process(Data("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".utf8))
+    let mixedOut = mixedID.process(Data("data: {\"id\":\"upstream-diff\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n".utf8))
+    let mixedText = String(data: mixedOut[0], encoding: .utf8) ?? ""
+    expectTrue(mixedText.contains("chatcmpl-binvia-"), "后续事件 id 统一为合成 id")
+    expectFalse(mixedText.contains("\"id\":\"upstream-diff\""), "后续事件不再保留上游异 id")
+
+    // 3g) 合成结束块 id 与全流 id 一致（上游 id / 合成 id 两种场景）
+    let upstreamFinish = SSEStreamNormalizer()
+    _ = upstreamFinish.process(Data("data: {\"id\":\"upstream-id-9\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"\"}]}\n\n".utf8))
+    let upstreamFinishText = upstreamFinish.finish().map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(upstreamFinishText.contains("\"id\":\"upstream-id-9\""), "结束块沿用上游首事件 id")
+    let synthFinish = SSEStreamNormalizer()
+    _ = synthFinish.process(Data("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"\"}]}\n\n".utf8))
+    let synthFinishText = synthFinish.finish().map { String(data: $0, encoding: .utf8) ?? "" }.joined()
+    expectTrue(synthFinishText.contains("\"id\":\"chatcmpl-binvia-"), "结束块沿用合成 id")
 
     // 4) 工具调用流缺 finish_reason → 合成 tool_calls
     let toolNormalizer = SSEStreamNormalizer()
@@ -4766,6 +4802,19 @@ func responsesStreamTranslatorTests() throws {
     expectTrue(orderText.contains("\"content_index\":0") && orderText.contains("\"image_url\""),
                "图片 part 分配 content_index 0")
     expectTrue(orderText.contains("\"delta\":\"see\""), "图片后文本 delta 保留")
+
+    // 5) CodeBuddy 可能在首个文本块提前携带 finish_reason，后续仍有文本；
+    // Responses 不得在首块后发送 output_text.done，否则 Codex 只显示首个片段。
+    let earlyFinish = ResponsesStreamTranslator(responseID: "resp_early_finish")
+    let earlyFirst = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"**"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#).utf8)
+    let earlySecond = Data(sseChunk(#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"Swift"},"finish_reason":null}]}"#).utf8)
+    let earlyEvents = earlyFinish.process(earlyFirst) + earlyFinish.process(earlySecond) + earlyFinish.finish()
+    let earlyText = earlyEvents.map { String(decoding: $0, as: UTF8.self) }.joined()
+    expectTrue(earlyText.contains("\"delta\":\"**\""), "提前 finish 后保留首个文本")
+    expectTrue(earlyText.contains("\"delta\":\"Swift\""), "提前 finish 后继续保留后续文本")
+    // 每个 done 事件含两处同名文本（event: 行 + data 的 type 字段），按 type 字段计数。
+    expectEqual(earlyText.components(separatedBy: #""type":"response.output_text.done""#).count - 1, 1,
+                "完整流结束后只关闭一次文本")
 }
 
 /// Anthropic 流式翻译：参数去重 / tool_use 名称延迟 / 图片块（F3/G3/I）。
@@ -4968,6 +5017,27 @@ func chatFinishReasonSanitizerTests() throws {
     expectFalse(multiText.contains(#""finish_reason":""#), "多 choice 空串全部改写")
 }
 
+func chatCompletionResponseNormalizerTests() throws {
+    let missingID = Data(#"{"model":"grok-build-0.1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#.utf8)
+    let normalized = ChatCompletionResponseNormalizer.normalize(missingID, model: "gpt-5.6-luna")
+    let json = try JSONSerialization.jsonObject(with: normalized) as! [String: Any]
+    expectTrue((json["id"] as? String)?.hasPrefix("chatcmpl-binvia-") == true, "缺少 id 时补齐 completion id")
+    expectEqual(json["object"] as? String, "chat.completion", "缺少 object 时补齐 completion object")
+    expectTrue(json["created"] is Int, "缺少 created 时补齐时间戳")
+    expectEqual(json["model"] as? String, "grok-build-0.1", "保留上游已有 model")
+
+    let error = Data(#"{"error":{"message":"upstream failed"}}"#.utf8)
+    let errorOut = ChatCompletionResponseNormalizer.normalize(error, model: "gpt-5.6-luna")
+    expectEqual(errorOut, ChatFinishReasonSanitizer.sanitize(error), "error envelope 不伪造成 completion")
+
+    let noChoices = Data(#"{"model":"m","message":{"content":"hi"}}"#.utf8)
+    expectEqual(ChatCompletionResponseNormalizer.normalize(noChoices, model: "m"), noChoices, "缺少 choices 的响应保持原样")
+
+    let completeBody = Data(#"{"id":"c","object":"chat.completion","created":123,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#.utf8)
+    expectEqual(ChatCompletionResponseNormalizer.normalize(completeBody, model: "gpt-5.6-luna"), completeBody,
+                "字段齐全的响应字节原样透传")
+}
+
 // MARK: - 入口
 
 // 隔离本机真实配置文件，保证测试确定性（BINVIA_CONFIG 指向不存在的临时路径）
@@ -5048,6 +5118,7 @@ await run("GenericOpenAIProvider 集成（URLProtocol mock）", genericOpenAIPro
 await run("流式中途错误传播与超时封顶", streamingErrorAndTimeoutTests)
 await run("SSEStreamNormalizer 事件级归一化", sseStreamNormalizerTests)
 await run("ChatFinishReasonSanitizer 非流式 body 清洗", chatFinishReasonSanitizerTests)
+await run("ChatCompletionResponseNormalizer 非流式响应归一化", chatCompletionResponseNormalizerTests)
 await run("流式服务健壮性（readiness/idle/early EOF/状态码）", streamingRobustnessTests)
 await run("ProviderRegistry unregister", registryUnregisterTests)
 await run("Router 自定义 provider 前缀解析", routerCustomProviderTests)

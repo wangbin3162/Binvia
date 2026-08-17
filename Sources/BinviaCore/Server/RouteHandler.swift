@@ -270,6 +270,7 @@ public struct RouteHandler: Sendable {
             // 每个 chunk 原样透传，流结束时用累计的 usage 回填日志条目。
             let extractor = TokenUsageExtractor()
             let entryID = UUID()
+            let responseModel = forwarded.model
             let responseStream = AsyncThrowingStream<Data, Error> { continuation in
                 let task = Task.detached {
                     defer {
@@ -320,8 +321,10 @@ public struct RouteHandler: Sendable {
                                 continuation.yield(data)
                             }
                         } else if let buffer = nonStreamingBuffer {
-                            // 非流式：对完整 body 清洗空 finish_reason 后一次性输出。
-                            continuation.yield(ChatFinishReasonSanitizer.sanitize(buffer))
+                            // 非流式：对完整 body 做 OpenAI Chat 响应归一化后一次性输出。
+                            continuation.yield(
+                                ChatCompletionResponseNormalizer.normalize(buffer, model: responseModel)
+                            )
                         }
                     } catch {
                         // 客户端断开时不再写错误体，由 onTermination 记录 client_disconnected。

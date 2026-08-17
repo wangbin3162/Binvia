@@ -22,10 +22,8 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
     private var seq = 0
     private var started = false
     private var completedSent = false
-    private var awaitingTrailingUsage = false
     private var model: String?
     private var usage: [String: Any]?
-    private var sawFinishReason = false
 
     // message item 状态（按输出 index）
     private var msgItemAdded: [Int: Bool] = [:]
@@ -77,6 +75,10 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
         for event in parser.finish() {
             out.append(contentsOf: processEvent(event))
         }
+        // 某些上游会在首个文本 chunk 上提前携带 finish_reason，
+        // 但后续仍会继续发送文本 delta。必须先消费完整上游流，再关闭 output item；
+        // 否则 Codex 收到 output_text.done 后会忽略后续 delta，只显示首个片段。
+        out.append(contentsOf: closeOpenOutputItems())
         out.append(contentsOf: sendCompletedIfNeeded())
         return out
     }
@@ -119,10 +121,8 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
         }
 
         guard let choices = json["choices"] as? [[String: Any]], let choice = choices.first else {
-            // 尾随 usage-only chunk：finish_reason 已到但缺 usage 时现在补 completed。
-            if awaitingTrailingUsage {
-                return sendCompletedIfNeeded()
-            }
+            // 尾随 usage-only chunk 不能视为真正结束：部分上游会在它之后继续发送文本。
+            // 统一等到上游 EOF（finish()）再关闭 output item 并发送 response.completed。
             return []
         }
 
@@ -224,21 +224,10 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
             }
         }
 
-        if let reason = choice["finish_reason"] as? String, !reason.isEmpty {
-            sawFinishReason = true
-            for index in msgItemAdded.keys {
-                out.append(contentsOf: closeMessage(index: index))
-            }
-            out.append(contentsOf: closeReasoning())
-            for index in funcCallIDs.keys {
-                out.append(contentsOf: closeToolCall(index: index))
-            }
-            if usage != nil {
-                out.append(contentsOf: sendCompletedIfNeeded())
-            } else {
-                awaitingTrailingUsage = true
-            }
-        }
+        // 上游可能在 finish_reason 后继续发送文本 delta（尤其 CodeBuddy 会在首块
+        // 提前携带 finish_reason）。因此不在这里关闭 output item 或发送 completed：
+        // 过早发出 output_text.done 会让 Codex 丢弃后续内容。统一延迟到上游 EOF
+        // （finish()）再关闭并补发 response.completed，即使该 chunk 已带 usage 也不提前结束。
         return out
     }
 
@@ -581,6 +570,19 @@ public final class ResponsesStreamTranslator: @unchecked Sendable {
             item["namespace"] = identity.namespace
         }
         return item
+    }
+
+    /// 在完整上游流结束后关闭尚未完成的 Responses output item。
+    private func closeOpenOutputItems() -> [Data] {
+        var out: [Data] = []
+        for index in msgItemAdded.keys.sorted() {
+            out.append(contentsOf: closeMessage(index: index))
+        }
+        out.append(contentsOf: closeReasoning())
+        for index in funcCallIDs.keys.sorted() {
+            out.append(contentsOf: closeToolCall(index: index))
+        }
+        return out
     }
 
     private func sendCompletedIfNeeded() -> [Data] {
