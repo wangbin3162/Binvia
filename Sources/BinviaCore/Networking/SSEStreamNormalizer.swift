@@ -102,6 +102,9 @@ public final class SSEStreamNormalizer: @unchecked Sendable {
             // ICU 正则里裸 `""` 会被解析成空模式，需用 \Q…\E 按字面量匹配空串 id。
             && value.range(of: #""id"\s*:\s*\Q""\E"#, options: .regularExpression) == nil
         if let responseID, hasCompleteFields, value.contains("\"id\":\"\(responseID)\"") {
+            // 即使字段齐全，仍需清理 CodeBuddy 上游的干扰字段（function_call
+            // 旧版字段、tool_calls 增量中的空 name），避免破坏客户端聚合。
+            if let cleaned = Self.stripCodeBuddyNoise(from: event) { return cleaned }
             return event
         }
 
@@ -139,6 +142,9 @@ public final class SSEStreamNormalizer: @unchecked Sendable {
             didModify = true
         }
         // 解析后无需改动时原样返回，不做整体重序列化（避免键序/数字精度副作用）。
+        // 清理 CodeBuddy 上游干扰字段（function_call、空 tool name）。
+        if Self.stripNoiseFromJSON(&json) { didModify = true }
+
         guard didModify else { return event }
 
         guard let normalized = try? JSONSerialization.data(withJSONObject: json, options: []),
@@ -146,5 +152,70 @@ public final class SSEStreamNormalizer: @unchecked Sendable {
             return event
         }
         return SSEEvent.replacingDataValue(in: event, with: text) ?? event
+    }
+
+    /// 清理 CodeBuddy 上游流式 SSE 中的干扰字段：
+    ///
+    /// 1. `delta.function_call`（旧版 OpenAI 格式）：null 或空对象时移除。
+    ///    CodeBuddy 在每个 chunk 都带 `function_call:null`，末尾 chunk 还会带
+    ///    `function_call:{"name":"","arguments":""}`。部分客户端（如 Grok）聚合
+    ///    时误用 `function_call.name`（空串）覆盖 `tool_calls[0].function.name`，
+    ///    导致工具名丢失。
+    ///
+    /// 2. `tool_calls[].function.name: ""`（空串）：增量 chunk 的空 name 会覆盖
+    ///    首个 chunk 的正确 name。移除空 name 键，让客户端保留首 chunk 的值。
+    private static func stripCodeBuddyNoise(from event: String) -> String? {
+        guard let value = SSEEvent.dataValue(from: event),
+              value.contains("\"function_call\"") || value.contains("\"tool_calls\"") else { return nil }
+        guard let data = value.data(using: .utf8),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard stripNoiseFromJSON(&json) else { return nil }
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: []),
+              let outText = String(data: out, encoding: .utf8) else { return nil }
+        return SSEEvent.replacingDataValue(in: event, with: outText)
+    }
+
+    /// 从解析后的 JSON 中移除 CodeBuddy 干扰字段，返回是否有改动。
+    private static func stripNoiseFromJSON(_ json: inout [String: Any]) -> Bool {
+        guard let choices = json["choices"] as? [[String: Any]] else { return false }
+        var didStrip = false
+        var newChoices: [[String: Any]] = []
+        for var choice in choices {
+            guard var delta = choice["delta"] as? [String: Any] else {
+                newChoices.append(choice)
+                continue
+            }
+            // 1. 移除 null 或空对象的 function_call（旧版字段）
+            if let fc = delta["function_call"] as? [String: Any] {
+                let name = (fc["name"] as? String) ?? ""
+                let args = (fc["arguments"] as? String) ?? ""
+                if name.isEmpty && args.isEmpty {
+                    delta.removeValue(forKey: "function_call")
+                    didStrip = true
+                }
+            } else if delta["function_call"] is NSNull {
+                delta.removeValue(forKey: "function_call")
+                didStrip = true
+            }
+            // 2. 移除 tool_calls 增量中空的 function.name（空串会覆盖首 chunk 的正确 name）
+            if var calls = delta["tool_calls"] as? [[String: Any]], !calls.isEmpty {
+                var newCalls: [[String: Any]] = []
+                for var call in calls {
+                    if var fn = call["function"] as? [String: Any] {
+                        if let name = fn["name"] as? String, name.isEmpty {
+                            fn.removeValue(forKey: "name")
+                            call["function"] = fn
+                            didStrip = true
+                        }
+                    }
+                    newCalls.append(call)
+                }
+                if didStrip { delta["tool_calls"] = newCalls }
+            }
+            if didStrip { choice["delta"] = delta }
+            newChoices.append(choice)
+        }
+        if didStrip { json["choices"] = newChoices }
+        return didStrip
     }
 }
